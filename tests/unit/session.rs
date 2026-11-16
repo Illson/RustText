@@ -1,4 +1,5 @@
 use super::*;
+use crate::text_format::TextEncoding;
 
 fn capture(text: &str) -> Capture {
     Capture {
@@ -111,14 +112,14 @@ fn a_log_bookmark_round_trips_without_storing_file_contents() {
     let log_path = temporary.path().join("view-only.log");
     fs::write(&log_path, "first\nsecond\n").unwrap();
     let (observation, _) = observe(&log_path, None).unwrap();
-    let bookmark = LogBookmark {
-        identity: Some(observation.stamp.identity),
-        size: observation.stamp.len,
+    let mut bookmark = LogBookmark {
         offset: 6,
         hidden: 6,
         auto_refresh: false,
         follow_end: true,
+        ..LogBookmark::default()
     };
+    bookmark.record_observation(&observation);
     let mut state = capture("");
     state.state.tabs[0].file = Some(FileTarget::from_picker(log_path).unwrap());
     state.state.tabs[0].draft_revision = None;
@@ -134,6 +135,15 @@ fn a_log_bookmark_round_trips_without_storing_file_contents() {
         .map(|entry| entry.unwrap().file_name())
         .collect::<Vec<_>>();
     assert_eq!(record, ["manifest.json"]);
+    let manifest = fs::read(journal.record_path(1).join("manifest.json")).unwrap();
+    assert!(!String::from_utf8_lossy(&manifest).contains(r"first\nsecond\n"));
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+    let saved_fingerprint = &manifest["state"]["tabs"][0]["log"]["fingerprint"];
+    assert_eq!(
+        saved_fingerprint,
+        &serde_json::to_value(bookmark.fingerprint.as_ref()).unwrap()
+    );
+    assert_eq!(saved_fingerprint["digest"].as_array().unwrap().len(), 32);
     let (restored, warning) = journal.restore();
     assert!(warning.is_none());
     let restored = restored.unwrap();
@@ -173,6 +183,49 @@ fn closed_scratch_tabs_keep_unicode_text_across_restart() {
     );
     assert_eq!(recovered.state.closed[0].id, 2);
     assert_eq!(recovered.state.closed[0].selection, 4..4);
+}
+
+#[test]
+fn closed_log_tabs_keep_view_state_and_bookmark_across_restart() {
+    use crate::log_file::observe;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let log_path = temporary.path().join("closed.log");
+    fs::write(&log_path, "first\nsecond\nthird\n").unwrap();
+    let (observation, _) = observe(&log_path, None).unwrap();
+    let mut bookmark = LogBookmark {
+        offset: 12,
+        hidden: 6,
+        auto_refresh: false,
+        follow_end: true,
+        ..LogBookmark::default()
+    };
+    bookmark.record_observation(&observation);
+    let mut state = capture("");
+    state.state.closed.push(Tab {
+        id: 2,
+        file: Some(FileTarget::from_picker(log_path).unwrap()),
+        format: TextFormat::for_encoding(TextEncoding::Windows1251),
+        selection: 8..12,
+        reversed: true,
+        scroll: [14., 72.],
+        draft_revision: None,
+        log: Some(bookmark.clone()),
+    });
+    state.closed_drafts.push(None);
+    let mut journal = Journal::open(temporary.path().join("journal")).unwrap();
+
+    journal.commit(1, state).unwrap();
+    let (restored, warning) = journal.restore();
+    assert!(warning.is_none());
+    let restored = restored.unwrap();
+    let closed = &restored.state.closed[0];
+    assert_eq!(closed.id, 2);
+    assert!(closed.format.encoding == TextEncoding::Windows1251);
+    assert_eq!(closed.selection, 8..12);
+    assert!(closed.reversed);
+    assert_eq!(closed.scroll, [14., 72.]);
+    assert_eq!(closed.log.as_ref(), Some(&bookmark));
 }
 
 #[test]

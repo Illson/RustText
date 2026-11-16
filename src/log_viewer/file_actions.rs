@@ -198,6 +198,7 @@ impl LogViewer {
                         );
                         viewer.reset_index();
                         viewer.bookmark.identity = None;
+                        viewer.bookmark.fingerprint = None;
                         viewer.bookmark.hidden = 0;
                         viewer.bookmark.offset = 0;
                     }
