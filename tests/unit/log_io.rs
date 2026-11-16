@@ -202,6 +202,26 @@ fn page_before_returns_a_viewport_near_the_requested_offset() {
 }
 
 #[test]
+fn page_before_end_includes_an_unterminated_final_line() {
+    let (_file, mut reader) = reader_with(b"one\ntwo\nthree\nfour\nfive", None);
+    let size = reader.size();
+    let page = reader
+        .page_before(
+            size,
+            PageOptions {
+                max_rows: 2,
+                max_row_bytes: 64,
+            },
+            1024,
+        )
+        .unwrap();
+    assert_eq!(page.rows.len(), 2);
+    assert_eq!(page.rows[0].text, "four");
+    assert_eq!(page.rows[1].text, "five");
+    assert_eq!(page.next_offset, size);
+}
+
+#[test]
 fn page_before_large_unterminated_line_returns_fragments_near_eof() {
     let contents = vec![b'x'; 3 * 1024 * 1024 + 37];
     let (_file, mut reader) = reader_with(&contents, None);

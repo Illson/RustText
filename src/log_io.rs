@@ -226,6 +226,7 @@ impl LogReader {
             options
                 .max_row_bytes
                 .clamp(minimum_fragment_bytes(self.encoding), MAX_ROW_BYTES),
+            target == self.size,
             self.encoding,
         )?;
         self.render_page_until(start, target, options)
@@ -433,12 +434,16 @@ fn previous_page_start(
     row_count: usize,
     max_scan_bytes: u64,
     row_bytes: usize,
+    at_file_end: bool,
     encoding: TextEncoding,
 ) -> io::Result<u64> {
     if target == 0 {
         return Ok(0);
     }
     let unit = unit_size(encoding) as u64;
+    let ends_at_line_boundary = offset_ends_line(file, target, encoding)?;
+    let include_partial_end_row = at_file_end && !ends_at_line_boundary;
+    let required_breaks = row_count.saturating_add(usize::from(!include_partial_end_row));
     let mut scan_start = target.saturating_sub(max_scan_bytes);
     scan_start -= scan_start % unit;
     let viewport_bytes = (row_count.min(MAX_PAGE_ROWS) as u64)
@@ -449,7 +454,7 @@ fn previous_page_start(
     let mut cursor = target;
     let mut found = 0;
     let mut buffer = vec![0_u8; BLOCK_SIZE];
-    while cursor > scan_start && found <= row_count {
+    while cursor > scan_start && found < required_breaks {
         let block_start = cursor.saturating_sub(buffer.len() as u64).max(scan_start);
         let length = (cursor - block_start) as usize;
         file.seek(SeekFrom::Start(block_start))?;
@@ -462,7 +467,7 @@ fn previous_page_start(
             for index in (0..bytes.len()).rev() {
                 if bytes[index] == b'\n' {
                     found += 1;
-                    if found > row_count {
+                    if found >= required_breaks {
                         let candidate = block_start + index as u64 + 1;
                         return Ok(if target.saturating_sub(candidate) > viewport_bytes {
                             byte_fallback
@@ -489,7 +494,7 @@ fn previous_page_start(
                 };
                 if value == 10 {
                     found += 1;
-                    if found > row_count {
+                    if found >= required_breaks {
                         let candidate = block_start + index as u64 + 2;
                         return Ok(if target.saturating_sub(candidate) > viewport_bytes {
                             byte_fallback
@@ -507,6 +512,25 @@ fn previous_page_start(
         cursor = block_start;
     }
     Ok(byte_fallback)
+}
+
+fn offset_ends_line(file: &mut File, offset: u64, encoding: TextEncoding) -> io::Result<bool> {
+    let unit = unit_size(encoding);
+    if offset < unit as u64 {
+        return Ok(false);
+    }
+    let mut bytes = [0_u8; 2];
+    file.seek(SeekFrom::Start(offset - unit as u64))?;
+    if file.read(&mut bytes[..unit])? != unit {
+        return Ok(false);
+    }
+    Ok(if unit == 1 {
+        bytes[0] == b'\n' || bytes[0] == b'\r'
+    } else if matches!(encoding, TextEncoding::Utf16Be) {
+        matches!(u16::from_be_bytes(bytes), 10 | 13)
+    } else {
+        matches!(u16::from_le_bytes(bytes), 10 | 13)
+    })
 }
 
 fn detect_encoding(file: &mut File, size: u64) -> io::Result<TextEncoding> {

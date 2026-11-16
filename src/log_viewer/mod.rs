@@ -30,11 +30,12 @@ actions!(
 );
 
 pub(crate) fn bind_keys(cx: &mut App) {
+    let text_area = Some("LogViewer > (Input && mode == editor)");
     cx.bind_keys([
-        KeyBinding::new("ctrl-home", LogStart, Some("LogViewer")),
-        KeyBinding::new("ctrl-end", LogEnd, Some("LogViewer")),
-        KeyBinding::new("pageup", LogPrevious, Some("LogViewer")),
-        KeyBinding::new("pagedown", LogNext, Some("LogViewer")),
+        KeyBinding::new("ctrl-home", LogStart, text_area),
+        KeyBinding::new("ctrl-end", LogEnd, text_area),
+        KeyBinding::new("pageup", LogPrevious, text_area),
+        KeyBinding::new("pagedown", LogNext, text_area),
         KeyBinding::new("ctrl-f", LogFind, Some("LogViewer")),
     ]);
 }
