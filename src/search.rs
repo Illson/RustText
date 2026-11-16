@@ -24,6 +24,22 @@ pub struct Hit {
     pub range: Range<usize>,
 }
 
+pub const MAX_VISIBLE_MATCHES: usize = 100;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub hit: Hit,
+    pub line: usize,
+    pub excerpt: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchList {
+    pub matches: Vec<SearchMatch>,
+    pub total: usize,
+    pub complete: bool,
+}
+
 #[derive(Clone)]
 pub struct Source {
     pub tab: u64,
@@ -34,6 +50,7 @@ pub struct Source {
 pub enum Command {
     Next,
     Previous,
+    List,
     Replace,
     ReplaceAll,
 }
@@ -49,6 +66,7 @@ pub enum Outcome {
     Found {
         hit: Option<Hit>,
     },
+    Matches(MatchList),
     Incomplete {
         progress: NavigationProgress,
     },
@@ -143,6 +161,9 @@ pub fn run(
         return Ok(Outcome::Cancelled);
     }
     let regex = compile(query)?;
+    if command == Command::List {
+        return list_matches(&regex, sources, work);
+    }
     if command.replaces() {
         let source = sources.into_iter().find(|source| source.tab == origin.tab);
         return match source {
@@ -175,6 +196,124 @@ pub fn run(
         work,
         navigation.progress,
     )
+}
+
+fn list_matches(
+    regex: &Regex,
+    sources: Vec<Source>,
+    work: &WorkBudget<'_>,
+) -> Result<Outcome, String> {
+    let mut matches = Vec::with_capacity(MAX_VISIBLE_MATCHES);
+    let mut total: usize = 0;
+
+    for source in sources {
+        match work.check() {
+            Ok(true) => return Ok(Outcome::Cancelled),
+            Ok(false) => {}
+            Err(_) => {
+                return Ok(Outcome::Matches(MatchList {
+                    matches,
+                    total,
+                    complete: false,
+                }));
+            }
+        }
+        if !source_within_limit(&source) {
+            return Err("Поиск ограничен документами до 64 МиБ.".into());
+        }
+        let text = source.text.to_string();
+        let mut line_start = 0;
+        let mut line_cursor = 0;
+        let mut line_number = 1;
+        let mut line_end = 0;
+        let mut search = regex.find_iter(&text);
+
+        loop {
+            match work.check() {
+                Ok(true) => return Ok(Outcome::Cancelled),
+                Ok(false) => {}
+                Err(_) => {
+                    return Ok(Outcome::Matches(MatchList {
+                        matches,
+                        total,
+                        complete: false,
+                    }));
+                }
+            }
+            let matched = search.next();
+            match work.check() {
+                Ok(true) => return Ok(Outcome::Cancelled),
+                Ok(false) => {}
+                Err(_) => {
+                    return Ok(Outcome::Matches(MatchList {
+                        matches,
+                        total,
+                        complete: false,
+                    }));
+                }
+            }
+            let Some(matched) = matched else {
+                break;
+            };
+
+            total = total.saturating_add(1);
+            if matches.len() >= MAX_VISIBLE_MATCHES {
+                continue;
+            }
+
+            while let Some(newline) = text[line_cursor..matched.start()].find('\n') {
+                line_start = line_cursor + newline + 1;
+                line_cursor = line_start;
+                line_number += 1;
+            }
+            line_cursor = matched.start();
+
+            if matched.start() >= line_end || matched.end() > line_end {
+                line_end = text[matched.end()..]
+                    .find('\n')
+                    .map_or(text.len(), |offset| matched.end() + offset);
+            }
+            let line = &text[line_start..line_end];
+            let range = matched.start() - line_start..matched.end() - line_start;
+            matches.push(SearchMatch {
+                hit: Hit {
+                    tab: source.tab,
+                    range: matched.range(),
+                },
+                line: line_number,
+                excerpt: excerpt(line, range),
+            });
+        }
+    }
+
+    Ok(Outcome::Matches(MatchList {
+        matches,
+        total,
+        complete: true,
+    }))
+}
+
+fn excerpt(line: &str, range: Range<usize>) -> String {
+    const CONTEXT: usize = 36;
+
+    let mut start = range.start.saturating_sub(CONTEXT);
+    while !line.is_char_boundary(start) {
+        start += 1;
+    }
+
+    let match_end = if range.end.saturating_sub(range.start) > CONTEXT {
+        range.start.saturating_add(CONTEXT)
+    } else {
+        range.end.saturating_add(CONTEXT)
+    };
+    let mut end = match_end.min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if end < line.len() { "…" } else { "" };
+    format!("{prefix}{}{suffix}", &line[start..end])
 }
 
 fn compile(query: &Query) -> Result<Regex, String> {

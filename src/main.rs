@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod appearance;
 mod files;
 mod go_to_line;
 mod json_format;
@@ -50,6 +51,7 @@ fn main() {
         init(cx);
         set_locale("ru");
         Theme::change(ThemeMode::Dark, None, cx);
+        appearance::apply(cx);
         workspace::bind_keys(cx);
         log_viewer::bind_keys(cx);
 

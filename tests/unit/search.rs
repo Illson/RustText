@@ -590,3 +590,183 @@ fn zero_width_replacements_preserve_unicode_and_insert_once_per_line() {
     assert_eq!(text, "> ёж\n> кот");
     assert_eq!(count, 2);
 }
+
+#[test]
+fn match_listing_keeps_bounded_line_excerpts_and_unicode_byte_ranges() {
+    let query = Query {
+        text: "кот".into(),
+        ..Query::default()
+    };
+    let text = "ёж\nначало котик конец\nкот";
+    let cancelled = AtomicBool::new(false);
+    let work = WorkBudget::new(&cancelled, Instant::now() + MAX_SEARCH_TIME);
+    let Outcome::Matches(page) = run(
+        &query,
+        Command::List,
+        vec![Source {
+            tab: 7,
+            text: Rope::from(text),
+        }],
+        &Hit {
+            tab: 7,
+            range: 0..0,
+        },
+        "",
+        &work,
+        NavigationStart {
+            skip_current: false,
+            progress: None,
+        },
+    )
+    .unwrap() else {
+        panic!("expected a list of matches");
+    };
+
+    assert_eq!(page.total, 2);
+    assert!(page.complete);
+    assert_eq!(page.matches.len(), 2);
+    assert_eq!(page.matches[0].line, 2);
+    assert_eq!(page.matches[0].excerpt, "начало котик конец");
+    assert_eq!(page.matches[1].line, 3);
+    for result in &page.matches {
+        assert_eq!(result.hit.tab, 7);
+        assert_eq!(text.get(result.hit.range.clone()), Some("кот"));
+    }
+}
+
+#[test]
+fn match_listing_caps_visible_rows_but_counts_every_match() {
+    let query = Query {
+        text: "x".into(),
+        ..Query::default()
+    };
+    let text = "x ".repeat(MAX_VISIBLE_MATCHES + 17);
+    let cancelled = AtomicBool::new(false);
+    let work = WorkBudget::new(&cancelled, Instant::now() + MAX_SEARCH_TIME);
+    let Outcome::Matches(page) = run(
+        &query,
+        Command::List,
+        vec![Source {
+            tab: 3,
+            text: Rope::from(text),
+        }],
+        &Hit {
+            tab: 3,
+            range: 0..0,
+        },
+        "",
+        &work,
+        NavigationStart {
+            skip_current: false,
+            progress: None,
+        },
+    )
+    .unwrap() else {
+        panic!("expected a list of matches");
+    };
+
+    assert_eq!(page.matches.len(), MAX_VISIBLE_MATCHES);
+    assert_eq!(page.total, MAX_VISIBLE_MATCHES + 17);
+    assert!(page.complete);
+    assert_eq!(page.matches[0].hit.range, 0..1);
+    assert_eq!(page.matches[MAX_VISIBLE_MATCHES - 1].hit.range, 198..199);
+}
+
+#[test]
+fn match_listing_returns_a_partial_count_when_its_budget_expires() {
+    let query = Query {
+        text: "x".into(),
+        ..Query::default()
+    };
+    let cancelled = AtomicBool::new(false);
+    let work = WorkBudget::with_check_limit(&cancelled, 8);
+    let Outcome::Matches(page) = run(
+        &query,
+        Command::List,
+        vec![Source {
+            tab: 3,
+            text: Rope::from("x x x x x"),
+        }],
+        &Hit {
+            tab: 3,
+            range: 0..0,
+        },
+        "",
+        &work,
+        NavigationStart {
+            skip_current: false,
+            progress: None,
+        },
+    )
+    .unwrap() else {
+        panic!("expected partial list results after the budget expires");
+    };
+
+    assert!(!page.complete);
+    assert_eq!(page.total, 3);
+    assert_eq!(page.matches.len(), 3);
+}
+
+#[test]
+fn match_listing_stops_when_cancelled() {
+    let query = Query {
+        text: "x".into(),
+        ..Query::default()
+    };
+    let cancelled = AtomicBool::new(true);
+    let work = WorkBudget::new(&cancelled, Instant::now() + MAX_SEARCH_TIME);
+    let outcome = run(
+        &query,
+        Command::List,
+        vec![Source {
+            tab: 3,
+            text: Rope::from("x x x"),
+        }],
+        &Hit {
+            tab: 3,
+            range: 0..0,
+        },
+        "",
+        &work,
+        NavigationStart {
+            skip_current: false,
+            progress: None,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, Outcome::Cancelled));
+}
+
+#[test]
+fn match_listing_rejects_documents_over_the_existing_search_limit() {
+    let query = Query {
+        text: "x".into(),
+        ..Query::default()
+    };
+    let cancelled = AtomicBool::new(false);
+    let source_text = "x".repeat(MAX_SEARCH_BYTES + 1);
+    let source = Source {
+        tab: 3,
+        text: Rope::from(source_text),
+    };
+    let work = WorkBudget::new(&cancelled, Instant::now() + MAX_SEARCH_TIME);
+    let error = run(
+        &query,
+        Command::List,
+        vec![source],
+        &Hit {
+            tab: 3,
+            range: 0..0,
+        },
+        "",
+        &work,
+        NavigationStart {
+            skip_current: false,
+            progress: None,
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("64 МиБ"));
+}

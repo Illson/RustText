@@ -2,6 +2,7 @@ mod disk_status;
 mod file_actions;
 mod json_action;
 mod launches;
+mod menus;
 mod search_panel;
 mod session_runtime;
 mod updates;
@@ -9,8 +10,12 @@ mod view;
 
 pub(crate) use view::bind_keys;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
+use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::input::{EditorState, InputEvent, Rope};
 use gpui_kit::*;
 
@@ -144,12 +149,20 @@ impl Workspace {
             .map_or_else(|| "text".to_owned(), |file| syntax_for(&file.path));
 
         let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
+            let mut state = EditorState::new(window, cx)
                 .line_number(true)
                 .searchable(false)
                 .soft_wrap(self.wrap)
                 .language(language)
-                .default_value(text)
+                .default_value(text);
+            state.set_scrollbar_renderer(Some(Rc::new(|scroll, _, _| {
+                Scrollbar::new(&scroll)
+                    .axis(scroll.axis())
+                    .mode(ScrollbarMode::Always)
+                    .styles(|_| crate::appearance::scrollbar_styles())
+                    .into_any_element()
+            })));
+            state
         });
         let saved_text = editor.read(cx).text().clone();
         let change = cx.subscribe(&editor, move |this, editor, event, cx| {
