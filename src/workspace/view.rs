@@ -3,6 +3,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::Editor,
     label::Label,
+    menu::{ContextMenuExt, PopupMenuItem},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -18,6 +19,7 @@ actions!(
         OpenLog,
         OpenWindows1251,
         OpenLogWindows1251,
+        RegisterFileAssociations,
         Save,
         SaveAs,
         CloseTab,
@@ -140,7 +142,7 @@ impl Workspace {
                             || doc.name.clone(),
                             |status| format!("{} ({status})", doc.name).into(),
                         );
-                        div()
+                        let tab = div()
                             .id(("tab", id))
                             .flex()
                             .flex_shrink_0()
@@ -187,9 +189,15 @@ impl Workspace {
                                         || "Без имени".to_owned(),
                                         |file| display_path(&file.path),
                                     ))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.select(id, window, cx)
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, event: &ClickEvent, window, cx| {
+                                            if event.click_count() == 2 {
+                                                this.close_tab(id, window, cx);
+                                            } else {
+                                                this.select(id, window, cx);
+                                            }
+                                        },
+                                    )),
                             )
                             .child(
                                 Button::new(("close-tab", id))
@@ -200,7 +208,60 @@ impl Workspace {
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.close_tab(id, window, cx)
                                     })),
+                            );
+                        let Some(path) = doc.file.as_ref().map(|file| file.path.clone()) else {
+                            return tab.into_any_element();
+                        };
+                        let workspace = cx.entity().downgrade();
+                        tab.context_menu(move |menu, _, _| {
+                            if !path.is_file() {
+                                return menu;
+                            }
+                            let reveal_path = path.clone();
+                            let copy_path = display_path(&path);
+                            let workspace = workspace.clone();
+                            menu.item(PopupMenuItem::new("Показать в Проводнике").on_click(
+                                move |_, window, cx| {
+                                    let reveal_path = reveal_path.clone();
+                                    let task = cx.background_spawn(async move {
+                                        super::reveal::select_in_explorer(&reveal_path)
+                                    });
+                                    window
+                                        .spawn(cx, async move |cx| {
+                                            if let Err(error) = task.await {
+                                                let detail = error.to_string();
+                                                let _ = cx.update(|window, cx| {
+                                                    drop(window.prompt(
+                                                        PromptLevel::Critical,
+                                                        "Не удалось показать файл в Проводнике.",
+                                                        Some(&detail),
+                                                        &[PromptButton::ok("Закрыть")],
+                                                        cx,
+                                                    ));
+                                                });
+                                            }
+                                        })
+                                        .detach();
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Копировать путь").on_click(
+                                move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copy_path.clone(),
+                                    ));
+                                },
+                            ))
+                            .separator()
+                            .item(
+                                PopupMenuItem::new("Закрыть вкладку").on_click(
+                                    move |_, window, cx| {
+                                        let _ = workspace
+                                            .update(cx, |this, cx| this.close_tab(id, window, cx));
+                                    },
+                                ),
                             )
+                        })
+                        .into_any_element()
                     }))
                     .child(div().id("new-tab-space").flex_1().h_full().on_mouse_down(
                         MouseButton::Left,
@@ -290,11 +351,71 @@ impl Workspace {
             .child(Label::new(doc.format.encoding.label()))
             .child(Label::new(doc.format.line_endings_label()))
     }
+
+    fn jump_to_json_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(super::json_validation::Status::Invalid(problem)) =
+            self.active_document().json_status.as_ref()
+        else {
+            return;
+        };
+        let position = problem.range.start;
+        let editor = self.active_document().editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(position, window, cx)
+        });
+    }
+
+    fn json_validation_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = self.active_document().json_status.clone()?;
+        let (message, invalid) = match status {
+            super::json_validation::Status::Invalid(problem) => (
+                format!(
+                    "Некорректный JSON · строка {}, столбец {} · {}",
+                    problem.line, problem.column, problem.message
+                ),
+                true,
+            ),
+            super::json_validation::Status::TooLarge => (
+                "Проверка JSON не выполнена. Размер превышает 64 МиБ.".to_owned(),
+                false,
+            ),
+            super::json_validation::Status::Checking | super::json_validation::Status::Valid => {
+                return None;
+            }
+        };
+        Some(
+            div()
+                .w_full()
+                .min_h(px(46.))
+                .flex()
+                .items_center()
+                .gap_3()
+                .px_4()
+                .bg(rgb(if invalid { 0x6b1e24 } else { 0x5e431d }))
+                .text_color(rgb(0xffe5e5))
+                .border_b_1()
+                .border_color(rgb(appearance::ERROR))
+                .child(Label::new(message).text_sm())
+                .when(invalid, |element| {
+                    element.child(
+                        Button::new("json-error-location")
+                            .small()
+                            .outline()
+                            .label("Перейти к ошибке")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.jump_to_json_error(window, cx)
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.active_document();
+        let json_banner = self.json_validation_banner(cx);
         let body = if let Some(log) = &doc.log {
             log.clone().into_any_element()
         } else {
@@ -307,7 +428,7 @@ impl Render for Workspace {
                 .text_size(px(self.font_size))
                 .into_any_element()
         };
-        div()
+        let workspace = div()
             .id("rusttext")
             .key_context("RustText")
             .size_full()
@@ -328,6 +449,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenLogWindows1251, window, cx| {
                 this.open_picker(OpenMode::LOG_1251, window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &RegisterFileAssociations, window, cx| {
+                    this.register_file_associations(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(false, window, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save(true, window, cx)))
             .on_action(
@@ -368,8 +494,8 @@ impl Render for Workspace {
                     .border_color(rgb(appearance::BORDER))
                     .child(self.tabs(cx)),
             )
-            .children(self.update_panel(cx))
             .children(doc.log.is_none().then(|| self.document_header(doc)))
+            .children(json_banner)
             .child(
                 div()
                     .flex_1()
@@ -380,5 +506,11 @@ impl Render for Workspace {
             )
             .children(self.search_panel(window, cx))
             .children(doc.log.is_none().then(|| self.status(doc, cx)))
+            .children(self.update_panel(cx));
+        div()
+            .relative()
+            .size_full()
+            .child(workspace)
+            .children(self.template_generator_panel(cx))
     }
 }

@@ -13,6 +13,15 @@ use crate::appearance;
 
 impl Workspace {
     pub(super) fn menubar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        static LOGO: std::sync::OnceLock<std::sync::Arc<Image>> = std::sync::OnceLock::new();
+        let logo = LOGO
+            .get_or_init(|| {
+                std::sync::Arc::new(Image::from_bytes(
+                    ImageFormat::Png,
+                    include_bytes!("../../assets/rusttext.png").to_vec(),
+                ))
+            })
+            .clone();
         let searching = self.search.is_some()
             || self
                 .active_document()
@@ -31,8 +40,12 @@ impl Workspace {
             .border_color(rgb(appearance::BORDER))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .pr_3()
                     .text_color(rgb(appearance::ACCENT))
+                    .child(img(logo).w(px(22.)).h(px(22.)).flex_shrink_0())
                     .child(Label::new("RustText")),
             )
             .child(self.file_menu_button(cx))
@@ -49,7 +62,6 @@ impl Workspace {
                     ),
             )
             .child(div().flex_1())
-            .child(self.update_button(cx))
     }
 
     fn menu_focus(&self, cx: &App) -> FocusHandle {
@@ -188,6 +200,12 @@ impl Workspace {
                             .action(Box::new(ReopenTab))
                             .disabled(!can_reopen),
                     )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Настроить открытие файлов в Windows…")
+                            .action(Box::new(RegisterFileAssociations))
+                            .disabled(busy || !cfg!(windows)),
+                    )
             })
     }
 
@@ -200,16 +218,28 @@ impl Workspace {
             .as_ref()
             .map_or(self.wrap, |log| log.read(cx).wraps_lines());
         let focus = self.menu_focus(cx);
+        let generator_workspace = cx.entity().downgrade();
+        let can_generate = self.busy.is_none() && !self.applying_update();
         Button::new("tools-menu")
             .small()
             .ghost()
             .label("Инструменты")
             .dropdown_menu(move |menu, window, cx| {
+                let generator_workspace = generator_workspace.clone();
                 let menu = menu
                     .action_context(focus.clone())
                     .min_w(px(280.))
                     .scrollable(true)
                     .label("Текст")
+                    .item(
+                        PopupMenuItem::new("Генератор строк…")
+                            .disabled(!can_generate)
+                            .on_click(move |_, window, cx| {
+                                let _ = generator_workspace.update(cx, |this, cx| {
+                                    this.open_template_generator(window, cx)
+                                });
+                            }),
+                    )
                     .item(
                         PopupMenuItem::new("Форматировать JSON")
                             .action(Box::new(FormatJson))

@@ -1,7 +1,6 @@
 use std::{cell::Cell, rc::Rc, sync::atomic::Ordering};
 
 use gpui_kit::{
-    base::{Scrollbar, ScrollbarHandle, ScrollbarMode, input::EditorScrollbarContext},
     component::{
         ActiveTheme, Disableable, Selectable, Sizable, WindowExt,
         button::{Button, ButtonVariants},
@@ -307,54 +306,6 @@ impl LogViewer {
         self.search.is_some()
     }
 
-    pub(super) fn scrollbar(
-        scroll: EditorScrollbarContext,
-        viewer: WeakEntity<Self>,
-        scroll_bottom: &Cell<Pixels>,
-    ) -> impl IntoElement {
-        let bottom =
-            (scroll.viewport_bounds().size.height - scroll.content_size().height).min(px(0.));
-        scroll_bottom.set(bottom);
-        div()
-            .size_full()
-            .relative()
-            .child(
-                Scrollbar::new(&scroll)
-                    .axis(scroll.axis())
-                    .mode(ScrollbarMode::Always)
-                    .styles(|_| crate::appearance::scrollbar_styles()),
-            )
-            .child(
-                canvas(
-                    |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-                    move |_, hitbox, window, _| {
-                        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
-                            if !phase.capture() || !hitbox.should_handle_scroll(window) {
-                                return;
-                            }
-                            let delta = event.delta.pixel_delta(px(1.));
-                            if delta.y == px(0.) || delta.x.abs() > delta.y.abs() {
-                                return;
-                            }
-                            let forward = delta.y < px(0.);
-                            let offset = scroll.offset().y;
-                            // The editor consumes wheel events even at its scroll limits.
-                            let edge = if forward { bottom } else { px(0.) };
-                            if (offset - edge).abs() <= px(0.5) {
-                                let _ = viewer.update(cx, |viewer, cx| {
-                                    if viewer.turn_page(forward, window, cx) {
-                                        cx.stop_propagation();
-                                    }
-                                });
-                            }
-                        });
-                    },
-                )
-                .absolute()
-                .size_full(),
-            )
-    }
-
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let enabled = self.available();
         let at_end = self.page.as_ref().is_none_or(|page| page.eof);
@@ -424,6 +375,59 @@ impl LogViewer {
             )
     }
 
+    fn line_number_gutter(&self) -> impl IntoElement {
+        let viewer = self.viewer.clone();
+        let rows = self.line_rows.clone();
+        let digits = rows.last().map_or(1, |(_, line)| line.ilog10() + 1);
+        let width = px((digits.max(4) as f32) * 9. + 14.);
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, cx| {
+                let editor = viewer.read(cx);
+                let line_height = editor.line_height().unwrap_or(px(23.));
+                let positions: Vec<_> = rows
+                    .into_iter()
+                    .filter_map(|(offset, line)| {
+                        let y = editor.range_to_bounds(&(offset..offset))?.origin.y;
+                        (y + line_height > bounds.top() && y < bounds.bottom()).then_some((y, line))
+                    })
+                    .collect();
+                let mut font = window.text_style().font();
+                font.family = "Consolas".into();
+                for (y, number) in positions {
+                    let label = number.to_string();
+                    let runs = [TextRun {
+                        len: label.len(),
+                        font: font.clone(),
+                        color: rgb(crate::appearance::MUTED).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }];
+                    let shaped =
+                        window
+                            .text_system()
+                            .shape_line(label.into(), px(15.), &runs, None);
+                    let _ = shaped.paint(
+                        point(bounds.right() - px(8.) - shaped.width, y),
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+            },
+        )
+        .flex_shrink_0()
+        .w(width)
+        .h_full()
+        .overflow_hidden()
+        .bg(rgb(crate::appearance::SURFACE))
+        .border_r_1()
+        .border_color(rgb(crate::appearance::BORDER))
+    }
+
     fn status(&self) -> impl IntoElement {
         let message = if let Some(progress) = &self.trimming {
             let done = progress.done.load(Ordering::Relaxed);
@@ -435,7 +439,7 @@ impl LogViewer {
             .into()
         } else if let Some(progress) = &self.preparation {
             format!(
-                "Поиск границы… {}%",
+                "Подготовка… {}%",
                 progress_percent(
                     progress.done.load(Ordering::Relaxed),
                     progress.total.load(Ordering::Relaxed)
@@ -443,7 +447,7 @@ impl LogViewer {
             )
             .into()
         } else if self.preparing_trim {
-            "Проверка границы…".into()
+            "Подготовка…".into()
         } else if self.reading {
             "Чтение лога…".into()
         } else if let Some(notice) = &self.notice {
@@ -457,18 +461,33 @@ impl LogViewer {
                 )
             )
             .into()
-        } else if self.index.scanned_to() > 0 {
-            format!("Строк в индексе: {}", self.index.line_count()).into()
+        } else if self.index.scanned_to() > 0
+            && self.index.scanned_to()
+                < crate::log_io::align_offset(self.bookmark.size, self.encoding)
+        {
+            format!(
+                "Проиндексировано строк: {}",
+                self.index.physical_line_count(self.encoding.bom_len())
+            )
+            .into()
         } else {
             "Просмотр лога".into()
         };
-        let page_end = self.page.as_ref().map_or(0, |page| page.next_offset);
-        let mut position = format!(
-            "Байты {}–{} из {}",
-            self.bookmark.offset, page_end, self.bookmark.size
-        );
+        let size = crate::log_io::align_offset(self.bookmark.size, self.encoding);
+        let total = (self.page.is_some() && self.index.scanned_to() >= size)
+            .then(|| self.index.physical_line_count(self.encoding.bom_len()));
+        let mut position = match (self.line_range, total) {
+            (Some((start, end)), Some(total)) => format!("Строки {start}–{end} из {total}"),
+            (Some((start, end)), None) => format!("Строки {start}–{end}"),
+            (None, Some(0)) => "Строк: 0".to_owned(),
+            (None, _) => "Строки —".to_owned(),
+        };
         if self.bookmark.hidden > 0 {
-            position.push_str(&format!(" · скрыто {}", self.bookmark.hidden));
+            if let Some(hidden_lines) = self.hidden_line_count {
+                position.push_str(&format!(" · скрыто {hidden_lines} строк"));
+            } else {
+                position.push_str(" · начало скрыто");
+            }
         }
         div()
             .flex()
@@ -516,15 +535,24 @@ impl Render for LogViewer {
             .on_action(cx.listener(|this, _: &LogFind, window, cx| this.open_search(window, cx)))
             .child(self.context_bar(cx))
             .child(
-                div().flex_1().min_h_0().w_full().overflow_hidden().child(
-                    Editor::new(&self.viewer)
-                        .readonly(true)
-                        .bordered(false)
-                        .h_full()
-                        .w_full()
-                        .font_family("Consolas")
-                        .text_size(px(15.)),
-                ),
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(self.line_number_gutter())
+                    .child(
+                        div().flex_1().min_w_0().h_full().child(
+                            Editor::new(&self.viewer)
+                                .readonly(true)
+                                .bordered(false)
+                                .h_full()
+                                .w_full()
+                                .font_family("Consolas")
+                                .text_size(px(15.)),
+                        ),
+                    ),
             )
             .children(self.search_panel(window, cx))
             .child(self.toolbar(cx))

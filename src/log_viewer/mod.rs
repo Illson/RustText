@@ -1,11 +1,13 @@
 mod controls;
 mod file_actions;
 mod find;
+mod global_scrollbar;
 mod index;
 mod viewport;
 
 use std::{
     cell::Cell,
+    ops::Range,
     path::PathBuf,
     rc::Rc,
     sync::Arc,
@@ -69,6 +71,9 @@ pub(crate) struct LogViewer {
     bookmark: LogBookmark,
     observation: Option<Observation>,
     page: Option<Page>,
+    line_range: Option<(u64, u64)>,
+    line_rows: Vec<(usize, u64)>,
+    hidden_line_count: Option<u64>,
     index: LineIndex,
     index_paused: bool,
     indexing: Option<Progress>,
@@ -78,6 +83,8 @@ pub(crate) struct LogViewer {
     percentage: Entity<InputState>,
     trim_percentage: Entity<InputState>,
     search: Option<LogSearch>,
+    search_match: Option<(u64, Option<Range<usize>>)>,
+    search_highlight: Option<crate::search_highlight::SearchHighlight>,
     notice: Option<SharedString>,
     reading: bool,
     generation: u64,
@@ -99,6 +106,7 @@ impl LogViewer {
         let log_viewer = cx.entity().downgrade();
         let scroll_bottom = Rc::new(Cell::new(px(0.)));
         let editor_scroll_bottom = scroll_bottom.clone();
+        let editor_scrollbar_drag = Rc::new(global_scrollbar::DragState::default());
         let viewer = cx.new(|cx| {
             let mut editor = EditorState::new(window, cx)
                 .language("text")
@@ -106,9 +114,16 @@ impl LogViewer {
                 .searchable(false)
                 .scroll_beyond_last_line(Some(0))
                 .soft_wrap(true);
-            editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, _, _| {
-                Self::scrollbar(scroll, log_viewer.clone(), &editor_scroll_bottom)
-                    .into_any_element()
+            editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, window, cx| {
+                global_scrollbar::render(
+                    scroll,
+                    log_viewer.clone(),
+                    &editor_scroll_bottom,
+                    editor_scrollbar_drag.clone(),
+                    window,
+                    cx,
+                )
+                .into_any_element()
             })));
             editor
         });
@@ -127,6 +142,9 @@ impl LogViewer {
             bookmark,
             observation: None,
             page: None,
+            line_range: None,
+            line_rows: Vec::new(),
+            hidden_line_count: None,
             index: LineIndex::default(),
             index_paused: false,
             indexing: None,
@@ -136,6 +154,8 @@ impl LogViewer {
             percentage,
             trim_percentage,
             search: None,
+            search_match: None,
+            search_highlight: None,
             notice: None,
             reading: false,
             generation: 0,
@@ -166,6 +186,38 @@ impl LogViewer {
         self.viewer
             .update(cx, |editor, cx| editor.set_soft_wrap(self.wrap, window, cx));
         cx.notify();
+    }
+
+    pub(super) fn clear_search_highlight(&mut self, cx: &mut Context<Self>) {
+        self.search_match = None;
+        if let Some(highlight) = self.search_highlight.take() {
+            highlight.clear(cx);
+        }
+    }
+
+    pub(super) fn highlight_log_match(
+        &mut self,
+        offset: u64,
+        match_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.available() {
+            return;
+        }
+        self.clear_search_highlight(cx);
+        self.search_match = Some((offset, match_range));
+        self.notice = None;
+        self.load_page(Destination::Match(offset), window, cx);
+    }
+
+    pub(super) fn highlight_log_record(
+        &mut self,
+        offset: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.highlight_log_match(offset, None, window, cx);
     }
 
     pub(crate) fn writing_file(&self) -> bool {

@@ -5,7 +5,7 @@ use gpui_kit::*;
 use super::{LogViewer, Progress};
 use crate::{
     log_file::FileIdentity,
-    log_io::{LineIndex, LogError, LogReader},
+    log_io::{LineIndex, LogError, LogReader, align_offset},
 };
 
 const INDEX_BATCH: u64 = 16 * 1024 * 1024;
@@ -15,15 +15,15 @@ impl LogViewer {
         let Some(observation) = &self.observation else {
             return;
         };
+        let size = align_offset(observation.stamp.len, self.encoding);
         if self.index_paused
             || self.indexing.is_some()
             || self.preparing_trim
             || self.writing_file()
-            || self.index.scanned_to() >= observation.stamp.len
+            || self.index.scanned_to() >= size
         {
             return;
         }
-        let size = observation.stamp.len;
         let identity = observation.stamp.identity;
         let path = self.path.clone();
         let encoding = self.encoding_override;
@@ -31,6 +31,7 @@ impl LogViewer {
         let done = progress.done.clone();
         let cancel = progress.cancel.clone();
         let index = self.index.clone();
+        let scanned_before = index.scanned_to();
         done.store(index.scanned_to(), Ordering::Relaxed);
         self.indexing = Some(progress);
         let job = cx.background_spawn({
@@ -43,11 +44,9 @@ impl LogViewer {
                     return Err(LogError::Cancelled);
                 }
                 reader.set_line_index(index);
-                while reader.line_index().scanned_to() < size {
+                if reader.line_index().scanned_to() < size {
                     let remaining = size - reader.line_index().scanned_to();
-                    if reader.advance_index(remaining.min(INDEX_BATCH), &cancel)? == 0 {
-                        break;
-                    }
+                    reader.advance_index(remaining.min(INDEX_BATCH), &cancel)?;
                     done.store(reader.line_index().scanned_to(), Ordering::Relaxed);
                 }
                 Ok(reader.line_index().clone())
@@ -66,9 +65,27 @@ impl LogViewer {
                 viewer.indexing = None;
                 match result {
                     Ok(index) => {
+                        let progressed = index.scanned_to() > scanned_before;
                         viewer.index = index;
-                        if viewer.index.scanned_to() >= size {
+                        let page_start = viewer
+                            .page
+                            .as_ref()
+                            .and_then(|page| page.rows.first().map(|row| row.start));
+                        let page_is_indexed = viewer.line_range.is_none()
+                            && page_start.is_some_and(|start| start <= viewer.index.scanned_to());
+                        let hidden_boundary_is_indexed = viewer.hidden_line_count.is_none()
+                            && align_offset(viewer.bookmark.hidden, viewer.encoding)
+                                <= viewer.index.scanned_to();
+                        if page_is_indexed || hidden_boundary_is_indexed {
+                            viewer.refresh_line_numbers(window, cx);
+                        }
+                        if progressed {
                             viewer.start_index(window, cx);
+                        } else if !progressed && viewer.index.scanned_to() < size {
+                            viewer.index_paused = true;
+                            viewer.notice = Some(
+                                "Индексирование остановлено. Изменилось содержимое лога.".into(),
+                            );
                         }
                     }
                     Err(LogError::Cancelled) => {}

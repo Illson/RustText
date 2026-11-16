@@ -18,6 +18,7 @@ use crate::text_format::TextEncoding;
 
 mod index;
 mod search;
+mod time;
 
 pub use index::{LineIndex, SparseLine};
 pub use search::{LogSearchQuery, SearchHit, SearchLimits, SearchPage, search_page};
@@ -32,7 +33,8 @@ const MAX_PAGE_BYTES: usize = 64 * 1024 * 1024;
 pub enum LogError {
     Io(io::Error),
     InvalidRegex(regex::Error),
-    LineLimit { offset: u64, limit: usize },
+    InvalidTimestamp,
+    LineLimit { line_index: u64, limit: usize },
     Cancelled,
 }
 
@@ -41,10 +43,12 @@ impl std::fmt::Display for LogError {
         match self {
             Self::Io(error) => write!(f, "Ошибка чтения лога: {error}"),
             Self::InvalidRegex(error) => write!(f, "Ошибка регулярного выражения: {error}"),
-            Self::LineLimit { offset, limit } => write!(
-                f,
-                "Строка на смещении {offset} превышает лимит {limit} байт"
+            Self::InvalidTimestamp => f.write_str(
+                "Введите время ЧЧ:ММ:СС[.доли] или дату и время ГГГГ-ММ-ДД ЧЧ:ММ:СС[.доли], например 01:30:20.0850 или 2026-11-17 01:30:20.0850",
             ),
+            Self::LineLimit { limit, .. } => {
+                write!(f, "Строка превышает лимит поиска в {limit} байт")
+            }
             Self::Cancelled => f.write_str("Поиск отменён"),
         }
     }
@@ -187,6 +191,14 @@ impl LogReader {
         keep_tail: bool,
     ) -> Result<Page, LogError> {
         let limit = limit.min(self.size);
+        if align_offset(limit, self.encoding) <= self.encoding.bom_len() {
+            return Ok(Page {
+                rows: Vec::new(),
+                next_offset: limit,
+                file_size: self.size,
+                eof: limit >= self.size,
+            });
+        }
         let mut cursor = align_offset(offset.min(limit), self.encoding);
         let row_bytes = options
             .max_row_bytes
@@ -265,12 +277,10 @@ impl LogReader {
     /// sparse index is empty/initial, scans forward from the closest sample.
     pub fn line_start_at(&mut self, offset: u64) -> Result<u64, LogError> {
         let target = align_offset(offset.min(self.size), self.encoding);
-        let sample = self
-            .index
-            .entries()
-            .iter()
-            .rev()
-            .find(|entry| entry.offset <= target)
+        let entries = self.index.entries();
+        let sample = entries
+            .get(..entries.partition_point(|entry| entry.offset <= target))
+            .and_then(|entries| entries.last())
             .copied()
             .unwrap_or(SparseLine { line: 1, offset: 0 });
         let mut cursor = sample.offset;
@@ -292,6 +302,46 @@ impl LogReader {
             cursor += count as u64;
         }
         Ok(result)
+    }
+
+    /// Returns the 1-based physical line containing `offset` when the sparse
+    /// index has already scanned through it. The remaining scan starts at the
+    /// nearest sample, keeping viewport queries bounded as indexing progresses.
+    pub fn line_number_at(&mut self, offset: u64) -> Result<Option<u64>, LogError> {
+        let target = align_offset(offset.min(self.size), self.encoding);
+        if target > self.index.scanned_to() {
+            return Ok(None);
+        }
+        if target >= self.index.last_line_start() {
+            return Ok(Some(self.index.line_count()));
+        }
+
+        let entries = self.index.entries();
+        let sample = entries
+            .get(..entries.partition_point(|entry| entry.offset <= target))
+            .and_then(|entries| entries.last())
+            .copied()
+            .unwrap_or(SparseLine { line: 1, offset: 0 });
+        let mut cursor = sample.offset;
+        let mut line = sample.line;
+        let mut buffer = vec![0_u8; BLOCK_SIZE + unit_size(self.encoding) * 2];
+        while cursor < target {
+            let core_length = (target - cursor).min(BLOCK_SIZE as u64) as usize;
+            let core_end = cursor + core_length as u64;
+            let lookahead = (self.size - cursor - core_length as u64)
+                .min((unit_size(self.encoding) * 2) as u64) as usize;
+            self.file.seek(SeekFrom::Start(cursor))?;
+            let count = core_length + lookahead;
+            self.file.read_exact(&mut buffer[..count])?;
+            for delimiter_end in delimiter_ends(&buffer[..count], self.encoding, cursor) {
+                let after = cursor + delimiter_end as u64;
+                if after > cursor && after <= core_end && after <= target {
+                    line += 1;
+                }
+            }
+            cursor += core_length as u64;
+        }
+        Ok(Some(line))
     }
 
     /// Scrolls to the containing physical line, useful for a search result.
@@ -612,7 +662,7 @@ pub(super) fn minimum_fragment_bytes(encoding: TextEncoding) -> usize {
     }
 }
 
-pub(super) fn align_offset(offset: u64, encoding: TextEncoding) -> u64 {
+pub(crate) fn align_offset(offset: u64, encoding: TextEncoding) -> u64 {
     if unit_size(encoding) == 2 {
         offset - offset % 2
     } else {

@@ -12,17 +12,22 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::text_format::TextEncoding;
+use crate::{
+    log_io::{LineIndex, LogError, align_offset},
+    text_format::TextEncoding,
+};
 
 const BUFFER_SIZE: usize = 1024 * 1024;
+const LINE_COUNT_BATCH_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A validated trim position, in bytes from the start of the original file.
 #[derive(Clone)]
 pub struct TrimPlan {
     pub percent: u8,
     pub original_size: u64,
-    /// Number of bytes the viewer hides and a physical trim removes.
+    /// Number of bytes a physical trim removes.
     pub removable_bytes: u64,
+    pub removed_lines: u64,
     /// Byte offset of the first retained complete line in the original file.
     pub boundary_offset: u64,
     encoding: TextEncoding,
@@ -39,8 +44,7 @@ struct FileIdentity {
 #[derive(Clone, Debug)]
 pub struct TrimOutcome {
     pub backup_path: PathBuf,
-    pub removed_bytes: u64,
-    pub remaining_bytes: u64,
+    pub removed_lines: u64,
 }
 
 trait TrimIoHooks {
@@ -63,8 +67,8 @@ impl TrimIoHooks for NoopTrimIoHooks {}
 
 /// Prepare a trim against an exclusively opened file. The returned boundary is
 /// tied to the observed file identity, size, and modification time and is
-/// revalidated by `trim` immediately before mutation. Progress reports bytes
-/// scanned from the percentage target toward EOF; cancellation is checked
+/// revalidated by `trim` immediately before mutation. Progress covers finding the boundary and
+/// then counting the prefix lines on the same handle. Cancellation is checked
 /// between read blocks and leaves the source untouched.
 pub fn prepare_with_progress<F>(
     path: &Path,
@@ -87,8 +91,19 @@ where
         cancelled,
         &mut progress,
     )?;
-    let identity = file_identity(&file)?;
-    Ok(make_plan(percent, metadata, boundary, encoding, identity))
+    let bom = encoding.bom_len().min(metadata.len());
+    let removed_lines =
+        count_prefix_lines(&mut file, boundary, bom, encoding, cancelled, &mut progress)?;
+    Ok(TrimPlan {
+        percent,
+        original_size: metadata.len(),
+        removable_bytes: boundary.saturating_sub(bom),
+        removed_lines,
+        boundary_offset: boundary,
+        encoding,
+        modified: metadata.modified().ok(),
+        identity: file_identity(&file)?,
+    })
 }
 
 /// Shared-read counterpart of `prepare_with_progress` for the viewer's hidden
@@ -99,23 +114,14 @@ pub fn hidden_start_with_progress<F>(
     encoding: TextEncoding,
     cancelled: &AtomicBool,
     mut progress: F,
-) -> io::Result<TrimPlan>
+) -> io::Result<u64>
 where
     F: FnMut(u64, u64),
 {
     validate_percent(percent)?;
     let mut file = File::open(path)?;
-    let metadata = file.metadata()?;
-    let boundary = find_boundary(
-        &mut file,
-        metadata.len(),
-        percent,
-        encoding,
-        cancelled,
-        &mut progress,
-    )?;
-    let identity = file_identity(&file)?;
-    Ok(make_plan(percent, metadata, boundary, encoding, identity))
+    let size = file.metadata()?.len();
+    find_boundary(&mut file, size, percent, encoding, cancelled, &mut progress)
 }
 
 #[allow(dead_code)]
@@ -124,7 +130,7 @@ pub fn prepare(path: &Path, percent: u8, encoding: TextEncoding) -> io::Result<T
 }
 
 #[allow(dead_code)]
-pub fn hidden_start(path: &Path, percent: u8, encoding: TextEncoding) -> io::Result<TrimPlan> {
+pub fn hidden_start(path: &Path, percent: u8, encoding: TextEncoding) -> io::Result<u64> {
     hidden_start_with_progress(path, percent, encoding, &AtomicBool::new(false), |_, _| {})
 }
 
@@ -203,8 +209,7 @@ where
         ));
     }
 
-    let retained_len = plan.original_size.saturating_sub(plan.boundary_offset);
-    let bom_len = bom_length(plan.encoding).min(plan.original_size);
+    let bom_len = plan.encoding.bom_len().min(plan.original_size);
     let shift_result = shift_prefix(&mut source, plan, bom_len, &mut progress, hooks);
     if let Err(error) = shift_result {
         return match restore_from_backup(&mut source, &backup_path) {
@@ -227,27 +232,37 @@ where
 
     Ok(TrimOutcome {
         backup_path,
-        removed_bytes: plan.removable_bytes,
-        remaining_bytes: bom_len.saturating_add(retained_len),
+        removed_lines: plan.removed_lines,
     })
 }
 
-fn make_plan(
-    percent: u8,
-    metadata: fs::Metadata,
+fn count_prefix_lines(
+    file: &mut File,
     boundary: u64,
+    content_start: u64,
     encoding: TextEncoding,
-    identity: FileIdentity,
-) -> TrimPlan {
-    TrimPlan {
-        percent,
-        original_size: metadata.len(),
-        removable_bytes: boundary.saturating_sub(bom_length(encoding).min(metadata.len())),
-        boundary_offset: boundary,
-        encoding,
-        modified: metadata.modified().ok(),
-        identity,
+    cancelled: &AtomicBool,
+    progress: &mut impl FnMut(u64, u64),
+) -> io::Result<u64> {
+    let boundary = align_offset(boundary, encoding);
+    let mut index = LineIndex::default();
+    while index.scanned_to() < boundary {
+        let through = boundary.min(index.scanned_to().saturating_add(LINE_COUNT_BATCH_BYTES));
+        let advanced = match index.advance(file, encoding, through, cancelled) {
+            Ok(advanced) => advanced,
+            Err(LogError::Io(error)) => return Err(error),
+            Err(LogError::Cancelled) => return Err(cancelled_error()),
+            Err(error) => return Err(io::Error::other(error)),
+        };
+        if advanced == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        progress(index.scanned_to(), boundary);
     }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(cancelled_error());
+    }
+    Ok(index.physical_line_count(content_start))
 }
 
 fn validate_percent(percent: u8) -> io::Result<()> {
@@ -308,7 +323,7 @@ fn find_boundary(
     if cancelled.load(Ordering::Relaxed) {
         return Err(cancelled_error());
     }
-    let bom = bom_length(encoding).min(size);
+    let bom = encoding.bom_len().min(size);
     let target = ((size / 100) * u64::from(percent))
         .saturating_add((size % 100) * u64::from(percent) / 100)
         .max(bom);
@@ -479,14 +494,6 @@ fn is_line_start(
         u16::from(next[0])
     };
     Ok(next != 0x0A)
-}
-
-fn bom_length(encoding: TextEncoding) -> u64 {
-    match encoding {
-        TextEncoding::Utf8Bom => 3,
-        TextEncoding::Utf16Le | TextEncoding::Utf16Be => 2,
-        TextEncoding::Utf8 | TextEncoding::Windows1251 => 0,
-    }
 }
 
 #[cfg(windows)]

@@ -1,17 +1,32 @@
-use std::sync::atomic::Ordering;
+use std::{
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use gpui_kit::*;
 
 use super::{LogViewer, Progress, viewport::Destination};
-use crate::log_trim::{self, TrimPlan};
+use crate::{
+    log_trim::{self, TrimPlan},
+    text_format::TextEncoding,
+};
 
 impl LogViewer {
-    fn boundary_task(
+    fn boundary_task<T: Send + 'static>(
         &mut self,
         percent: u8,
         exclusive: bool,
         cx: &Context<Self>,
-    ) -> Task<std::io::Result<TrimPlan>> {
+        prepare: impl FnOnce(
+            &Path,
+            u8,
+            TextEncoding,
+            &AtomicBool,
+            &mut dyn FnMut(u64, u64),
+        ) -> std::io::Result<T>
+        + Send
+        + 'static,
+    ) -> Task<std::io::Result<T>> {
         let path = self.path.clone();
         let encoding = self.encoding;
         let progress = Progress::new(self.bookmark.size);
@@ -21,17 +36,15 @@ impl LogViewer {
         self.preparation = Some(progress);
         let timer = cx.background_executor().clone();
         cx.background_spawn(async move {
-            let report = |completed, expected| {
+            let mut report = |completed, expected| {
                 done.store(completed, Ordering::Relaxed);
                 total.store(expected, Ordering::Relaxed);
             };
             if exclusive {
                 // Let the cancelled viewport indexing/search jobs release their shared handles.
                 timer.timer(std::time::Duration::from_millis(45)).await;
-                log_trim::prepare_with_progress(&path, percent, encoding, &cancel, report)
-            } else {
-                log_trim::hidden_start_with_progress(&path, percent, encoding, &cancel, report)
             }
+            prepare(&path, percent, encoding, &cancel, &mut report)
         })
     }
 
@@ -60,22 +73,28 @@ impl LogViewer {
         };
         self.preparing_trim = true;
         self.notice = None;
-        self.reset_search();
-        let job = self.boundary_task(percent, false, cx);
+        self.reset_search(cx);
+        let job = self.boundary_task(
+            percent,
+            false,
+            cx,
+            |path, percent, encoding, cancel, report| {
+                log_trim::hidden_start_with_progress(path, percent, encoding, cancel, report)
+            },
+        );
         cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
             let _ = this.update_in(cx, |viewer, window, cx| {
                 viewer.preparing_trim = false;
                 viewer.preparation = None;
                 match result {
-                    Ok(plan) => {
-                        viewer.bookmark.hidden = plan.boundary_offset;
-                        viewer.notice =
-                            Some(format!("Скрыто {} байт от начала.", plan.removable_bytes).into());
+                    Ok(boundary) => {
+                        viewer.bookmark.hidden = boundary;
                         viewer.load_page(Destination::Start, window, cx);
                     }
                     Err(error) => {
-                        viewer.notice = Some(format!("Не удалось скрыть начало. {error}").into())
+                        viewer.notice = Some(format!("Не удалось скрыть начало. {error}").into());
+                        viewer.start_index(window, cx);
                     }
                 }
                 cx.notify();
@@ -88,7 +107,7 @@ impl LogViewer {
     pub(super) fn reveal_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.available() {
             self.bookmark.hidden = 0;
-            self.reset_search();
+            self.reset_search(cx);
             self.navigate(Destination::Start, window, cx);
         }
     }
@@ -108,8 +127,15 @@ impl LogViewer {
 
         self.preparing_trim = true;
         self.stop_index();
-        self.reset_search();
-        let task = self.boundary_task(percent, true, cx);
+        self.reset_search(cx);
+        let task = self.boundary_task(
+            percent,
+            true,
+            cx,
+            |path, percent, encoding, cancel, report| {
+                log_trim::prepare_with_progress(path, percent, encoding, cancel, report)
+            },
+        );
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let Ok(prompt) = this.update_in(cx, |viewer, window, cx| {
@@ -118,8 +144,8 @@ impl LogViewer {
                     Ok(plan) if plan.removable_bytes > 0 => {
                         let name = viewer.path.file_name().unwrap_or_default().to_string_lossy();
                         let detail = format!(
-                            "Запрошено {}%. Из «{name}» будет удалено {} байт из {}. Перед записью RustText сохранит полную резервную копию рядом с логом.",
-                            plan.percent, plan.removable_bytes, plan.original_size,
+                            "Запрошено {}%. Строк к удалению с начала файла «{name}»: {}. Перед записью RustText сохранит полную резервную копию рядом с логом.",
+                            plan.percent, plan.removed_lines,
                         );
                         let answer = window.prompt(
                             PromptLevel::Warning,
@@ -133,12 +159,14 @@ impl LogViewer {
                     Ok(_) => {
                         viewer.preparing_trim = false;
                         viewer.notice = Some("Удаляемый участок пуст.".into());
+                        viewer.start_index(window, cx);
                         cx.notify();
                         None
                     }
                     Err(error) => {
                         viewer.preparing_trim = false;
-                        viewer.notice = Some(format!("Нужен эксклюзивный доступ к логу. {error}").into());
+                        viewer.notice = Some(format!("Не удалось подготовить обрезку. {error}").into());
+                        viewer.start_index(window, cx);
                         cx.notify();
                         None
                     }
@@ -150,6 +178,8 @@ impl LogViewer {
                     viewer.preparing_trim = false;
                     if approved {
                         viewer.run_trim(plan, window, cx);
+                    } else {
+                        viewer.start_index(window, cx);
                     }
                     cx.notify();
                 });
@@ -189,9 +219,8 @@ impl LogViewer {
                     Ok(outcome) => {
                         viewer.notice = Some(
                             format!(
-                                "Удалено {} байт, осталось {}. Копия: {}",
-                                outcome.removed_bytes,
-                                outcome.remaining_bytes,
+                                "Удалено строк: {}. Копия: {}",
+                                outcome.removed_lines,
                                 outcome.backup_path.display(),
                             )
                             .into(),

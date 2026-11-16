@@ -4,6 +4,7 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     label::Label,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::sync::{
     Arc,
@@ -18,6 +19,7 @@ use crate::{
         self, Command, Hit, NavigationProgress, NavigationStart, Outcome, Query, SearchMatch,
         Source,
     },
+    search_highlight::SearchHighlight,
 };
 
 struct SearchResume {
@@ -36,6 +38,7 @@ pub(super) struct SearchPanel {
     replacing: bool,
     visible_matches: Vec<SearchMatch>,
     match_revisions: Vec<(u64, u64)>,
+    match_highlight: Option<SearchHighlight>,
     request_generation: u64,
     message: SharedString,
     task: Option<Task<()>>,
@@ -90,6 +93,7 @@ impl SearchPanel {
             replacing: false,
             visible_matches: Vec::new(),
             match_revisions: Vec::new(),
+            match_highlight: None,
             request_generation: 0,
             message: "Введите текст поиска".into(),
             task: None,
@@ -102,6 +106,12 @@ impl SearchPanel {
         Query {
             text: self.query_input.read(cx).value().to_string(),
             ..self.options.clone()
+        }
+    }
+
+    fn clear_match_highlight(&mut self, cx: &mut Context<Workspace>) {
+        if let Some(highlight) = self.match_highlight.take() {
+            highlight.clear(cx);
         }
     }
 
@@ -160,6 +170,7 @@ impl SearchPanel {
                         this.active_document().editor.update(cx, |editor, cx| {
                             editor.set_selected_range(result.hit.range.clone(), cx);
                         });
+                        this.show_search_highlight(result.hit.tab, result.hit.range.clone(), cx);
                         let revision = this.active_document().revision;
                         if let Some(panel) = &mut this.search {
                             panel.last_hit = Some((query.clone(), result.hit.clone(), revision));
@@ -328,6 +339,24 @@ impl SearchPanel {
 }
 
 impl Workspace {
+    fn show_search_highlight(
+        &mut self,
+        tab: u64,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = &mut self.search {
+            panel.clear_match_highlight(cx);
+        }
+        let Some(document) = self.documents.iter().find(|document| document.id == tab) else {
+            return;
+        };
+        let highlight = SearchHighlight::new(&document.editor, range, cx);
+        if let Some(panel) = &mut self.search {
+            panel.match_highlight = Some(highlight);
+        }
+    }
+
     pub(super) fn open_search(
         &mut self,
         replace: bool,
@@ -369,8 +398,9 @@ impl Workspace {
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(panel) = &self.search {
+        if let Some(panel) = &mut self.search {
             panel.cancellation.store(true, Ordering::Relaxed);
+            panel.clear_match_highlight(cx);
         }
         if self.search.take().is_some() {
             self.select(self.active, window, cx);
@@ -383,6 +413,7 @@ impl Workspace {
             panel.task = None;
             panel.cancellation = Arc::new(AtomicBool::new(false));
             panel.last_hit = None;
+            panel.clear_match_highlight(cx);
             panel.request_generation = panel.request_generation.wrapping_add(1);
             panel.visible_matches.clear();
             panel.match_revisions.clear();
@@ -419,6 +450,7 @@ impl Workspace {
         if panel.task.is_some() || (command.replaces() && query.all_tabs) {
             return;
         }
+        panel.clear_match_highlight(cx);
         panel.request_generation = panel.request_generation.wrapping_add(1);
         let request_generation = panel.request_generation;
 
@@ -546,6 +578,7 @@ impl Workspace {
                 self.active_document().editor.update(cx, |editor, cx| {
                     editor.set_selected_range(hit.range.clone(), cx);
                 });
+                self.show_search_highlight(hit.tab, hit.range.clone(), cx);
                 let hit_revision = self.active_document().revision;
                 if let Some(panel) = &mut self.search {
                     panel.last_hit = Some((query, hit, hit_revision));
@@ -570,10 +603,14 @@ impl Workspace {
                     panel.last_hit = None;
                     panel.visible_matches.clear();
                     panel.match_revisions.clear();
+                    panel.clear_match_highlight(cx);
                 }
                 self.search_message("Совпадений нет", cx);
             }
             Ok(Outcome::Replaced { range, text, count }) => {
+                if let Some(panel) = &mut self.search {
+                    panel.clear_match_highlight(cx);
+                }
                 if let Some(doc) = self.documents.iter().find(|doc| doc.id == origin.tab) {
                     doc.editor.update(cx, |editor, cx| {
                         editor.set_selected_range(range, cx);
@@ -595,6 +632,7 @@ impl Workspace {
                     self.active_document().editor.update(cx, |editor, cx| {
                         editor.set_selected_range(first.hit.range.clone(), cx);
                     });
+                    self.show_search_highlight(first.hit.tab, first.hit.range.clone(), cx);
                     (query, first.hit.clone(), self.active_document().revision)
                 });
                 let mut message = if list.complete {
@@ -670,5 +708,8 @@ fn option_button(
         .outline()
         .label(label)
         .selected(selected)
+        .when(selected, |button| {
+            button.border_color(rgb(appearance::ACCENT))
+        })
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_search_option(toggle, cx)))
 }
