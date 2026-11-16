@@ -250,6 +250,9 @@ impl Workspace {
             return;
         }
         let active = self.active_document();
+        if active.placeholder && command.replaces() {
+            return;
+        }
         let origin = Hit {
             tab: active.id,
             range: active.editor.read(cx).selected_range(),

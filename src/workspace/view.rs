@@ -258,7 +258,14 @@ impl Workspace {
             .children(self.documents.iter().map(|doc| {
                 let id = doc.id;
                 let active = id == self.active;
-                let name = doc.name.clone();
+                let suffix = doc
+                    .disk_status
+                    .tab_suffix()
+                    .or(doc.placeholder.then_some("откройте заново"));
+                let name = suffix.map_or_else(
+                    || doc.name.clone(),
+                    |status| format!("{} ({status})", doc.name).into(),
+                );
                 div()
                     .id(("tab", id))
                     .flex()
@@ -330,6 +337,12 @@ impl Workspace {
             error.clone()
         } else if let Some(busy) = self.busy {
             busy.into()
+        } else if let Some(notice) = doc.disk_status.notice() {
+            notice.into()
+        } else if doc.placeholder {
+            "Файл снова доступен. Откройте его заново.".into()
+        } else if let Some(notice) = self.session_error.as_ref().or(self.session_notice.as_ref()) {
+            notice.clone()
         } else if let Some(file) = &doc.file {
             display_path(&file.path).into()
         } else {
@@ -353,7 +366,12 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .when(self.error.is_some(), |el| el.text_color(rgb(0xffb4ad)))
+                    .when(
+                        self.error.is_some()
+                            || doc.disk_status.notice().is_some()
+                            || self.session_error.is_some(),
+                        |el| el.text_color(rgb(0xffb4ad)),
+                    )
                     .child(Label::new(message)),
             )
             .child(
@@ -422,6 +440,7 @@ impl Render for Workspace {
             .child(
                 div().flex_1().min_h_0().w_full().overflow_hidden().child(
                     Editor::new(&doc.editor)
+                        .readonly(doc.placeholder)
                         .bordered(false)
                         .h_full()
                         .w_full()

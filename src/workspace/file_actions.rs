@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::*;
 
-use super::{Workspace, file_name, recent_warning, syntax_for};
+use super::{Workspace, disk_status::DiskStatus, file_name, recent_warning, syntax_for};
 use crate::{
     files::{self, FileTarget, OpenedFile},
     recent_files::RecentFile,
@@ -119,13 +119,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> RecentFile {
-        if let Some(doc) = self.documents.iter().find(|doc| {
+        if let Some(doc) = self.documents.iter_mut().find(|doc| {
             doc.file
                 .as_ref()
                 .is_some_and(|file| file.path == opened.target.path)
         }) {
+            let id = doc.id;
+            if !doc.dirty && (doc.placeholder || doc.file.as_ref() != Some(&opened.target)) {
+                doc.editor
+                    .update(cx, |editor, cx| editor.set_value(opened.text, window, cx));
+                doc.saved_text = Some(doc.editor.read(cx).text().clone());
+                doc.file = Some(opened.target.clone());
+                doc.format = opened.format;
+                doc.placeholder = false;
+                doc.restored_scroll = None;
+                doc.disk_status = DiskStatus::Current;
+                doc.revision = doc.revision.wrapping_add(1);
+            }
             let recent = RecentFile::new(opened.target.path, doc.format.encoding);
-            self.select(doc.id, window, cx);
+            self.select(id, window, cx);
             return recent;
         }
 
@@ -146,6 +158,11 @@ impl Workspace {
         }
         self.error = None;
         let doc = self.active_document();
+        if doc.placeholder {
+            self.error = Some("Откройте исходный файл, когда он станет доступен.".into());
+            cx.notify();
+            return;
+        }
         let id = doc.id;
 
         if !save_as && let Some(file) = doc.file.clone() {
@@ -250,8 +267,9 @@ impl Workspace {
                                 .update(cx, |editor, cx| editor.set_highlighter(language, cx));
                             doc.name = file_name(&file.path);
                             doc.file = Some(file);
-                            doc.saved_text = snapshot;
-                            doc.dirty = doc.editor.read(cx).text() != &doc.saved_text;
+                            doc.saved_text = Some(snapshot);
+                            doc.disk_status = DiskStatus::Current;
+                            doc.dirty = doc.saved_text.as_ref() != Some(doc.editor.read(cx).text());
                         }
                     }
                     Err(error) => {

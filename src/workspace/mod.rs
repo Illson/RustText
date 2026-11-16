@@ -1,6 +1,8 @@
+mod disk_status;
 mod file_actions;
 mod json_action;
 mod search_panel;
+mod session_runtime;
 mod view;
 
 pub(crate) use view::bind_keys;
@@ -22,9 +24,12 @@ struct Document {
     file: Option<FileTarget>,
     format: TextFormat,
     editor: Entity<EditorState>,
-    saved_text: Rope,
+    saved_text: Option<Rope>,
     dirty: bool,
     revision: u64,
+    disk_status: disk_status::DiskStatus,
+    placeholder: bool,
+    restored_scroll: Option<[f32; 2]>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -39,10 +44,18 @@ pub(crate) struct Workspace {
     wrap: bool,
     font_size: f32,
     search: Option<search_panel::SearchPanel>,
+    session: Option<session_runtime::SessionWriter>,
+    session_notice: Option<SharedString>,
+    session_error: Option<SharedString>,
 }
 
 impl Workspace {
-    pub(crate) fn new(paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        paths: Vec<PathBuf>,
+        startup: crate::session::Startup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (recent, recent_error) = RecentFiles::load();
         let mut this = Self {
             documents: Vec::new(),
@@ -55,8 +68,11 @@ impl Workspace {
             wrap: false,
             font_size: 15.0,
             search: None,
+            session: None,
+            session_notice: None,
+            session_error: None,
         };
-        this.add_document(None, window, cx);
+        this.init_session(startup, window, cx);
         let workspace = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             workspace
@@ -83,12 +99,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let id = self.next_id;
-        self.next_id += 1;
         let (file, text, format) = match opened {
             Some(opened) => (Some(opened.target), opened.text, opened.format),
             None => (None, String::new(), TextFormat::default()),
         };
+        let id = self.insert_document(file, text, format, window, cx);
+        self.select(id, window, cx);
+    }
+
+    fn insert_document(
+        &mut self,
+        file: Option<FileTarget>,
+        text: String,
+        format: TextFormat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
         let name = file
             .as_ref()
             .map_or_else(|| "Без имени".into(), |file| file_name(&file.path));
@@ -99,6 +127,7 @@ impl Workspace {
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .line_number(true)
+                .searchable(false)
                 .soft_wrap(self.wrap)
                 .language(language)
                 .default_value(text)
@@ -108,7 +137,7 @@ impl Workspace {
             if matches!(event, InputEvent::Change)
                 && let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id)
             {
-                doc.dirty = editor.read(cx).text() != &doc.saved_text;
+                doc.dirty = doc.saved_text.as_ref() != Some(editor.read(cx).text());
                 doc.revision = doc.revision.wrapping_add(1);
                 cx.notify();
             }
@@ -125,17 +154,23 @@ impl Workspace {
             file,
             format,
             editor,
-            saved_text,
+            saved_text: Some(saved_text),
             dirty: false,
             revision: 0,
+            disk_status: disk_status::DiskStatus::Current,
+            placeholder: false,
+            restored_scroll: None,
             _subscriptions: [change, cursor],
         });
-        self.select(id, window, cx);
+        id
     }
 
     fn select(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(doc) = self.documents.iter().find(|doc| doc.id == id) {
-            self.active = id;
+            if self.active != id {
+                self.error = None;
+                self.active = id;
+            }
             let focus = doc.editor.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
             cx.notify();
@@ -198,6 +233,9 @@ impl Workspace {
     fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.busy.is_some() {
             return false;
+        }
+        if self.session.is_some() {
+            return self.begin_session_shutdown(window, cx);
         }
         if self.documents.iter().any(|doc| doc.dirty) {
             self.confirm_discard(None, window, cx);

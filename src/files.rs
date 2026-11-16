@@ -5,13 +5,14 @@ use std::{
     time::SystemTime,
 };
 
+use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::text_format::TextFormat;
 
 const MAX_EDITOR_BYTES: u64 = 50 * 1024 * 1024;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileVersion {
     bytes: u64,
     modified: SystemTime,
@@ -43,7 +44,7 @@ impl FileVersion {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileTarget {
     pub path: PathBuf,
     pub version: Option<FileVersion>,

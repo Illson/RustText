@@ -1,14 +1,15 @@
 use std::{borrow::Cow, io};
 
 use encoding_rs::{UTF_16BE, UTF_16LE, WINDOWS_1251};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextFormat {
     pub encoding: TextEncoding,
     endings: LineEndings,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextEncoding {
     #[default]
     Utf8,
@@ -30,7 +31,7 @@ impl TextEncoding {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum LineEndings {
     #[default]
     Lf,

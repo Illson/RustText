@@ -9,6 +9,9 @@ impl Workspace {
             return;
         }
         let doc = self.active_document();
+        if doc.placeholder {
+            return;
+        }
         let newline = if doc.format.line_endings_label() == "CRLF" {
             "\r\n"
         } else {
