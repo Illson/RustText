@@ -119,25 +119,21 @@ pub fn search_page(
     let mut reader = LogReader::open(path, encoding_override)?;
     let size = reader.size;
     let mut cursor = align_offset(start_offset.min(size), reader.encoding);
+    let max_line_bytes = limits.max_line_bytes.clamp(
+        minimum_fragment_bytes(reader.encoding),
+        MAX_SEARCH_LINE_BYTES,
+    );
     let mut stream = BufReader::with_capacity(BLOCK_SIZE * 2, reader.file.try_clone()?);
     stream.seek(SeekFrom::Start(cursor))?;
     // Search resume offsets are line boundaries. For a user supplied arbitrary
     // byte position, consume only the partial line at that position.
     if cursor > 0 && !is_line_boundary(&mut reader.file, cursor, reader.encoding)? {
-        let partial = read_buffered_line(
-            &mut stream,
-            cursor,
-            size,
-            limits.max_line_bytes.clamp(
-                minimum_fragment_bytes(reader.encoding),
-                MAX_SEARCH_LINE_BYTES,
-            ),
-            reader.encoding,
-        )?;
-        if !partial.terminated && partial.end < size {
+        let partial =
+            read_buffered_line(&mut stream, cursor, size, max_line_bytes, reader.encoding)?;
+        if partial.limit_reached {
             return Err(LogError::LineLimit {
                 offset: cursor,
-                limit: limits.max_line_bytes,
+                limit: max_line_bytes,
             });
         }
         cursor = partial.end;
@@ -151,23 +147,15 @@ pub fn search_page(
         if cancel.load(Ordering::Relaxed) {
             return Err(LogError::Cancelled);
         }
-        let fragment = read_buffered_line(
-            &mut stream,
-            cursor,
-            size,
-            limits.max_line_bytes.clamp(
-                minimum_fragment_bytes(reader.encoding),
-                MAX_SEARCH_LINE_BYTES,
-            ),
-            reader.encoding,
-        )?;
+        let fragment =
+            read_buffered_line(&mut stream, cursor, size, max_line_bytes, reader.encoding)?;
         if fragment.end <= cursor {
             break;
         }
-        if !fragment.terminated && fragment.end < size {
+        if fragment.limit_reached {
             return Err(LogError::LineLimit {
                 offset: cursor,
-                limit: limits.max_line_bytes,
+                limit: max_line_bytes,
             });
         }
         let line = decode(&fragment.bytes, reader.encoding, cursor == 0);
@@ -240,6 +228,7 @@ fn read_buffered_line(
                     bytes,
                     end: cursor,
                     terminated: false,
+                    limit_reached: true,
                 });
             }
             let boundary_cr = delimiter_len == unit
@@ -268,6 +257,7 @@ fn read_buffered_line(
                 bytes,
                 end: cursor,
                 terminated: true,
+                limit_reached: false,
             });
         }
         let take = (cap - bytes.len()).min(usable);
@@ -279,15 +269,18 @@ fn read_buffered_line(
         reader.consume(take);
         cursor += take as u64;
     }
+    let raw_cursor = cursor;
     if matches!(encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom) {
         trim_utf8_boundary(&mut bytes);
         cursor = start + bytes.len() as u64;
         reader.seek(SeekFrom::Start(cursor))?;
     }
+    let limit_reached = raw_cursor.saturating_sub(start) >= cap as u64 && raw_cursor < file_size;
     Ok(Fragment {
         bytes,
         end: cursor,
         terminated: false,
+        limit_reached,
     })
 }
 

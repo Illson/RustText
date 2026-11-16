@@ -1,4 +1,5 @@
 use super::*;
+use crate::text_format::TextEncoding;
 
 fn capture(text: &str) -> Capture {
     Capture {
@@ -80,6 +81,82 @@ fn retains_two_latest_commits_and_refuses_concurrent_writers() {
     let (state, warning) = reopened.restore();
     assert!(warning.is_none());
     assert_eq!(state.unwrap().drafts, [Some("third".into())]);
+}
+
+#[test]
+fn cursor_only_checkpoint_reuses_the_verified_draft_snapshot() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    let mut first = capture("unchanged draft");
+    first.state.closed.push(Tab {
+        id: 2,
+        file: None,
+        format: TextFormat::default(),
+        selection: 0..0,
+        reversed: false,
+        scroll: [0., 0.],
+        draft_revision: Some(4),
+        log: None,
+    });
+    first.closed_drafts.push(Some(Rope::from("closed draft")));
+    journal.commit(1, first).unwrap();
+
+    let mut second = capture("unchanged draft");
+    second.state.tabs[0].selection = 8..8;
+    second.state.closed.push(Tab {
+        id: 2,
+        file: None,
+        format: TextFormat::default(),
+        selection: 0..0,
+        reversed: false,
+        scroll: [0., 0.],
+        draft_revision: Some(4),
+        log: None,
+    });
+    second.closed_drafts.push(Some(Rope::from("closed draft")));
+    journal.commit(2, second).unwrap();
+
+    assert_eq!(
+        fs::metadata(journal.record_path(1).join("closed-draft-0.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        fs::metadata(journal.record_path(2).join("closed-draft-0.txt"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    );
+
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    let recovered = recovered.unwrap();
+    assert_eq!(recovered.drafts, [Some("unchanged draft".into())]);
+    assert_eq!(recovered.closed_drafts, [Some("closed draft".into())]);
+}
+
+#[test]
+fn corrupted_previous_draft_is_rewritten_from_the_current_capture() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    journal.commit(1, capture("recoverable text")).unwrap();
+    let draft_path = journal.record_path(1).join("draft-0.txt");
+    let corrupted = "corrupted draft!";
+    assert_eq!(corrupted.len(), "recoverable text".len());
+    fs::write(&draft_path, corrupted).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&draft_path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+        .unwrap();
+
+    let mut next = capture("recoverable text");
+    next.state.tabs[0].selection = 5..5;
+    journal.commit(2, next).unwrap();
+
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    assert_eq!(recovered.unwrap().drafts, [Some("recoverable text".into())]);
 }
 
 #[test]
@@ -173,6 +250,49 @@ fn closed_scratch_tabs_keep_unicode_text_across_restart() {
     );
     assert_eq!(recovered.state.closed[0].id, 2);
     assert_eq!(recovered.state.closed[0].selection, 4..4);
+}
+
+#[test]
+fn closed_log_tabs_keep_view_state_and_bookmark_across_restart() {
+    use crate::log_file::observe;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let log_path = temporary.path().join("closed.log");
+    fs::write(&log_path, "first\nsecond\nthird\n").unwrap();
+    let (observation, _) = observe(&log_path, None).unwrap();
+    let bookmark = LogBookmark {
+        identity: Some(observation.stamp.identity),
+        size: observation.stamp.len,
+        offset: 12,
+        hidden: 6,
+        auto_refresh: false,
+        follow_end: true,
+    };
+    let mut state = capture("");
+    state.state.closed.push(Tab {
+        id: 2,
+        file: Some(FileTarget::from_picker(log_path).unwrap()),
+        format: TextFormat::for_encoding(TextEncoding::Windows1251),
+        selection: 8..12,
+        reversed: true,
+        scroll: [14., 72.],
+        draft_revision: None,
+        log: Some(bookmark.clone()),
+    });
+    state.closed_drafts.push(None);
+    let mut journal = Journal::open(temporary.path().join("journal")).unwrap();
+
+    journal.commit(1, state).unwrap();
+    let (restored, warning) = journal.restore();
+    assert!(warning.is_none());
+    let restored = restored.unwrap();
+    let closed = &restored.state.closed[0];
+    assert_eq!(closed.id, 2);
+    assert!(closed.format.encoding == TextEncoding::Windows1251);
+    assert_eq!(closed.selection, 8..12);
+    assert!(closed.reversed);
+    assert_eq!(closed.scroll, [14., 72.]);
+    assert_eq!(closed.log.as_ref(), Some(&bookmark));
 }
 
 #[test]

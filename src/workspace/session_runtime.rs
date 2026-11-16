@@ -1,5 +1,6 @@
 use std::{
     io,
+    ops::Range,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -23,6 +24,20 @@ pub(super) enum AfterShutdown {
 }
 
 impl Document {
+    pub(super) fn restore_view(
+        &mut self,
+        selection: Range<usize>,
+        reversed: bool,
+        scroll: [f32; 2],
+        cx: &mut Context<Workspace>,
+    ) {
+        self.restored_scroll = Some(scroll);
+        self.editor.update(cx, |editor, cx| {
+            editor.set_selected_range_with_direction(selection, reversed, cx);
+            editor.set_scroll_offset(point(px(scroll[0]), px(scroll[1])), cx);
+        });
+    }
+
     pub(super) fn session_snapshot(&self, include_draft: bool, cx: &App) -> (Tab, Option<Rope>) {
         let editor = self.editor.read(cx);
         let offset = editor.scroll_offset();
@@ -165,6 +180,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> u64 {
+        let selection = tab.selection.clone();
+        let reversed = tab.reversed;
+        let scroll = tab.scroll;
         if let (Some(bookmark), Some(file)) = (tab.log.clone(), tab.file.clone()) {
             return self.insert_log(
                 file,
@@ -224,11 +242,7 @@ impl Workspace {
             doc.dirty = true;
         }
 
-        doc.restored_scroll = Some(tab.scroll);
-        doc.editor.update(cx, |editor, cx| {
-            editor.set_selected_range_with_direction(tab.selection, tab.reversed, cx);
-            editor.set_scroll_offset(point(px(tab.scroll[0]), px(tab.scroll[1])), cx);
-        });
+        doc.restore_view(selection, reversed, scroll, cx);
         id
     }
 

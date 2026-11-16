@@ -328,7 +328,8 @@ impl Workspace {
         if let Some(file) = &tab.file {
             let mut recent = RecentFile::new(file.path.clone(), tab.format.encoding);
             recent.view_as_log = tab.log.is_some();
-            self.open_closed_file(id, recent, window, cx);
+            let tab = tab.clone();
+            self.open_closed_file(recent, tab, window, cx);
         } else {
             let ClosedTab { tab, draft } = self.closed.remove(index);
             let id = self.restore_tab(tab, draft.map(|draft| draft.to_string()), window, cx);

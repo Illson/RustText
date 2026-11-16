@@ -49,3 +49,19 @@ fn rejects_empty_input_and_reports_unterminated_strings() {
             .contains("строка 2")
     );
 }
+
+#[test]
+fn bounds_output_expansion_from_indentation_and_preserves_the_byte_boundary() {
+    let compact = "[[[[0,1,2,3]]]]";
+    let formatted = format(compact, "\r\n").unwrap();
+    assert_eq!(
+        super::format_with_limit(compact, "\r\n", formatted.len()).unwrap(),
+        formatted
+    );
+    assert!(
+        super::format_with_limit(compact, "\r\n", formatted.len() - 1)
+            .unwrap_err()
+            .contains("превышает лимит")
+    );
+    assert!(super::format_with_limit(r#""ёж""#, "\n", 5).is_err());
+}

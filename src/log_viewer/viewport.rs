@@ -113,13 +113,7 @@ impl LogViewer {
         self.bookmark.offset = loaded.start;
         self.bookmark.hidden = loaded.hidden;
         self.observation = Some(loaded.observation);
-        let mut text = String::new();
-        for (index, row) in loaded.page.rows.iter().enumerate() {
-            if index != 0 {
-                text.push('\n');
-            }
-            text.push_str(&row.text);
-        }
+        let text = assemble_page_text(&loaded.page);
         self.viewer.update(cx, |viewer, cx| {
             viewer.set_value(text, window, cx);
             if loaded.scroll_to_bottom {
@@ -291,6 +285,17 @@ impl LogViewer {
         self.navigate(destination, window, cx);
         true
     }
+}
+
+fn assemble_page_text(page: &Page) -> String {
+    let mut text = String::new();
+    for (index, row) in page.rows.iter().enumerate() {
+        text.push_str(&row.text);
+        if row.terminated && index + 1 < page.rows.len() {
+            text.push('\n');
+        }
+    }
+    text
 }
 
 fn read_page(

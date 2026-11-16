@@ -196,10 +196,15 @@ impl LogReader {
             .min(MAX_PAGE_ROWS)
             .min((MAX_PAGE_BYTES / row_bytes).max(1));
         let mut rows = VecDeque::with_capacity(row_limit);
+        let mut incomplete_utf8_tail = false;
         while cursor < limit && row_limit > 0 && (keep_tail || rows.len() < row_limit) {
             let start = cursor;
             let fragment = read_fragment(&mut self.file, cursor, limit, row_bytes, self.encoding)?;
             if fragment.end <= cursor {
+                incomplete_utf8_tail =
+                    matches!(self.encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom)
+                        && fragment.bytes.is_empty()
+                        && limit == self.size;
                 break;
             }
             cursor = fragment.end;
@@ -218,7 +223,7 @@ impl LogReader {
             rows: rows.into(),
             next_offset: cursor,
             file_size: self.size,
-            eof: cursor >= self.size,
+            eof: cursor >= self.size || incomplete_utf8_tail,
         })
     }
 
@@ -300,6 +305,7 @@ pub(super) struct Fragment {
     pub(super) bytes: Vec<u8>,
     pub(super) end: u64,
     pub(super) terminated: bool,
+    pub(super) limit_reached: bool,
 }
 
 fn read_fragment(
@@ -339,11 +345,12 @@ fn read_fragment(
         }
         if let Some((index, delimiter_len)) = find_delimiter(&buffer[..usable], encoding) {
             if index > remaining {
-                let consumed = if unit == 2 {
+                let mut consumed = if unit == 2 {
                     remaining - remaining % 2
                 } else {
                     remaining
                 };
+                consumed = avoid_utf16_surrogate_split(&buffer[..usable], consumed, encoding);
                 bytes.extend_from_slice(&buffer[..consumed]);
                 cursor += consumed as u64;
                 if matches!(encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom) {
@@ -354,6 +361,7 @@ fn read_fragment(
                     bytes,
                     end: cursor,
                     terminated: false,
+                    limit_reached: false,
                 });
             }
             bytes.extend_from_slice(&buffer[..index]);
@@ -362,14 +370,16 @@ fn read_fragment(
                 bytes,
                 end: cursor,
                 terminated: true,
+                limit_reached: false,
             });
         }
         let consumed = usable.min(remaining);
-        let consumed = if unit == 2 {
+        let mut consumed = if unit == 2 {
             consumed - consumed % 2
         } else {
             consumed
         };
+        consumed = avoid_utf16_surrogate_split(&buffer[..usable], consumed, encoding);
         if consumed == 0 {
             break;
         }
@@ -383,11 +393,33 @@ fn read_fragment(
         bytes.pop();
         cursor -= 1;
     }
+    let limit_reached = cursor < file_size && bytes.len() >= cap;
     Ok(Fragment {
         bytes,
         end: cursor,
         terminated: false,
+        limit_reached,
     })
+}
+
+fn avoid_utf16_surrogate_split(bytes: &[u8], consumed: usize, encoding: TextEncoding) -> usize {
+    if !matches!(encoding, TextEncoding::Utf16Le | TextEncoding::Utf16Be)
+        || consumed < 2
+        || bytes.len() < consumed + 2
+    {
+        return consumed;
+    }
+    let code_unit = |pair: &[u8]| match encoding {
+        TextEncoding::Utf16Be => u16::from_be_bytes([pair[0], pair[1]]),
+        _ => u16::from_le_bytes([pair[0], pair[1]]),
+    };
+    let last = code_unit(&bytes[consumed - 2..consumed]);
+    let next = code_unit(&bytes[consumed..consumed + 2]);
+    if (0xd800..=0xdbff).contains(&last) && (0xdc00..=0xdfff).contains(&next) {
+        consumed - 2
+    } else {
+        consumed
+    }
 }
 
 pub(super) fn find_delimiter(bytes: &[u8], encoding: TextEncoding) -> Option<(usize, usize)> {

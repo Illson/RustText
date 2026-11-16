@@ -5,6 +5,11 @@ use gpui_kit::component::{
     label::Label,
 };
 use gpui_kit::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Instant;
 
 use super::Workspace;
 use crate::search::{self, Command, Hit, Outcome, Query, Source};
@@ -16,6 +21,7 @@ pub(super) struct SearchPanel {
     last_hit: Option<(Query, Hit)>,
     message: SharedString,
     task: Option<Task<()>>,
+    cancellation: Arc<AtomicBool>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -64,6 +70,7 @@ impl SearchPanel {
             last_hit: None,
             message: "Введите текст поиска".into(),
             task: None,
+            cancellation: Arc::new(AtomicBool::new(false)),
             _subscriptions: [query, replacement],
         }
     }
@@ -226,6 +233,9 @@ impl Workspace {
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.search {
+            panel.cancellation.store(true, Ordering::Relaxed);
+        }
         if self.search.take().is_some() {
             self.select(self.active, window, cx);
         }
@@ -233,7 +243,9 @@ impl Workspace {
 
     fn reset_search(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = &mut self.search {
+            panel.cancellation.store(true, Ordering::Relaxed);
             panel.task = None;
+            panel.cancellation = Arc::new(AtomicBool::new(false));
             panel.last_hit = None;
             panel.message = if panel.options.all_tabs {
                 "Поиск по всем вкладкам. Замена доступна в текущей вкладке.".into()
@@ -268,6 +280,9 @@ impl Workspace {
         }
 
         let replacement = panel.replacement_input.read(cx).value().to_string();
+        panel.cancellation.store(true, Ordering::Relaxed);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        panel.cancellation = cancellation.clone();
         let skip_current = panel
             .last_hit
             .as_ref()
@@ -289,7 +304,9 @@ impl Workspace {
         let origin_id = origin.tab;
         let job = cx.background_spawn({
             let query = query.clone();
+            let cancellation = cancellation.clone();
             async move {
+                let deadline = Instant::now() + search::MAX_SEARCH_TIME;
                 search::run(
                     &query,
                     command,
@@ -297,11 +314,15 @@ impl Workspace {
                     &origin,
                     skip_current,
                     &replacement,
+                    search::WorkBudget::new(&cancellation, deadline),
                 )
             }
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let outcome = job.await;
+            if cancellation.load(Ordering::Relaxed) {
+                return;
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(panel) = &mut this.search {
                     panel.task = None;
@@ -342,10 +363,7 @@ impl Workspace {
     ) {
         match outcome {
             Err(error) => self.search_message(error, cx),
-            Ok(Outcome::Found {
-                hit: Some(hit),
-                total,
-            }) => {
+            Ok(Outcome::Found { hit: Some(hit) }) => {
                 self.select(hit.tab, window, cx);
                 self.active_document().editor.update(cx, |editor, cx| {
                     editor.set_selected_range(hit.range.clone(), cx);
@@ -353,9 +371,9 @@ impl Workspace {
                 if let Some(panel) = &mut self.search {
                     panel.last_hit = Some((query, hit));
                 }
-                self.search_message(format!("Совпадений: {total}"), cx);
+                self.search_message("Совпадение выбрано", cx);
             }
-            Ok(Outcome::NoReplacements | Outcome::Found { hit: None, .. }) => {
+            Ok(Outcome::NoReplacements | Outcome::Found { hit: None } | Outcome::Cancelled) => {
                 self.search_message("Совпадений нет", cx);
             }
             Ok(Outcome::Replaced { range, text, count }) => {

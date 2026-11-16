@@ -68,6 +68,35 @@ fn utf8_fragment_and_crlf_boundaries_preserve_characters_and_rows() {
 }
 
 #[test]
+fn utf16_fragments_keep_surrogate_pairs_together_at_the_byte_limit() {
+    for encoding in [TextEncoding::Utf16Le, TextEncoding::Utf16Be] {
+        let mut contents = Vec::new();
+        for character in format!("{}🙂z\nnext", "x".repeat(1_023)).encode_utf16() {
+            let bytes = match encoding {
+                TextEncoding::Utf16Be => character.to_be_bytes(),
+                _ => character.to_le_bytes(),
+            };
+            contents.extend_from_slice(&bytes);
+        }
+        let (_file, mut reader) = reader_with(&contents, Some(encoding));
+        let page = reader
+            .render_page(
+                0,
+                PageOptions {
+                    max_rows: 4,
+                    max_row_bytes: 2_048,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(page.rows[0].text, "x".repeat(1_023));
+        assert_eq!(page.rows[1].text, "🙂z");
+        assert!(page.rows[1].terminated);
+        assert_eq!(page.rows[2].text, "next");
+    }
+}
+
+#[test]
 fn line_navigation_and_incremental_sparse_index_work() {
     let (_file, mut reader) = reader_with(b"a\nb\nc\nd\ne", None);
     assert_eq!(reader.line_start_at(4).unwrap(), 4);
@@ -324,6 +353,80 @@ fn search_reports_unprocessable_long_lines_and_bad_patterns() {
             &AtomicBool::new(false),
         ),
         Err(LogError::InvalidRegex(_))
+    ));
+}
+
+#[test]
+fn search_matches_available_text_before_an_incomplete_utf8_tail() {
+    let (file, _reader) = reader_with(b"hit \xf0\x9f\x99", None);
+    let result = search_page(
+        file.path(),
+        None,
+        &LogSearchQuery::literal("hit", true),
+        0,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].preview, "hit ");
+    assert_eq!(result.hits[0].line_start, 0);
+    assert!(!result.complete);
+    assert_eq!(result.next_offset, 4);
+}
+
+#[test]
+fn search_distinguishes_exact_limit_from_a_codepoint_split_by_the_limit() {
+    let limits = SearchLimits {
+        max_line_bytes: 4,
+        ..SearchLimits::default()
+    };
+    let (exact_file, _reader) = reader_with(b"abcd", None);
+    let exact = search_page(
+        exact_file.path(),
+        None,
+        &LogSearchQuery::literal("abcd", true),
+        0,
+        5,
+        limits,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(exact.hits.len(), 1);
+    assert!(exact.complete);
+
+    let (utf8_file, _reader) = reader_with("abc🙂".as_bytes(), None);
+    assert!(matches!(
+        search_page(
+            utf8_file.path(),
+            None,
+            &LogSearchQuery::literal("abc", true),
+            0,
+            5,
+            limits,
+            &AtomicBool::new(false),
+        ),
+        Err(LogError::LineLimit { .. })
+    ));
+
+    let utf16 = ['a' as u16, 0xd83d, 0xde42]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let (utf16_file, _reader) = reader_with(&utf16, Some(TextEncoding::Utf16Le));
+    assert!(matches!(
+        search_page(
+            utf16_file.path(),
+            Some(TextEncoding::Utf16Le),
+            &LogSearchQuery::literal("a", true),
+            0,
+            5,
+            limits,
+            &AtomicBool::new(false),
+        ),
+        Err(LogError::LineLimit { .. })
     ));
 }
 
