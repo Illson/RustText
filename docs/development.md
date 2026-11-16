@@ -1,0 +1,75 @@
+# Разработка RustText с LLM-агентами
+
+Владелец задаёт цель и ограничения, агент реализует изменение, собирает подтверждения и доставляет проверенный коммит на GitHub. Единица работы — задача с наблюдаемым результатом, отдельный worktree и одна ветка. Где искать код и обязательные правила, указано в [AGENTS.md](../AGENTS.md).
+
+## Начало задачи
+
+1. Определи ожидаемый результат и способ увидеть его. Для сложного изменения запиши затронутые данные, совместимость, риск сбоя и проверки. Зафиксируй решения, которые понадобятся в следующей задаче, рядом с кодом.
+2. Проверь, существует ли worktree этой задачи, через `git worktree list`. Продолжай в нём, если он относится к нужной ветке. Сверь `git rev-parse --show-toplevel`, `git status --short --branch` и `git diff`. Учти отдельно staged diff через `git diff --cached`.
+3. Для новой задачи обнови `origin/main` через `git fetch origin`. В Codex создай worktree от обновлённой `origin/main`. Если получился detached HEAD, выполни `git switch -c codex/<задача>` в новом worktree. Для обычного Git из исходного checkout:
+
+~~~powershell
+git fetch origin
+git worktree add -b codex/fix-log-navigation ../RustText-fix-log-navigation origin/main
+Set-Location ../RustText-fix-log-navigation
+git status --short --branch
+~~~
+
+После ошибки команды выясни причину до следующего шага. При занятом имени подключись к worktree нужной задачи или выбери новое имя. Если базовую ветку надо обновить в уже опубликованной задаче, слей свежую `origin/main` в рабочую ветку и повтори проверки. При конфликте разберись с обеими версиями и сохрани смысл изменений. [Git worktree](https://git-scm.com/docs/git-worktree) · [Worktrees в Codex](https://learn.chatgpt.com/docs/environments/git-worktrees)
+
+## Реализация и проверка
+
+- Меняй код небольшими частями. Для регрессии воспроизведи исходное поведение, добавь тест на наблюдаемый результат и проверь, что тест ловит дефект. Для миграций, файловых операций и обновлений проверь совместимость, отмену, повторный запуск и частичный сбой, если эти сценарии затронуты.
+- Для проекта используй команды из [README](../README.md#проверка) на Windows x64 MSVC. Во время разработки начни с `cargo test --locked <фильтр>`. Перед доставкой изменения Rust выполни `cargo fmt --all -- --check`, `cargo test --locked` и `cargo clippy --locked --all-targets -- -D warnings`. Для чисто текстовых правок локально проверь diff, смысл, ссылки, пути и команды.
+- Запускай приложение из текущего worktree с отдельным `LOCALAPPDATA`, чтобы рабочий RustText не перехватил запуск и тест не затронул настоящую сессию. Для ручной проверки используй временные файлы. Пример из корня worktree:
+
+~~~powershell
+$previousLocalAppData = $env:LOCALAPPDATA
+$profile = Join-Path $PWD.Path ("target/qa-profile/" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $profile -Force | Out-Null
+try {
+    $env:LOCALAPPDATA = $profile
+    cargo run --locked
+} finally {
+    $env:LOCALAPPDATA = $previousLocalAppData
+}
+~~~
+
+Открой нужный сценарий и закрой тестовый RustText перед возвратом к текущему терминалу. Для больших логов используй синтетические фикстуры и методику из [отчёта проверки](verification.md). Изменения упаковки тестируй через `tools/Package-RustText.ps1` и архив из `target`. Для обновления используй тестовые архивы и данные выпуска, проверяй ветки отказа и восстановления.
+
+`Cargo.lock` хранится в Git. Обновляй его через Cargo при целенаправленном изменении зависимостей. Для нового crate проверь необходимость, лицензию, происхождение и известные уязвимости. Для изменения графа зависимостей используй RustSec при доступном `cargo audit`, а при отсутствии инструмента укажи, как проверял зависимости. [Cargo.lock](https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html) · [Cargo test](https://doc.rust-lang.org/cargo/commands/cargo-test.html) · [Clippy](https://doc.rust-lang.org/clippy/usage.html) · [RustSec](https://rustsec.org/)
+
+## Коммит, push и проверка на GitHub
+
+1. Проверь `git diff --check`. Добавь только файлы задачи через `git add -- <файлы>`. Проверь `git diff --cached --check` и прочитай `git diff --cached` целиком. Убедись, что в коммит попадают нужные новые файлы и что нет токенов, профилей, пользовательских логов или сборочных артефактов.
+2. Сделай коммит, который можно понять по сообщению и проверить отдельно. Перед push сверь адрес `origin`, имя ветки и `git log --oneline origin/main..HEAD`. Публикуй свою ветку обычным push:
+
+~~~powershell
+$branch = git branch --show-current
+if ($LASTEXITCODE -ne 0 -or $branch -notlike 'codex/*') {
+    throw 'Нужна рабочая ветка codex/*'
+}
+git push --set-upstream origin "HEAD:refs/heads/$branch"
+if ($LASTEXITCODE -ne 0) {
+    throw 'GitHub не принял push'
+}
+$head = git rev-parse HEAD
+$published = git ls-remote --exit-code origin "refs/heads/$branch"
+if ($LASTEXITCODE -ne 0 -or ($published -split '\s+')[0] -ne $head) {
+    throw 'GitHub не подтвердил ожидаемый коммит'
+}
+~~~
+
+При отказе non-fast-forward посмотри, кто и что добавил в ветку. Согласуй чужие изменения перед обновлением своей работы. Прямой push в `main` и перезапись опубликованной истории исключены из обычного процесса. [Git push](https://git-scm.com/docs/git-push)
+
+3. Проверь [GitHub Actions](https://github.com/Illson/RustText/actions) на опубликованном SHA. Если владелец поручил открыть PR, используй существующий PR этой ветки или создай новый в `main`. Для незавершённого изменения используй черновик. С установленным GitHub CLI можно открыть его через `gh pr create --base main --head $branch --draft --title "Описание изменения" --body-file <файл>`. Без GitHub CLI используй страницу сравнения веток. [GitHub CLI](https://cli.github.com/manual/gh_pr_create)
+4. В PR запиши цель, наблюдаемое изменение, выполненные команды и результаты, ручные сценарии, пропущенные проверки и риски. При наличии PR дождись проверок через `gh pr checks --watch` или GitHub. Проверь, что результаты относятся к текущему коммиту PR. Ошибку разбери по логу и исправь в этой же ветке. При недоступности GitHub или внешнего окружения укажи конкретный блокер. [Проверки PR](https://cli.github.com/manual/gh_pr_checks)
+5. Оставь worktree доступным, пока задача открыта или нужна для проверки. Когда он больше не нужен, проверь чистоту дерева и сохранность коммитов. Для worktree в Codex используй архивирование, для обычного Git — `git worktree remove <путь>` из другого checkout.
+
+## Что обеспечивает CI
+
+[Windows CI](../.github/workflows/windows-ci.yml) запускает форматирование, тесты и Clippy на Windows x64 при push в `main`, в ветки `codex/**` и для PR в `main`. CI устанавливает точную версию Rust 1.100.0 из README и использует `--locked` для сборки тестов и проверки Clippy. Версию Rust обновляй вместе с проверкой на Windows и документацией. [Образ Windows](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md) · [Rust 1.100.0](https://github.com/rust-lang/rust/releases/tag/1.100.0)
+
+CI имеет разрешение `contents: read` и использует action, закреплённый по полному SHA. Сборки PR запускаются через `pull_request` без передачи секретов в команды. Для обязательной проверки перед слиянием владелец может указать `Windows Rust checks` в правилах `main` после первого появления результата. Изменение правил ветки и выпуск новой версии выполняются отдельными задачами. [Безопасность GitHub Actions](https://docs.github.com/en/actions/reference/security/secure-use) · [Правила PR](https://docs.github.com/en/pull-requests/reference/managing-and-standardizing-pull-requests)
+
+Когда агент повторяет ошибку, добавь недостающее воспроизведение, тест, проверку CI или короткое объяснение рядом с кодом. Если задачи постоянно требуют ручного переноса контекста, перенеси воспроизводимые инструкции в репозиторий. [Опыт OpenAI с разработкой агентами](https://openai.com/index/harness-engineering/)
