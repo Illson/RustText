@@ -13,6 +13,15 @@ use crate::appearance;
 
 impl Workspace {
     pub(super) fn menubar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        static LOGO: std::sync::OnceLock<std::sync::Arc<Image>> = std::sync::OnceLock::new();
+        let logo = LOGO
+            .get_or_init(|| {
+                std::sync::Arc::new(Image::from_bytes(
+                    ImageFormat::Png,
+                    include_bytes!("../../assets/rusttext.png").to_vec(),
+                ))
+            })
+            .clone();
         let searching = self.search.is_some()
             || self
                 .active_document()
@@ -31,8 +40,12 @@ impl Workspace {
             .border_color(rgb(appearance::BORDER))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .pr_3()
                     .text_color(rgb(appearance::ACCENT))
+                    .child(img(logo).w(px(22.)).h(px(22.)).flex_shrink_0())
                     .child(Label::new("RustText")),
             )
             .child(self.file_menu_button(cx))
