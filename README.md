@@ -26,6 +26,8 @@ cargo run --locked -- "C:\путь\к\файлу.txt"
 
 ## Проверка
 
+Модульные тесты лежат в `tests/unit/`. Имя файла соответствует модулю, например `session.rs`, `search.rs` или `json_format.rs`. Команда `cargo test --locked session::` запускает тесты журнала сессии.
+
 ```powershell
 cargo fmt --all -- --check
 cargo test --locked

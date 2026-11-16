@@ -94,16 +94,5 @@ fn line_index(value: &str, line_count: usize) -> Option<u32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::line_index;
-
-    #[test]
-    fn go_to_line_accepts_only_existing_one_based_lines() {
-        assert_eq!(line_index("1", 80), Some(0));
-        assert_eq!(line_index(" 80 ", 80), Some(79));
-
-        for invalid in ["", "0", "-1", "81", "1.5", "4294967296"] {
-            assert_eq!(line_index(invalid, 80), None, "{invalid:?}");
-        }
-    }
-}
+#[path = "../tests/unit/go_to_line.rs"]
+mod tests;

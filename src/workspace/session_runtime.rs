@@ -23,6 +23,21 @@ pub(super) struct SessionWriter {
     revision: u64,
 }
 
+impl SessionWriter {
+    fn queue(&mut self, capture: Capture) -> Option<PendingWrite> {
+        if !self.in_flight && self.last_saved.as_ref() == Some(&capture.state) {
+            return None;
+        }
+        self.revision += 1;
+        self.in_flight = true;
+        Some(PendingWrite {
+            journal: self.journal.clone(),
+            revision: self.revision,
+            capture,
+        })
+    }
+}
+
 struct PendingWrite {
     journal: Arc<Mutex<Journal>>,
     revision: u64,
@@ -242,17 +257,7 @@ impl Workspace {
     fn prepare_session_write(&mut self, window: &Window, cx: &App) -> Option<PendingWrite> {
         self.session.as_ref()?;
         let capture = self.capture_session(window, cx);
-        let writer = self.session.as_mut()?;
-        if !writer.in_flight && writer.last_saved.as_ref() == Some(&capture.state) {
-            return None;
-        }
-        writer.revision += 1;
-        writer.in_flight = true;
-        Some(PendingWrite {
-            journal: writer.journal.clone(),
-            revision: writer.revision,
-            capture,
-        })
+        self.session.as_mut()?.queue(capture)
     }
 
     fn session_write_finished(
@@ -329,3 +334,7 @@ impl Workspace {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/session_runtime.rs"]
+mod tests;

@@ -100,3 +100,7 @@ impl Workspace {
         .detach();
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/disk_status.rs"]
+mod tests;

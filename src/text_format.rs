@@ -180,25 +180,5 @@ fn invalid_data(message: &str) -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn saves_cyrillic_without_changing_original_format() {
-        let utf16 = [0xff, 0xfe, 0x2f, 0x04, 0x0d, 0x00, 0x0a, 0x00];
-        let (text, format) = TextFormat::decode(&utf16, false).unwrap();
-        assert_eq!(text, "Я\r\n");
-        assert_eq!(format.encode(&text).unwrap(), utf16);
-        assert_eq!(
-            format.encode("Я\r\nБ\n").unwrap(),
-            [
-                0xff, 0xfe, 0x2f, 0x04, 0x0d, 0x00, 0x0a, 0x00, 0x11, 0x04, 0x0d, 0x00, 0x0a, 0x00
-            ]
-        );
-
-        let (text, format) = TextFormat::decode(b"\xcf\xf0\xe8\xe2\xe5\xf2", true).unwrap();
-        assert_eq!(text, "Привет");
-        assert_eq!(format.encode(&text).unwrap(), b"\xcf\xf0\xe8\xe2\xe5\xf2");
-        assert!(format.encode("Привет 🦀").is_err());
-    }
-}
+#[path = "../tests/unit/text_format.rs"]
+mod tests;

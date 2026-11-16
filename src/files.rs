@@ -143,32 +143,5 @@ fn file_changed() -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_external_changes_before_replacing_a_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("заметка.txt");
-        fs::write(&path, "Черновик").unwrap();
-        let old = open(&path, false).unwrap();
-        fs::write(&path, "Записано другой программой").unwrap();
-
-        assert!(save(old.target, old.format, "Правки").is_err());
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "Записано другой программой"
-        );
-    }
-
-    #[test]
-    fn saves_new_file_and_allows_repeated_saves() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("заметка.txt");
-        let target = FileTarget::from_picker(path.clone()).unwrap();
-        let target = save(target, TextFormat::default(), "Привет").unwrap();
-        save(target, TextFormat::default(), "Привет снова").unwrap();
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), "Привет снова");
-    }
-}
+#[path = "../tests/unit/files.rs"]
+mod tests;

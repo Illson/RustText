@@ -104,7 +104,7 @@ pub struct Journal {
 }
 
 impl Journal {
-    fn open(directory: PathBuf) -> io::Result<Self> {
+    pub(super) fn open(directory: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&directory)?;
         let lock = OpenOptions::new()
             .create(true)
@@ -302,64 +302,5 @@ fn read_draft(directory: &Path, index: usize, info: DraftInfo) -> io::Result<Str
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn capture(text: &str) -> Capture {
-        Capture {
-            state: State {
-                tabs: vec![Tab {
-                    id: 1,
-                    file: None,
-                    format: TextFormat::default(),
-                    selection: 0..2,
-                    reversed: true,
-                    scroll: [0., -154.],
-                    draft_revision: Some(1),
-                }],
-                active: 0,
-                window: WindowSize {
-                    width: 870.,
-                    height: 640.,
-                    maximized: false,
-                },
-                wrap: true,
-                font_size: 16.,
-            },
-            drafts: vec![Some(Rope::from(text))],
-        }
-    }
-
-    #[test]
-    fn restores_previous_commit_if_the_latest_draft_or_manifest_is_corrupt() {
-        for damaged_file in ["draft-0.txt", "manifest.json"] {
-            let temporary = tempfile::tempdir().unwrap();
-            let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
-            journal.commit(1, capture("ёж")).unwrap();
-            journal.commit(2, capture("новый")).unwrap();
-            fs::write(journal.record_path(2).join(damaged_file), "corrupt").unwrap();
-            fs::create_dir(temporary.path().join(".pending-incomplete")).unwrap();
-            drop(journal);
-            let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
-            let (recovered, warning) = journal.restore();
-            let recovered = recovered.unwrap();
-            assert!(warning.is_some());
-            assert_eq!(recovered.drafts, [Some("ёж".into())]);
-            assert_eq!(recovered.state.tabs[0].selection, 0..2);
-            assert!(recovered.state.tabs[0].reversed);
-            assert_eq!(recovered.state.tabs[0].scroll, [0., -154.]);
-            assert_eq!(recovered.state.window.width, 870.);
-        }
-    }
-
-    #[test]
-    fn a_delayed_periodic_commit_cannot_overwrite_a_newer_shutdown_commit() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
-        journal.commit(2, capture("при закрытии")).unwrap();
-        journal.commit(1, capture("устарело")).unwrap();
-        let (recovered, warning) = journal.restore();
-        assert!(warning.is_none());
-        assert_eq!(recovered.unwrap().drafts, [Some("при закрытии".into())]);
-    }
-}
+#[path = "../tests/unit/session.rs"]
+mod tests;

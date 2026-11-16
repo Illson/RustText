@@ -72,30 +72,5 @@ fn indent(output: &mut Vec<u8>, newline: &str, depth: usize) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::format;
-
-    #[test]
-    fn formats_without_rewriting_lexemes_or_reordering_keys() {
-        let source = r#"{"z":123456789012345678901234567890,"a":1e9000,"z":"\"/ёж\u2603","arr":[{},[],-0.00]}"#;
-        assert_eq!(
-            format(source, "\n").unwrap(),
-            concat!(
-                "{\n",
-                "  \"z\": 123456789012345678901234567890,\n",
-                "  \"a\": 1e9000,\n",
-                "  \"z\": \"\\\"/ёж\\u2603\",\n",
-                "  \"arr\": [\n    {},\n    [],\n    -0.00\n  ]\n}"
-            )
-        );
-    }
-
-    #[test]
-    fn reports_invalid_json_with_a_location() {
-        let error = format("{\n \"a\": [1,]\n}", "\n").unwrap_err();
-        assert!(error.contains("строка 2, столбец 10"), "{error}");
-        assert!(format(r#"{"a":"\x00"}"#, "\n").is_err());
-        assert!(format("01", "\n").is_err());
-        assert!(format("{} false", "\n").is_err());
-    }
-}
+#[path = "../tests/unit/json_format.rs"]
+mod tests;
