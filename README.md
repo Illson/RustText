@@ -64,3 +64,7 @@ cargo fmt --all -- --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
+
+## Разработка
+
+Порядок работы с LLM-агентами, Git worktree и GitHub описан в [руководстве по разработке](docs/development.md).
