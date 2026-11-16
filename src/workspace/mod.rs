@@ -1,4 +1,5 @@
 mod file_actions;
+mod json_action;
 mod view;
 
 pub(crate) use view::bind_keys;

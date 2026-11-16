@@ -16,7 +16,7 @@ use crate::go_to_line;
 actions!(
     rusttext,
     [
-        NewFile, OpenFile, Save, SaveAs, CloseTab, ReopenTab, GoToLine, ZoomIn, ZoomOut
+        NewFile, OpenFile, Save, SaveAs, CloseTab, ReopenTab, GoToLine, FormatJson, ZoomIn, ZoomOut
     ]
 );
 
@@ -29,6 +29,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-w", CloseTab, Some("RustText")),
         KeyBinding::new("ctrl-shift-t", ReopenTab, Some("RustText")),
         KeyBinding::new("ctrl-g", GoToLine, Some("RustText")),
+        KeyBinding::new("ctrl-shift-j", FormatJson, Some("RustText")),
         KeyBinding::new("ctrl-=", ZoomIn, Some("RustText")),
         KeyBinding::new("ctrl--", ZoomOut, Some("RustText")),
     ]);
@@ -137,6 +138,17 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .child(
+                        Button::new("format-json")
+                            .small()
+                            .ghost()
+                            .label("JSON")
+                            .tooltip("Форматировать JSON · Ctrl+Shift+J")
+                            .disabled(busy)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.format_json(window, cx)),
+                            ),
+                    )
                     .child(
                         Button::new("wrap")
                             .small()
@@ -359,6 +371,7 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &ReopenTab, window, cx| this.reopen(window, cx)))
             .on_action(cx.listener(|this, _: &GoToLine, window, cx| this.go_to_line(window, cx)))
+            .on_action(cx.listener(|this, _: &FormatJson, window, cx| this.format_json(window, cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.0, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(-1.0, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
