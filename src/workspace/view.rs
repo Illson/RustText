@@ -11,12 +11,25 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use super::{Document, Workspace, file_name};
-use crate::go_to_line;
+use crate::{go_to_line, search::Command};
 
 actions!(
     rusttext,
     [
-        NewFile, OpenFile, Save, SaveAs, CloseTab, ReopenTab, GoToLine, FormatJson, ZoomIn, ZoomOut
+        NewFile,
+        OpenFile,
+        Save,
+        SaveAs,
+        CloseTab,
+        ReopenTab,
+        GoToLine,
+        FormatJson,
+        FindText,
+        ReplaceText,
+        NextMatch,
+        PreviousMatch,
+        ZoomIn,
+        ZoomOut
     ]
 );
 
@@ -30,6 +43,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-t", ReopenTab, Some("RustText")),
         KeyBinding::new("ctrl-g", GoToLine, Some("RustText")),
         KeyBinding::new("ctrl-shift-j", FormatJson, Some("RustText")),
+        KeyBinding::new("ctrl-f", FindText, Some("RustText")),
+        KeyBinding::new("ctrl-h", ReplaceText, Some("RustText")),
+        KeyBinding::new("f3", NextMatch, Some("RustText")),
+        KeyBinding::new("shift-f3", PreviousMatch, Some("RustText")),
         KeyBinding::new("ctrl-=", ZoomIn, Some("RustText")),
         KeyBinding::new("ctrl--", ZoomOut, Some("RustText")),
     ]);
@@ -138,6 +155,16 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .child(
+                        Button::new("find-text")
+                            .small()
+                            .ghost()
+                            .label("Поиск")
+                            .tooltip("Найти · Ctrl+F")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_search(false, window, cx)
+                            })),
+                    )
                     .child(
                         Button::new("format-json")
                             .small()
@@ -372,6 +399,18 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ReopenTab, window, cx| this.reopen(window, cx)))
             .on_action(cx.listener(|this, _: &GoToLine, window, cx| this.go_to_line(window, cx)))
             .on_action(cx.listener(|this, _: &FormatJson, window, cx| this.format_json(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &FindText, window, cx| this.open_search(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ReplaceText, window, cx| this.open_search(true, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &NextMatch, window, cx| {
+                this.run_search(Command::Next, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PreviousMatch, window, cx| {
+                this.run_search(Command::Previous, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.0, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(-1.0, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
@@ -379,6 +418,7 @@ impl Render for Workspace {
             }))
             .child(self.toolbar(cx))
             .child(self.tabs(cx))
+            .children(self.search_panel(cx))
             .child(
                 div().flex_1().min_h_0().w_full().overflow_hidden().child(
                     Editor::new(&doc.editor)

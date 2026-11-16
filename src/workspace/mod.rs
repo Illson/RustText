@@ -1,5 +1,6 @@
 mod file_actions;
 mod json_action;
+mod search_panel;
 mod view;
 
 pub(crate) use view::bind_keys;
@@ -23,6 +24,7 @@ struct Document {
     editor: Entity<EditorState>,
     saved_text: Rope,
     dirty: bool,
+    revision: u64,
     _subscriptions: [Subscription; 2],
 }
 
@@ -36,6 +38,7 @@ pub(crate) struct Workspace {
     error: Option<SharedString>,
     wrap: bool,
     font_size: f32,
+    search: Option<search_panel::SearchPanel>,
 }
 
 impl Workspace {
@@ -51,6 +54,7 @@ impl Workspace {
             error: recent_error.map(recent_warning),
             wrap: false,
             font_size: 15.0,
+            search: None,
         };
         this.add_document(None, window, cx);
         let workspace = cx.entity().downgrade();
@@ -105,6 +109,7 @@ impl Workspace {
                 && let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id)
             {
                 doc.dirty = editor.read(cx).text() != &doc.saved_text;
+                doc.revision = doc.revision.wrapping_add(1);
                 cx.notify();
             }
         });
@@ -122,6 +127,7 @@ impl Workspace {
             editor,
             saved_text,
             dirty: false,
+            revision: 0,
             _subscriptions: [change, cursor],
         });
         self.select(id, window, cx);

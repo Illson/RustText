@@ -5505,6 +5505,7 @@ version = "0.1.0"
 dependencies = [
  "encoding_rs",
  "gpui-kit",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

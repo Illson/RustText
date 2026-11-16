@@ -4,6 +4,7 @@ mod files;
 mod go_to_line;
 mod json_format;
 mod recent_files;
+mod search;
 mod text_format;
 mod workspace;
 
@@ -29,7 +30,7 @@ fn main() {
                 size(px(1080.0), px(700.0)),
                 cx,
             ))),
-            window_min_size: Some(size(px(640.0), px(350.0))),
+            window_min_size: Some(size(px(760.0), px(350.0))),
             titlebar: Some(TitlebarOptions {
                 title: Some("RustText".into()),
                 ..Default::default()
