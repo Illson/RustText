@@ -196,15 +196,13 @@ impl LogReader {
             .min(MAX_PAGE_ROWS)
             .min((MAX_PAGE_BYTES / row_bytes).max(1));
         let mut rows = VecDeque::with_capacity(row_limit);
+        let is_utf8 = matches!(self.encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom);
         let mut incomplete_utf8_tail = false;
         while cursor < limit && row_limit > 0 && (keep_tail || rows.len() < row_limit) {
             let start = cursor;
             let fragment = read_fragment(&mut self.file, cursor, limit, row_bytes, self.encoding)?;
+            incomplete_utf8_tail = is_utf8 && limit == self.size && fragment.incomplete_tail;
             if fragment.end <= cursor {
-                incomplete_utf8_tail =
-                    matches!(self.encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom)
-                        && fragment.bytes.is_empty()
-                        && limit == self.size;
                 break;
             }
             cursor = fragment.end;
@@ -218,6 +216,9 @@ impl LogReader {
                 continues: !fragment.terminated && cursor < self.size,
                 terminated: fragment.terminated,
             });
+            if incomplete_utf8_tail {
+                break;
+            }
         }
         Ok(Page {
             rows: rows.into(),

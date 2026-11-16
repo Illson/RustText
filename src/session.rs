@@ -4,7 +4,6 @@ use std::{
     io::{self, BufWriter, Write},
     ops::Range,
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
 };
 
 use gpui_kit::component::input::Rope;
@@ -68,12 +67,10 @@ struct Manifest {
     closed_drafts: Vec<Option<DraftInfo>>,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct DraftInfo {
     bytes: u64,
     checksum: u32,
-    #[serde(default)]
-    modified_unix_nanos: Option<u128>,
 }
 
 pub struct Startup {
@@ -201,33 +198,11 @@ impl Journal {
         let pending = tempfile::Builder::new()
             .prefix(".pending-")
             .tempdir_in(&self.directory)?;
-        let previous_manifest =
-            previous.and_then(|sequence| read_manifest(&self.record_path(sequence)).ok());
+        // Each checkpoint owns its drafts so corrupting one cannot invalidate the fallback.
         let manifest = Manifest {
             version: FORMAT_VERSION,
-            drafts: write_drafts(
-                pending.path(),
-                "draft",
-                &capture.state.tabs,
-                &capture.drafts,
-                previous_manifest
-                    .as_ref()
-                    .map(|manifest| (manifest.state.tabs.as_slice(), manifest.drafts.as_slice())),
-                previous.map(|sequence| self.record_path(sequence)),
-            )?,
-            closed_drafts: write_drafts(
-                pending.path(),
-                "closed-draft",
-                &capture.state.closed,
-                &capture.closed_drafts,
-                previous_manifest.as_ref().map(|manifest| {
-                    (
-                        manifest.state.closed.as_slice(),
-                        manifest.closed_drafts.as_slice(),
-                    )
-                }),
-                previous.map(|sequence| self.record_path(sequence)),
-            )?,
+            drafts: write_drafts(pending.path(), "draft", &capture.drafts)?,
+            closed_drafts: write_drafts(pending.path(), "closed-draft", &capture.closed_drafts)?,
             state: capture.state,
         };
         let file = File::create(pending.path().join("manifest.json"))?;
@@ -278,17 +253,10 @@ fn records(directory: &Path) -> io::Result<Vec<u64>> {
     Ok(sequences)
 }
 
-fn read_manifest(directory: &Path) -> io::Result<Manifest> {
-    serde_json::from_slice(&fs::read(directory.join("manifest.json"))?).map_err(io::Error::other)
-}
-
 fn write_drafts(
     directory: &Path,
     prefix: &str,
-    tabs: &[Tab],
     drafts: &[Option<Rope>],
-    previous: Option<(&[Tab], &[Option<DraftInfo>])>,
-    previous_directory: Option<PathBuf>,
 ) -> io::Result<Vec<Option<DraftInfo>>> {
     drafts
         .iter()
@@ -296,65 +264,14 @@ fn write_drafts(
         .map(|(index, draft)| {
             draft
                 .as_ref()
-                .map(|text| {
-                    let destination = directory.join(format!("{prefix}-{index}.txt"));
-                    if let Some(info) = reusable_draft(&tabs[index], previous)
-                        && info.draft.bytes == text.len() as u64
-                        && let Some(previous_directory) = &previous_directory
-                        && link_verified_draft(
-                            &previous_directory.join(format!("{prefix}-{}.txt", info.index)),
-                            &destination,
-                            &info.draft,
-                        )
-                    {
-                        return Ok(info.draft);
-                    }
-                    write_draft(&destination, text)
-                })
+                .map(|text| write_draft(&directory.join(format!("{prefix}-{index}.txt")), text))
                 .transpose()
         })
         .collect()
 }
 
-struct ReusableDraft {
-    index: usize,
-    draft: DraftInfo,
-}
-
-fn reusable_draft(
-    tab: &Tab,
-    previous: Option<(&[Tab], &[Option<DraftInfo>])>,
-) -> Option<ReusableDraft> {
-    let (previous_tabs, previous_drafts) = previous?;
-    let revision = tab.draft_revision?;
-    let previous_index = previous_tabs.iter().position(|previous_tab| {
-        previous_tab.id == tab.id && previous_tab.draft_revision == Some(revision)
-    })?;
-    let draft = previous_drafts.get(previous_index)?.as_ref()?;
-    Some(ReusableDraft {
-        index: previous_index,
-        draft: *draft,
-    })
-}
-
-fn link_verified_draft(source: &Path, destination: &Path, info: &DraftInfo) -> bool {
-    let Ok(metadata) = fs::metadata(source) else {
-        return false;
-    };
-    if info.modified_unix_nanos.is_none()
-        || metadata.len() != info.bytes
-        || modified_unix_nanos(&metadata).ok().flatten() != info.modified_unix_nanos
-    {
-        return false;
-    }
-    // Restore validates checksums before a record becomes last_valid. The saved
-    // modification time detects ordinary external writes without rereading the text.
-    // Writes through any hard link affect every record sharing this snapshot.
-    fs::hard_link(source, destination).is_ok()
-}
-
 fn write_draft(path: &Path, text: &Rope) -> io::Result<DraftInfo> {
-    let mut writer = BufWriter::new(File::create(path)?);
+    let mut writer = BufWriter::with_capacity(256 * 1024, File::create(path)?);
     let mut checksum = crc32fast::Hasher::new();
     for chunk in text.chunks() {
         checksum.update(chunk.as_bytes());
@@ -362,23 +279,10 @@ fn write_draft(path: &Path, text: &Rope) -> io::Result<DraftInfo> {
     }
     writer.flush()?;
     writer.get_ref().sync_all()?;
-    drop(writer);
-    let modified_unix_nanos = fs::metadata(path)
-        .ok()
-        .and_then(|metadata| modified_unix_nanos(&metadata).ok().flatten());
     Ok(DraftInfo {
         bytes: text.len() as u64,
         checksum: checksum.finalize(),
-        modified_unix_nanos,
     })
-}
-
-fn modified_unix_nanos(metadata: &fs::Metadata) -> io::Result<Option<u128>> {
-    let modified = metadata.modified()?;
-    Ok(modified
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_nanos()))
 }
 
 fn read_record(directory: &Path) -> io::Result<Recovered> {
@@ -387,7 +291,7 @@ fn read_record(directory: &Path) -> io::Result<Recovered> {
         mut state,
         drafts,
         closed_drafts,
-    } = read_manifest(directory)?;
+    } = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
     if version != FORMAT_VERSION
         || state.active >= state.tabs.len()
         || state.tabs.len() != drafts.len()

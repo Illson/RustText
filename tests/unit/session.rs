@@ -84,54 +84,39 @@ fn retains_two_latest_commits_and_refuses_concurrent_writers() {
 }
 
 #[test]
-fn cursor_only_checkpoint_reuses_the_verified_draft_snapshot() {
-    let temporary = tempfile::tempdir().unwrap();
-    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
-    let mut first = capture("unchanged draft");
-    first.state.closed.push(Tab {
-        id: 2,
-        file: None,
-        format: TextFormat::default(),
-        selection: 0..0,
-        reversed: false,
-        scroll: [0., 0.],
-        draft_revision: Some(4),
-        log: None,
-    });
-    first.closed_drafts.push(Some(Rope::from("closed draft")));
-    journal.commit(1, first).unwrap();
+fn restores_previous_checkpoint_after_corrupting_an_unchanged_draft() {
+    let capture_with_closed_draft = |cursor| {
+        let mut snapshot = capture("open draft");
+        let mut closed_tab = snapshot.state.tabs[0].clone();
+        closed_tab.id = 2;
+        snapshot.state.closed.push(closed_tab);
+        snapshot
+            .closed_drafts
+            .push(Some(Rope::from("closed draft")));
+        snapshot.state.tabs[0].selection = cursor..cursor;
+        snapshot
+    };
 
-    let mut second = capture("unchanged draft");
-    second.state.tabs[0].selection = 8..8;
-    second.state.closed.push(Tab {
-        id: 2,
-        file: None,
-        format: TextFormat::default(),
-        selection: 0..0,
-        reversed: false,
-        scroll: [0., 0.],
-        draft_revision: Some(4),
-        log: None,
-    });
-    second.closed_drafts.push(Some(Rope::from("closed draft")));
-    journal.commit(2, second).unwrap();
+    for damaged_file in ["draft-0.txt", "closed-draft-0.txt"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().to_path_buf();
+        let mut journal = Journal::open(directory.clone()).unwrap();
+        journal.commit(1, capture_with_closed_draft(1)).unwrap();
+        journal.commit(2, capture_with_closed_draft(2)).unwrap();
+        let damaged_path = journal.record_path(2).join(damaged_file);
+        let mut damaged = fs::read(&damaged_path).unwrap();
+        damaged[0] = b'!';
+        fs::write(damaged_path, damaged).unwrap();
+        drop(journal);
 
-    assert_eq!(
-        fs::metadata(journal.record_path(1).join("closed-draft-0.txt"))
-            .unwrap()
-            .modified()
-            .unwrap(),
-        fs::metadata(journal.record_path(2).join("closed-draft-0.txt"))
-            .unwrap()
-            .modified()
-            .unwrap()
-    );
-
-    let (recovered, warning) = journal.restore();
-    assert!(warning.is_none());
-    let recovered = recovered.unwrap();
-    assert_eq!(recovered.drafts, [Some("unchanged draft".into())]);
-    assert_eq!(recovered.closed_drafts, [Some("closed draft".into())]);
+        let mut journal = Journal::open(directory).unwrap();
+        let (recovered, warning) = journal.restore();
+        let recovered = recovered.expect("the earlier checkpoint must survive in-place corruption");
+        assert!(warning.is_some());
+        assert_eq!(recovered.state.tabs[0].selection, 1..1);
+        assert_eq!(recovered.drafts, [Some("open draft".into())]);
+        assert_eq!(recovered.closed_drafts, [Some("closed draft".into())]);
+    }
 }
 
 #[test]
@@ -143,13 +128,6 @@ fn corrupted_previous_draft_is_rewritten_from_the_current_capture() {
     let corrupted = "corrupted draft!";
     assert_eq!(corrupted.len(), "recoverable text".len());
     fs::write(&draft_path, corrupted).unwrap();
-    OpenOptions::new()
-        .write(true)
-        .open(&draft_path)
-        .unwrap()
-        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
-        .unwrap();
-
     let mut next = capture("recoverable text");
     next.state.tabs[0].selection = 5..5;
     journal.commit(2, next).unwrap();
@@ -157,6 +135,22 @@ fn corrupted_previous_draft_is_rewritten_from_the_current_capture() {
     let (recovered, warning) = journal.restore();
     assert!(warning.is_none());
     assert_eq!(recovered.unwrap().drafts, [Some("recoverable text".into())]);
+}
+
+#[test]
+fn restores_checkpoint_with_legacy_draft_timestamp() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    journal.commit(1, capture("previous format")).unwrap();
+    let path = journal.record_path(1).join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["drafts"][0]["modified_unix_nanos"] = 1_700_000_000_000_000_000_u64.into();
+    fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    assert_eq!(recovered.unwrap().drafts, [Some("previous format".into())]);
 }
 
 #[test]
