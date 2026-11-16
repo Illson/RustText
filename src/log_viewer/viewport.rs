@@ -104,22 +104,17 @@ impl LogViewer {
         if loaded.reset {
             self.reset_index();
             self.reset_search();
-            self.notice
-                .get_or_insert("Лог изменился. Позиция и скрытая граница сброшены.".into());
+            self.notice.get_or_insert(
+                "Прежнее содержимое лога не подтверждено. Позиция и скрытая граница сброшены."
+                    .into(),
+            );
         }
         self.encoding = loaded.encoding;
-        self.bookmark.identity = Some(loaded.observation.stamp.identity);
-        self.bookmark.size = loaded.observation.stamp.len.max(loaded.page.file_size);
+        self.bookmark.record_observation(&loaded.observation);
         self.bookmark.offset = loaded.start;
         self.bookmark.hidden = loaded.hidden;
         self.observation = Some(loaded.observation);
-        let mut text = String::new();
-        for (index, row) in loaded.page.rows.iter().enumerate() {
-            if index != 0 {
-                text.push('\n');
-            }
-            text.push_str(&row.text);
-        }
+        let text = assemble_page_text(&loaded.page);
         self.viewer.update(cx, |viewer, cx| {
             viewer.set_value(text, window, cx);
             if loaded.scroll_to_bottom {
@@ -152,7 +147,7 @@ impl LogViewer {
         match result {
             Ok((_, Change::Same)) => {}
             Ok((observation, Change::Appended)) => {
-                self.bookmark.size = observation.stamp.len;
+                self.bookmark.record_observation(&observation);
                 self.observation = Some(observation);
                 if self.page.as_ref().is_some_and(|page| page.eof) {
                     self.load_page(Destination::Append(self.bookmark.follow_end), window, cx);
@@ -178,8 +173,7 @@ impl LogViewer {
                 );
                 self.bookmark.hidden = 0;
                 self.bookmark.offset = 0;
-                self.bookmark.identity = Some(observation.stamp.identity);
-                self.bookmark.size = observation.stamp.len;
+                self.bookmark.record_observation(&observation);
                 self.observation = Some(observation);
                 self.load_page(
                     if self.bookmark.follow_end {
@@ -293,6 +287,17 @@ impl LogViewer {
     }
 }
 
+fn assemble_page_text(page: &Page) -> String {
+    let mut text = String::new();
+    for (index, row) in page.rows.iter().enumerate() {
+        text.push_str(&row.text);
+        if row.terminated && index + 1 < page.rows.len() {
+            text.push('\n');
+        }
+    }
+    text
+}
+
 fn read_page(
     path: &std::path::Path,
     encoding: Option<TextEncoding>,
@@ -310,12 +315,16 @@ fn read_page(
     let (observation, change) = log_file::observe_file(&mut file, previous.observation.as_ref())
         .map_err(|error| error.to_string())?;
     reader.refresh_size().map_err(|error| error.to_string())?;
-    let reset = (bookmark.identity.is_some() && !bookmark.can_restore(&observation.stamp))
-        || (previous.observation.is_some()
-            && matches!(
-                change,
-                Change::Replaced | Change::Truncated | Change::Rewritten
-            ));
+    let reset = if previous.observation.is_some() {
+        matches!(
+            change,
+            Change::Replaced | Change::Truncated | Change::Rewritten
+        )
+    } else {
+        !bookmark
+            .can_restore(&mut file, &observation)
+            .map_err(|error| error.to_string())?
+    };
     let floor = if reset {
         0
     } else {

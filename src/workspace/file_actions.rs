@@ -7,6 +7,7 @@ use crate::{
     files::{self, FileTarget, OpenedFile},
     log_file::LogBookmark,
     recent_files::RecentFile,
+    session::Tab,
     text_format::TextEncoding,
 };
 
@@ -45,6 +46,20 @@ impl OpenMode {
 enum LoadedDocument {
     Text(OpenedFile),
     Log(FileTarget),
+}
+
+fn should_replace_opened_document(
+    dirty: bool,
+    placeholder: bool,
+    current_target: Option<&FileTarget>,
+    opened_target: &FileTarget,
+    current_encoding: TextEncoding,
+    opened_encoding: TextEncoding,
+) -> bool {
+    !dirty
+        && (placeholder
+            || current_target != Some(opened_target)
+            || current_encoding != opened_encoding)
 }
 
 fn read_document(path: &Path, mode: OpenMode) -> std::io::Result<LoadedDocument> {
@@ -116,20 +131,20 @@ impl Workspace {
 
     pub(super) fn open_closed_file(
         &mut self,
-        id: u64,
         recent: RecentFile,
+        tab: Tab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let mode = OpenMode::from_recent(&recent);
-        self.load_paths(vec![recent.path], mode, Some(id), window, cx);
+        self.load_paths(vec![recent.path], mode, Some(tab), window, cx);
     }
 
     fn load_paths(
         &mut self,
         paths: Vec<PathBuf>,
         mode: OpenMode,
-        closed_id: Option<u64>,
+        closed_tab: Option<Tab>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -153,10 +168,16 @@ impl Workspace {
                     .await
                 {
                     Ok(opened) => match this.update_in(cx, |this, window, cx| match opened {
-                        LoadedDocument::Text(document) => this.show_opened(document, window, cx),
-                        LoadedDocument::Log(target) => {
-                            this.show_log(target, mode.windows_1251, window, cx)
+                        LoadedDocument::Text(document) => {
+                            this.show_opened(document, closed_tab.as_ref(), window, cx)
                         }
+                        LoadedDocument::Log(target) => this.show_log(
+                            target,
+                            mode.windows_1251,
+                            closed_tab.as_ref().and_then(|tab| tab.log.clone()),
+                            window,
+                            cx,
+                        ),
                     }) {
                         Ok(file) => opened_files.push(file),
                         Err(_) => return,
@@ -177,10 +198,10 @@ impl Workspace {
                 })
                 .await;
             this.update_in(cx, |this, _, cx| {
-                if let Some(id) = closed_id
+                if let Some(tab) = &closed_tab
                     && opened_any
                 {
-                    this.closed.retain(|entry| entry.tab.id != id);
+                    this.closed.retain(|entry| entry.tab.id != tab.id);
                 }
                 this.busy = None;
                 this.recent = recent;
@@ -203,6 +224,7 @@ impl Workspace {
     fn show_opened(
         &mut self,
         opened: OpenedFile,
+        restore: Option<&Tab>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> RecentFile {
@@ -214,7 +236,14 @@ impl Workspace {
                     .is_some_and(|file| file.path == opened.target.path)
         }) {
             let id = doc.id;
-            if !doc.dirty && (doc.placeholder || doc.file.as_ref() != Some(&opened.target)) {
+            if should_replace_opened_document(
+                doc.dirty,
+                doc.placeholder,
+                doc.file.as_ref(),
+                &opened.target,
+                doc.format.encoding,
+                opened.format.encoding,
+            ) {
                 doc.editor
                     .update(cx, |editor, cx| editor.set_value(opened.text, window, cx));
                 doc.saved_text = Some(doc.editor.read(cx).text().clone());
@@ -224,6 +253,9 @@ impl Workspace {
                 doc.restored_scroll = None;
                 doc.disk_status = DiskStatus::Current;
                 doc.revision = doc.revision.wrapping_add(1);
+                if let Some(tab) = restore {
+                    doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
+                }
             }
             let recent = RecentFile::new(opened.target.path, doc.format.encoding);
             self.select(id, window, cx);
@@ -238,6 +270,12 @@ impl Workspace {
         }
         let recent = RecentFile::new(opened.target.path.clone(), opened.format.encoding);
         self.add_document(Some(opened), window, cx);
+        if let Some(tab) = restore {
+            self.documents
+                .last_mut()
+                .expect("opened document exists")
+                .restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
+        }
         recent
     }
 
@@ -245,6 +283,7 @@ impl Workspace {
         &mut self,
         target: FileTarget,
         windows_1251: bool,
+        bookmark: Option<LogBookmark>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> RecentFile {
@@ -274,7 +313,13 @@ impl Workspace {
         {
             self.documents.clear();
         }
-        let id = self.insert_log(target, windows_1251, LogBookmark::default(), window, cx);
+        let id = self.insert_log(
+            target,
+            windows_1251,
+            bookmark.unwrap_or_default(),
+            window,
+            cx,
+        );
         self.select(id, window, cx);
         recent
     }
@@ -413,3 +458,7 @@ impl Workspace {
         .detach();
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/file_reopen.rs"]
+mod tests;
