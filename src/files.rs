@@ -1,191 +1,15 @@
 use std::{
-    borrow::Cow,
     fs::{self, File, Metadata},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use encoding_rs::{UTF_16BE, UTF_16LE, WINDOWS_1251};
 use tempfile::NamedTempFile;
 
+use crate::text_format::TextFormat;
+
 const MAX_EDITOR_BYTES: u64 = 50 * 1024 * 1024;
-
-#[derive(Clone, Copy, Default)]
-pub struct TextFormat {
-    pub encoding: TextEncoding,
-    endings: LineEndings,
-}
-
-#[derive(Clone, Copy, Default)]
-pub enum TextEncoding {
-    #[default]
-    Utf8,
-    Utf8Bom,
-    Utf16Le,
-    Utf16Be,
-    Windows1251,
-}
-
-impl TextEncoding {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Utf8 => "UTF-8",
-            Self::Utf8Bom => "UTF-8 BOM",
-            Self::Utf16Le => "UTF-16 LE",
-            Self::Utf16Be => "UTF-16 BE",
-            Self::Windows1251 => "Windows-1251",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-enum LineEndings {
-    #[default]
-    Lf,
-    CrLf,
-    Cr,
-    Mixed,
-}
-
-impl LineEndings {
-    fn detect(text: &str) -> Self {
-        let mut bytes = text.bytes().peekable();
-        let (mut lf, mut crlf, mut cr) = (false, false, false);
-
-        while let Some(byte) = bytes.next() {
-            match byte {
-                b'\n' => lf = true,
-                b'\r' if bytes.next_if_eq(&b'\n').is_some() => crlf = true,
-                b'\r' => cr = true,
-                _ => {}
-            }
-            if (lf as u8 + crlf as u8 + cr as u8) > 1 {
-                return Self::Mixed;
-            }
-        }
-
-        match (crlf, cr) {
-            (true, _) => Self::CrLf,
-            (_, true) => Self::Cr,
-            _ => Self::Lf,
-        }
-    }
-}
-
-impl TextFormat {
-    pub fn line_endings_label(self) -> &'static str {
-        match self.endings {
-            LineEndings::Lf => "LF",
-            LineEndings::CrLf => "CRLF",
-            LineEndings::Cr => "CR",
-            LineEndings::Mixed => "Смешанные",
-        }
-    }
-
-    fn decode(bytes: &[u8], windows_1251: bool) -> io::Result<(String, Self)> {
-        let (text, encoding) = if windows_1251 {
-            (
-                WINDOWS_1251
-                    .decode_without_bom_handling_and_without_replacement(bytes)
-                    .ok_or_else(|| invalid_data("Некорректный текст Windows-1251"))?
-                    .into_owned(),
-                TextEncoding::Windows1251,
-            )
-        } else if let Some(content) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-            (decode_utf16(content, UTF_16LE)?, TextEncoding::Utf16Le)
-        } else if let Some(content) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-            (decode_utf16(content, UTF_16BE)?, TextEncoding::Utf16Be)
-        } else {
-            let (content, encoding) = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-                Some(content) => (content, TextEncoding::Utf8Bom),
-                None => (bytes, TextEncoding::Utf8),
-            };
-            let text = std::str::from_utf8(content).map_err(|_| {
-                invalid_data("Ожидается UTF-8 или UTF-16 с BOM. Для Windows-1251 выберите кодировку при открытии")
-            })?;
-            (text.to_owned(), encoding)
-        };
-
-        if text.contains('\0') {
-            return Err(invalid_data("Файл содержит нулевые символы"));
-        }
-
-        let endings = LineEndings::detect(&text);
-        let text = if matches!(endings, LineEndings::Cr) {
-            text.replace('\r', "\n")
-        } else {
-            text
-        };
-        Ok((text, Self { encoding, endings }))
-    }
-
-    fn encode(self, text: &str) -> io::Result<Vec<u8>> {
-        let text = match self.endings {
-            LineEndings::CrLf => {
-                let mut normalized = String::with_capacity(text.len());
-                for part in text.split_inclusive('\n') {
-                    if let Some(line) = part.strip_suffix('\n') {
-                        normalized.push_str(line);
-                        if !line.ends_with('\r') {
-                            normalized.push('\r');
-                        }
-                        normalized.push('\n');
-                    } else {
-                        normalized.push_str(part);
-                    }
-                }
-                Cow::Owned(normalized)
-            }
-            LineEndings::Cr => Cow::Owned(text.replace("\r\n", "\n").replace('\n', "\r")),
-            LineEndings::Lf | LineEndings::Mixed => Cow::Borrowed(text),
-        };
-
-        match self.encoding {
-            TextEncoding::Utf8 => Ok(text.into_owned().into_bytes()),
-            TextEncoding::Utf8Bom => {
-                let mut encoded = vec![0xEF, 0xBB, 0xBF];
-                encoded.extend_from_slice(text.as_bytes());
-                Ok(encoded)
-            }
-            TextEncoding::Utf16Le | TextEncoding::Utf16Be => {
-                let little_endian = matches!(self.encoding, TextEncoding::Utf16Le);
-                let mut encoded = Vec::with_capacity(text.len().saturating_mul(2) + 2);
-                encoded.extend(if little_endian {
-                    [0xFF, 0xFE]
-                } else {
-                    [0xFE, 0xFF]
-                });
-                for code_unit in text.encode_utf16() {
-                    encoded.extend(if little_endian {
-                        code_unit.to_le_bytes()
-                    } else {
-                        code_unit.to_be_bytes()
-                    });
-                }
-                Ok(encoded)
-            }
-            TextEncoding::Windows1251 => {
-                let (encoded, _, had_errors) = WINDOWS_1251.encode(&text);
-                if had_errors {
-                    return Err(invalid_data("Часть символов отсутствует в Windows-1251"));
-                }
-                Ok(encoded.into_owned())
-            }
-        }
-    }
-}
-
-fn decode_utf16(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> io::Result<String> {
-    encoding
-        .decode_without_bom_handling_and_without_replacement(bytes)
-        .map(Cow::into_owned)
-        .ok_or_else(|| invalid_data("Некорректный текст UTF-16"))
-}
-
-fn invalid_data(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct FileVersion {
@@ -197,7 +21,10 @@ pub struct FileVersion {
 impl FileVersion {
     fn from_metadata(metadata: &Metadata) -> io::Result<Self> {
         if !metadata.is_file() {
-            return Err(invalid_data("Выберите обычный файл"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Выберите обычный файл",
+            ));
         }
 
         Ok(Self {
@@ -228,12 +55,12 @@ impl FileTarget {
         let path = match version {
             Some(_) => path.canonicalize()?,
             None => {
-                let name = path
-                    .file_name()
-                    .ok_or_else(|| invalid_data("Укажите имя файла"))?;
-                let parent = path
-                    .parent()
-                    .ok_or_else(|| invalid_data("Укажите папку файла"))?;
+                let name = path.file_name().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Укажите имя файла")
+                })?;
+                let parent = path.parent().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Укажите папку файла")
+                })?;
                 parent.canonicalize()?.join(name)
             }
         };
@@ -280,7 +107,7 @@ pub fn save(mut target: FileTarget, format: TextFormat, text: &str) -> io::Resul
     let directory = target
         .path
         .parent()
-        .ok_or_else(|| invalid_data("Укажите папку файла"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Укажите папку файла"))?;
     let mut pending = NamedTempFile::new_in(directory)?;
     pending.write_all(&bytes)?;
     pending.as_file().sync_all()?;
@@ -302,7 +129,10 @@ pub fn save(mut target: FileTarget, format: TextFormat, text: &str) -> io::Resul
 }
 
 fn file_too_large() -> io::Error {
-    invalid_data("Лимит редактора — 50 МиБ. Просмотр больших файлов появится на следующем этапе")
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Лимит редактора — 50 МиБ. Просмотр больших файлов появится на следующем этапе",
+    )
 }
 
 fn file_changed() -> io::Error {
@@ -314,25 +144,6 @@ fn file_changed() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn saves_cyrillic_without_changing_original_format() {
-        let utf16 = [0xff, 0xfe, 0x2f, 0x04, 0x0d, 0x00, 0x0a, 0x00];
-        let (text, format) = TextFormat::decode(&utf16, false).unwrap();
-        assert_eq!(text, "Я\r\n");
-        assert_eq!(format.encode(&text).unwrap(), utf16);
-        assert_eq!(
-            format.encode("Я\r\nБ\n").unwrap(),
-            [
-                0xff, 0xfe, 0x2f, 0x04, 0x0d, 0x00, 0x0a, 0x00, 0x11, 0x04, 0x0d, 0x00, 0x0a, 0x00
-            ]
-        );
-
-        let (text, format) = TextFormat::decode(b"\xcf\xf0\xe8\xe2\xe5\xf2", true).unwrap();
-        assert_eq!(text, "Привет");
-        assert_eq!(format.encode(&text).unwrap(), b"\xcf\xf0\xe8\xe2\xe5\xf2");
-        assert!(format.encode("Привет 🦀").is_err());
-    }
 
     #[test]
     fn detects_external_changes_before_replacing_a_file() {
