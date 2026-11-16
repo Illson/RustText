@@ -52,9 +52,17 @@ impl LogSearch {
         }
     }
 
-    fn render(&self, enabled: bool, cx: &mut Context<LogViewer>) -> impl IntoElement {
+    fn render(
+        &self,
+        enabled: bool,
+        file_size: u64,
+        cx: &mut Context<LogViewer>,
+    ) -> impl IntoElement {
         let running = self.progress.is_some();
-        let can_continue = self.results.as_ref().is_some_and(|page| !page.complete);
+        let can_continue = self
+            .results
+            .as_ref()
+            .is_some_and(|page| can_continue(page, file_size));
         let message = self.progress.as_ref().map_or_else(
             || self.message.clone(),
             |progress| {
@@ -195,7 +203,7 @@ impl LogViewer {
     pub(super) fn search_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         self.search
             .as_ref()
-            .map(|search| search.render(self.available(), cx))
+            .map(|search| search.render(self.available(), self.bookmark.size, cx))
     }
 
     pub(super) fn reset_search(&mut self) {
@@ -282,7 +290,11 @@ impl LogViewer {
                         &cancel,
                     )?;
                     done.store(page.next_offset.saturating_sub(offset), Ordering::Relaxed);
-                    if page.complete || !page.hits.is_empty() || page.next_offset <= position {
+                    if page.complete
+                        || page.pending_line_start.is_some()
+                        || !page.hits.is_empty()
+                        || page.next_offset <= position
+                    {
                         return Ok(page);
                     }
                     position = page.next_offset;
@@ -313,7 +325,13 @@ impl LogViewer {
                 }
                 match result {
                     Ok(page) => {
-                        search.message = if page.hits.is_empty() {
+                        search.message = if page.pending_line_start.is_some() {
+                            format!(
+                                "Строк с совпадениями: {}. После дописывания файла нажмите «Ещё», чтобы проверить последнюю строку.",
+                                page.hits.len()
+                            )
+                            .into()
+                        } else if page.hits.is_empty() {
                             "Совпадений больше нет.".into()
                         } else if page.complete {
                             format!(
@@ -346,6 +364,13 @@ pub(super) fn progress_percent(done: u64, total: u64) -> u64 {
         .checked_div(total)
         .unwrap_or(0)
         .min(100)
+}
+
+fn can_continue(page: &SearchPage, current_file_size: u64) -> bool {
+    !page.complete
+        && page
+            .pending_line_start
+            .is_none_or(|_| page.file_size < current_file_size)
 }
 
 fn option_button(
@@ -383,3 +408,7 @@ fn result_button(hit: &SearchHit, cx: &mut Context<LogViewer>) -> Button {
             this.navigate(Destination::Match(offset), window, cx)
         }))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/log_search.rs"]
+mod tests;

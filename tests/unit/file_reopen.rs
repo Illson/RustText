@@ -1,7 +1,20 @@
 use std::path::PathBuf;
 
-use super::{LoadedDocument, OpenMode, read_document, should_replace_opened_document};
-use crate::{files::FileTarget, text_format::TextEncoding};
+use super::{LoadedDocument, OpenMode, read_document, reopen_existing_document};
+use crate::{files::FileTarget, session::Tab, text_format::TextEncoding};
+
+fn closed_view(file: FileTarget) -> Tab {
+    Tab {
+        id: 1,
+        file: Some(file),
+        format: crate::text_format::TextFormat::for_encoding(TextEncoding::Windows1251),
+        selection: 2..6,
+        reversed: true,
+        scroll: [0., 200.],
+        draft_revision: None,
+        log: None,
+    }
+}
 
 #[test]
 fn replaces_clean_document_when_reopened_with_another_encoding() {
@@ -23,14 +36,21 @@ fn replaces_clean_document_when_reopened_with_another_encoding() {
     assert!(windows_1251.format.encoding == TextEncoding::Windows1251);
     assert!(utf8.format.encoding == TextEncoding::Utf8);
 
-    assert!(should_replace_opened_document(
+    let closed = closed_view(windows_1251.target.clone());
+    let reopen = reopen_existing_document(
         false,
         false,
-        Some(&windows_1251.target),
-        &utf8.target,
-        windows_1251.format.encoding,
+        Some(&utf8.target),
+        &windows_1251.target,
         utf8.format.encoding,
-    ));
+        windows_1251.format.encoding,
+        Some(&closed),
+    );
+    assert!(reopen.replace_text);
+    let restore = reopen.restore.expect("closed tab view must be restored");
+    assert_eq!(restore.selection, 2..6);
+    assert!(restore.reversed);
+    assert_eq!(restore.scroll, [0., 200.]);
 }
 
 #[test]
@@ -40,12 +60,16 @@ fn keeps_dirty_document_when_reopened_with_another_encoding() {
         version: None,
     };
 
-    assert!(!should_replace_opened_document(
+    let closed = closed_view(target.clone());
+    let reopen = reopen_existing_document(
         true,
         false,
         Some(&target),
         &target,
         TextEncoding::Windows1251,
         TextEncoding::Utf8,
-    ));
+        Some(&closed),
+    );
+    assert!(!reopen.replace_text);
+    assert!(reopen.restore.is_none());
 }

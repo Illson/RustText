@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
     ops::Range,
     sync::atomic::{AtomicBool, Ordering},
@@ -22,6 +24,7 @@ pub struct Hit {
     pub range: Range<usize>,
 }
 
+#[derive(Clone)]
 pub struct Source {
     pub tab: u64,
     pub text: Rope,
@@ -46,6 +49,9 @@ pub enum Outcome {
     Found {
         hit: Option<Hit>,
     },
+    Incomplete {
+        progress: NavigationProgress,
+    },
     Cancelled,
     Replaced {
         range: Range<usize>,
@@ -55,10 +61,35 @@ pub enum Outcome {
     NoReplacements,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigationProgress {
+    pub tab: u64,
+    pub boundary: usize,
+    pub last_match: Option<Range<usize>>,
+    pub wrapped: bool,
+}
+
+pub struct NavigationStart {
+    pub skip_current: bool,
+    pub progress: Option<NavigationProgress>,
+}
+
+impl NavigationProgress {
+    pub fn after_hit(tab: u64, range: Range<usize>) -> Self {
+        Self {
+            tab,
+            boundary: range.end,
+            last_match: Some(range),
+            wrapped: false,
+        }
+    }
+}
+
 pub struct WorkBudget<'a> {
     cancelled: &'a AtomicBool,
     deadline: Instant,
+    #[cfg(test)]
+    remaining_checks: Option<Cell<usize>>,
 }
 
 impl<'a> WorkBudget<'a> {
@@ -66,14 +97,36 @@ impl<'a> WorkBudget<'a> {
         Self {
             cancelled,
             deadline,
+            #[cfg(test)]
+            remaining_checks: None,
         }
     }
 
-    fn check(self) -> Result<bool, String> {
+    #[cfg(test)]
+    fn with_check_limit(cancelled: &'a AtomicBool, limit: usize) -> Self {
+        Self {
+            cancelled,
+            deadline: Instant::now() + std::time::Duration::from_secs(5),
+            remaining_checks: Some(Cell::new(limit)),
+        }
+    }
+
+    fn check(&self) -> Result<bool, String> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+        #[cfg(test)]
+        if let Some(remaining) = &self.remaining_checks {
+            let checks = remaining.get();
+            if checks == 0 {
+                return Err("Поиск приостановлен из-за лимита вычислений.".into());
+            }
+            remaining.set(checks - 1);
+        }
         if Instant::now() >= self.deadline {
             return Err("Поиск превысил лимит времени 400 мс.".into());
         }
-        Ok(self.cancelled.load(Ordering::Relaxed))
+        Ok(false)
     }
 }
 
@@ -82,9 +135,9 @@ pub fn run(
     command: Command,
     sources: Vec<Source>,
     origin: &Hit,
-    skip_current: bool,
     replacement: &str,
-    work: WorkBudget<'_>,
+    work: &WorkBudget<'_>,
+    navigation: NavigationStart,
 ) -> Result<Outcome, String> {
     if work.check()? {
         return Ok(Outcome::Cancelled);
@@ -117,9 +170,10 @@ pub fn run(
         &regex,
         sources,
         origin,
-        skip_current,
+        navigation.skip_current,
         command == Command::Previous,
         work,
+        navigation.progress,
     )
 }
 
@@ -150,30 +204,36 @@ fn navigate(
     origin: &Hit,
     skip_current: bool,
     backwards: bool,
-    work: WorkBudget<'_>,
+    work: &WorkBudget<'_>,
+    progress: Option<NavigationProgress>,
 ) -> Result<Outcome, String> {
     let tab_index = sources.iter().position(|source| source.tab == origin.tab);
     let Some(tab_index) = tab_index else {
         return Ok(Outcome::Found { hit: None });
     };
+    if !backwards {
+        return navigate_forward(
+            regex,
+            &sources,
+            tab_index,
+            origin,
+            skip_current,
+            work,
+            progress,
+        );
+    }
     if work.check()? {
         return Ok(Outcome::Cancelled);
     }
 
     let mut order = Vec::with_capacity(sources.len());
-    if backwards {
-        order.push((tab_index, true));
-        order.extend((0..tab_index).rev().map(|index| (index, false)));
-        order.extend(
-            (tab_index + 1..sources.len())
-                .rev()
-                .map(|index| (index, false)),
-        );
-    } else {
-        order.push((tab_index, true));
-        order.extend((tab_index + 1..sources.len()).map(|index| (index, false)));
-        order.extend((0..tab_index).map(|index| (index, false)));
-    }
+    order.push((tab_index, true));
+    order.extend((0..tab_index).rev().map(|index| (index, false)));
+    order.extend(
+        (tab_index + 1..sources.len())
+            .rev()
+            .map(|index| (index, false)),
+    );
 
     for (index, cursor_tab) in &order {
         if work.check()? {
@@ -184,25 +244,13 @@ fn navigate(
             return Err("Поиск ограничен документами до 64 МиБ.".into());
         }
         let text = source.text.to_string();
-        let hit = if backwards {
-            last_match_before(
-                regex,
-                source.tab,
-                &text,
-                (*cursor_tab).then_some(origin.range.start),
-                work,
-            )?
-        } else {
-            let start = if *cursor_tab { origin.range.start } else { 0 };
-            first_match(
-                regex,
-                source.tab,
-                &text,
-                start,
-                (skip_current && *cursor_tab).then_some(origin),
-                work,
-            )?
-        };
+        let hit = last_match_before(
+            regex,
+            source.tab,
+            &text,
+            (*cursor_tab).then_some(origin.range.start),
+            work,
+        )?;
         if work.check()? {
             return Ok(Outcome::Cancelled);
         }
@@ -216,15 +264,133 @@ fn navigate(
             return Err("Поиск ограничен документами до 64 МиБ.".into());
         }
         let text = source.text.to_string();
-        if backwards {
-            if let Some(hit) = last_match_before(regex, source.tab, &text, None, work)? {
-                return Ok(Outcome::Found { hit: Some(hit) });
+        let hit = last_match_before(regex, source.tab, &text, None, work)?;
+        return Ok(Outcome::Found { hit });
+    }
+    Ok(Outcome::Found { hit: None })
+}
+
+fn navigate_forward(
+    regex: &Regex,
+    sources: &[Source],
+    origin_index: usize,
+    origin: &Hit,
+    skip_current: bool,
+    work: &WorkBudget<'_>,
+    progress: Option<NavigationProgress>,
+) -> Result<Outcome, String> {
+    let mut targets = Vec::with_capacity(sources.len() + 1);
+    targets.push((
+        origin_index,
+        false,
+        origin.range.start,
+        skip_current.then_some(origin),
+    ));
+    targets.extend((origin_index + 1..sources.len()).map(|index| (index, false, 0, None)));
+    targets.extend((0..origin_index).map(|index| (index, false, 0, None)));
+    targets.push((origin_index, true, 0, None));
+
+    let resume_target = progress.as_ref().and_then(|saved| {
+        targets.iter().position(|(index, wrapped, _, _)| {
+            sources[*index].tab == saved.tab && *wrapped == saved.wrapped
+        })
+    });
+
+    for (target_index, (source_index, wrapped, minimum_start, skip)) in targets.iter().enumerate() {
+        if resume_target.is_some_and(|resume_index| target_index < resume_index) {
+            continue;
+        }
+        let source = &sources[*source_index];
+        let mut scan = if resume_target == Some(target_index) {
+            progress.clone().expect("resume progress exists")
+        } else {
+            NavigationProgress {
+                tab: source.tab,
+                boundary: 0,
+                last_match: None,
+                wrapped: *wrapped,
             }
-        } else if let Some(hit) = first_match(regex, source.tab, &text, 0, None, work)? {
-            return Ok(Outcome::Found { hit: Some(hit) });
+        };
+        match work.check() {
+            Ok(true) => return Ok(Outcome::Cancelled),
+            Ok(false) => {}
+            Err(_) => {
+                return Ok(Outcome::Incomplete { progress: scan });
+            }
+        }
+        if !source_within_limit(source) {
+            return Err("Поиск ограничен документами до 64 МиБ.".into());
+        }
+        let text = source.text.to_string();
+        match scan_forward(regex, &text, &mut scan, *minimum_start, *skip, work) {
+            ForwardScan::Found(hit) => return Ok(Outcome::Found { hit: Some(hit) }),
+            ForwardScan::Complete => {}
+            ForwardScan::Incomplete => return Ok(Outcome::Incomplete { progress: scan }),
+            ForwardScan::Cancelled => return Ok(Outcome::Cancelled),
         }
     }
     Ok(Outcome::Found { hit: None })
+}
+
+enum ForwardScan {
+    Found(Hit),
+    Complete,
+    Incomplete,
+    Cancelled,
+}
+
+fn scan_forward(
+    regex: &Regex,
+    text: &str,
+    progress: &mut NavigationProgress,
+    minimum_start: usize,
+    skip: Option<&Hit>,
+    work: &WorkBudget<'_>,
+) -> ForwardScan {
+    loop {
+        match work.check() {
+            Ok(true) => return ForwardScan::Cancelled,
+            Ok(false) => {}
+            Err(_) => return ForwardScan::Incomplete,
+        }
+        if progress.boundary > text.len() {
+            return ForwardScan::Complete;
+        }
+        let Some(matched) = regex.find_at(text, progress.boundary) else {
+            return ForwardScan::Complete;
+        };
+        if let Some(previous) = &progress.last_match
+            && matched.is_empty()
+            && matched.end() == previous.end
+        {
+            progress.boundary = next_char_boundary(text, matched.end());
+            progress.last_match = Some(matched.range());
+            continue;
+        }
+        let range = matched.range();
+        progress.boundary = range.end;
+        progress.last_match = Some(range.clone());
+        let hit = Hit {
+            tab: progress.tab,
+            range,
+        };
+        if hit.range.start >= minimum_start && skip != Some(&hit) {
+            return ForwardScan::Found(hit);
+        }
+    }
+}
+
+fn next_char_boundary(text: &str, offset: usize) -> usize {
+    if offset == text.len() {
+        text.len().saturating_add(1)
+    } else {
+        offset
+            + text[offset..]
+                .chars()
+                .next()
+                .expect("offset is before the end of the text")
+                .len_utf8()
+    }
 }
 
 const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
@@ -236,38 +402,12 @@ fn source_within_limit(source: &Source) -> bool {
     source.text.len() <= MAX_SEARCH_BYTES
 }
 
-fn first_match(
-    regex: &Regex,
-    tab: u64,
-    text: &str,
-    start: usize,
-    skip: Option<&Hit>,
-    work: WorkBudget<'_>,
-) -> Result<Option<Hit>, String> {
-    for matched in regex.find_iter(text) {
-        if work.check()? {
-            return Ok(None);
-        }
-        if matched.start() < start {
-            continue;
-        }
-        let hit = Hit {
-            tab,
-            range: matched.range(),
-        };
-        if skip != Some(&hit) {
-            return Ok(Some(hit));
-        }
-    }
-    Ok(None)
-}
-
 fn last_match_before(
     regex: &Regex,
     tab: u64,
     text: &str,
     before: Option<usize>,
-    work: WorkBudget<'_>,
+    work: &WorkBudget<'_>,
 ) -> Result<Option<Hit>, String> {
     let mut last = None;
     let mut examined = 0;
@@ -297,7 +437,7 @@ fn replace(
     selection: Range<usize>,
     replacement: &str,
     all: bool,
-    work: WorkBudget<'_>,
+    work: &WorkBudget<'_>,
 ) -> Result<Outcome, String> {
     if work.check()? {
         return Ok(Outcome::Cancelled);

@@ -1,5 +1,5 @@
 use super::*;
-use std::io::Write;
+use std::{fs, io::Write};
 
 fn reader_with(
     contents: &[u8],
@@ -358,9 +358,11 @@ fn search_reports_unprocessable_long_lines_and_bad_patterns() {
 
 #[test]
 fn search_matches_available_text_before_an_incomplete_utf8_tail() {
-    let (file, _reader) = reader_with(b"hit \xf0\x9f\x99", None);
-    let result = search_page(
-        file.path(),
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("partial-tail.log");
+    fs::write(&path, b"hit \xf0\x9f\x99").unwrap();
+    let first = search_page(
+        &path,
         None,
         &LogSearchQuery::literal("hit", true),
         0,
@@ -370,11 +372,111 @@ fn search_matches_available_text_before_an_incomplete_utf8_tail() {
     )
     .unwrap();
 
-    assert_eq!(result.hits.len(), 1);
-    assert_eq!(result.hits[0].preview, "hit ");
-    assert_eq!(result.hits[0].line_start, 0);
-    assert!(!result.complete);
-    assert_eq!(result.next_offset, 4);
+    assert_eq!(first.hits.len(), 1);
+    assert_eq!(first.hits[0].preview, "hit ");
+    assert_eq!(first.hits[0].line_start, 0);
+    assert!(!first.complete);
+    assert_eq!(first.next_offset, 0);
+    assert_eq!(first.pending_line_start, Some(0));
+    assert_eq!(first.file_size, 7);
+
+    let emoji_query = LogSearchQuery::literal("🙂", true);
+    let emoji_before_append = search_page(
+        &path,
+        None,
+        &emoji_query,
+        0,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(emoji_before_append.hits.is_empty());
+    assert_eq!(emoji_before_append.pending_line_start, Some(0));
+
+    let repeated = search_page(
+        &path,
+        None,
+        &LogSearchQuery::literal("hit", true),
+        first.next_offset,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(repeated.next_offset, first.next_offset);
+    assert_eq!(repeated.hits.len(), 1);
+
+    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writer.write_all(b"\x82\nnext hit\n").unwrap();
+    drop(writer);
+    let appended_size = fs::metadata(&path).unwrap().len();
+    assert!(appended_size > first.file_size);
+    let resumed = search_page(
+        &path,
+        None,
+        &LogSearchQuery::literal("hit", true),
+        first.pending_line_start.unwrap(),
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(resumed.hits.len(), 2);
+    assert_eq!(resumed.hits[0].line_start, 0);
+    assert_eq!(resumed.hits[0].preview, "hit 🙂");
+    assert_eq!(resumed.hits[1].preview, "next hit");
+    assert!(resumed.complete);
+
+    let emoji_after_append = search_page(
+        &path,
+        None,
+        &emoji_query,
+        emoji_before_append.next_offset,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(emoji_after_append.hits.len(), 1);
+    assert_eq!(emoji_after_append.hits[0].preview, "hit 🙂");
+    assert!(emoji_after_append.complete);
+}
+
+#[test]
+fn retry_after_partial_line_preserves_the_original_arbitrary_start() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("partial-from-offset.log");
+    fs::write(&path, b"skip hit \xf0\x9f\x99").unwrap();
+    let query = LogSearchQuery::literal("hit", true);
+    let first = search_page(
+        &path,
+        None,
+        &query,
+        5,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(first.hits.is_empty());
+    assert_eq!(first.pending_line_start, Some(5));
+
+    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writer.write_all(b"\x82\n").unwrap();
+    drop(writer);
+    let resumed = search_page(
+        &path,
+        None,
+        &query,
+        first.pending_line_start.unwrap(),
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(resumed.hits.is_empty());
+    assert!(resumed.complete);
 }
 
 #[test]

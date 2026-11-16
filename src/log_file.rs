@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const WITNESS_BYTES: u64 = 256;
 
@@ -151,10 +152,25 @@ fn read_at(file: &mut File, offset: u64, count: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn boundary_digest(head: &[u8], tail: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(head);
+    hash.update(tail);
+    hash.finalize().into()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LogFingerprint {
+    modified: Option<SystemTime>,
+    digest: [u8; 32],
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LogBookmark {
     pub identity: Option<FileIdentity>,
     pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<LogFingerprint>,
     pub offset: u64,
     pub hidden: u64,
     pub auto_refresh: bool,
@@ -166,6 +182,7 @@ impl Default for LogBookmark {
         Self {
             identity: None,
             size: 0,
+            fingerprint: None,
             offset: 0,
             hidden: 0,
             auto_refresh: true,
@@ -175,8 +192,47 @@ impl Default for LogBookmark {
 }
 
 impl LogBookmark {
-    pub(crate) fn can_restore(&self, stamp: &FileStamp) -> bool {
+    pub(crate) fn record_observation(&mut self, observation: &Observation) {
+        self.identity = Some(observation.stamp.identity);
+        self.size = observation.stamp.len;
+        self.fingerprint = Some(LogFingerprint {
+            modified: observation.stamp.modified,
+            digest: boundary_digest(&observation.head, &observation.tail),
+        });
+    }
+
+    pub(crate) fn matches_stamp(&self, stamp: &FileStamp) -> bool {
         self.identity == Some(stamp.identity) && stamp.len >= self.size
+    }
+
+    pub(crate) fn can_restore(
+        &self,
+        file: &mut File,
+        observation: &Observation,
+    ) -> io::Result<bool> {
+        let at_start = self.offset == 0 && self.hidden == 0;
+        if self.identity.is_none() {
+            return Ok(at_start);
+        }
+        if !self.matches_stamp(&observation.stamp) {
+            return Ok(false);
+        }
+        let Some(saved) = &self.fingerprint else {
+            return Ok(at_start);
+        };
+
+        let digest = if observation.stamp.len == self.size {
+            if matches!((saved.modified, observation.stamp.modified), (Some(old), Some(new)) if old != new)
+            {
+                return Ok(false);
+            }
+            boundary_digest(&observation.head, &observation.tail)
+        } else {
+            let count = self.size.min(WITNESS_BYTES);
+            let tail = read_at(file, self.size - count, count)?;
+            boundary_digest(&observation.head[..count as usize], &tail)
+        };
+        Ok(digest == saved.digest)
     }
 }
 

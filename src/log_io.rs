@@ -306,6 +306,7 @@ pub(super) struct Fragment {
     pub(super) end: u64,
     pub(super) terminated: bool,
     pub(super) limit_reached: bool,
+    pub(super) incomplete_tail: bool,
 }
 
 fn read_fragment(
@@ -362,6 +363,7 @@ fn read_fragment(
                     end: cursor,
                     terminated: false,
                     limit_reached: false,
+                    incomplete_tail: false,
                 });
             }
             bytes.extend_from_slice(&buffer[..index]);
@@ -371,6 +373,7 @@ fn read_fragment(
                 end: cursor,
                 terminated: true,
                 limit_reached: false,
+                incomplete_tail: false,
             });
         }
         let consumed = usable.min(remaining);
@@ -386,6 +389,7 @@ fn read_fragment(
         bytes.extend_from_slice(&buffer[..consumed]);
         cursor += consumed as u64;
     }
+    let raw_cursor = cursor;
     if matches!(encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom) {
         trim_utf8_boundary(&mut bytes);
         cursor = start + bytes.len() as u64;
@@ -399,6 +403,7 @@ fn read_fragment(
         end: cursor,
         terminated: false,
         limit_reached,
+        incomplete_tail: raw_cursor == file_size && cursor < raw_cursor,
     })
 }
 

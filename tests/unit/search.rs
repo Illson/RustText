@@ -9,14 +9,19 @@ fn run_search(
     skip_current: bool,
     replacement: &str,
 ) -> Result<Outcome, String> {
+    let cancelled = AtomicBool::new(false);
+    let work = WorkBudget::new(&cancelled, Instant::now() + MAX_SEARCH_TIME);
     run(
         query,
         command,
         sources,
         origin,
-        skip_current,
         replacement,
-        WorkBudget::new(&AtomicBool::new(false), Instant::now() + MAX_SEARCH_TIME),
+        &work,
+        NavigationStart {
+            skip_current,
+            progress: None,
+        },
     )
 }
 
@@ -94,7 +99,7 @@ fn replaces_captures_and_treats_literal_replacements_literally() {
         0..0,
         "[$1]",
         true,
-        WorkBudget::new(
+        &WorkBudget::new(
             &AtomicBool::new(false),
             Instant::now() + std::time::Duration::from_secs(5),
         ),
@@ -115,7 +120,7 @@ fn replaces_captures_and_treats_literal_replacements_literally() {
         7..13,
         "$1",
         false,
-        WorkBudget::new(
+        &WorkBudget::new(
             &AtomicBool::new(false),
             Instant::now() + std::time::Duration::from_secs(5),
         ),
@@ -327,6 +332,119 @@ fn navigation_and_replacement_keep_non_overlapping_match_order() {
 }
 
 #[test]
+fn resumed_navigation_advances_after_a_bounded_batch_and_reaches_the_cursor() {
+    let query = Query {
+        text: r".*[^A-Z]|[A-Z]".into(),
+        regex: true,
+        case_sensitive: true,
+        ..Query::default()
+    };
+    let source = vec![Source {
+        tab: 1,
+        text: Rope::from("A".repeat(256)),
+    }];
+    let cancelled = AtomicBool::new(false);
+
+    for cursor in [64, 192] {
+        let origin = Hit {
+            tab: 1,
+            range: cursor..cursor,
+        };
+        let mut progress = None;
+        let mut previous_boundary = 0;
+        let mut found = None;
+
+        for _ in 0..8 {
+            let work = WorkBudget::with_check_limit(&cancelled, 40);
+            let outcome = run(
+                &query,
+                Command::Next,
+                source.clone(),
+                &origin,
+                "",
+                &work,
+                NavigationStart {
+                    skip_current: false,
+                    progress: progress.take(),
+                },
+            )
+            .unwrap();
+            match outcome {
+                Outcome::Incomplete {
+                    progress: next_progress,
+                } => {
+                    assert!(next_progress.boundary > previous_boundary);
+                    previous_boundary = next_progress.boundary;
+                    progress = Some(next_progress);
+                }
+                Outcome::Found { hit: Some(hit) } => {
+                    found = Some(hit);
+                    break;
+                }
+                other => panic!("unexpected navigation outcome {other:?}"),
+            }
+        }
+
+        let found = found.expect("retry must reach the requested position");
+        assert_eq!(found.range, cursor..cursor + 1);
+        let next = run(
+            &query,
+            Command::Next,
+            source.clone(),
+            &found,
+            "",
+            &WorkBudget::with_check_limit(&cancelled, 4),
+            NavigationStart {
+                skip_current: true,
+                progress: Some(NavigationProgress::after_hit(
+                    found.tab,
+                    found.range.clone(),
+                )),
+            },
+        )
+        .unwrap();
+        let Outcome::Found { hit: Some(next) } = next else {
+            panic!("next search must use the verified match boundary");
+        };
+        assert_eq!(next.range, cursor + 1..cursor + 2);
+    }
+}
+
+#[test]
+fn resumable_empty_and_nonempty_matches_follow_the_iterator_sequence() {
+    let regex = Regex::new("a|").unwrap();
+    let text = "a💙aa";
+    let expected: Vec<_> = regex
+        .find_iter(text)
+        .map(|matched| matched.range())
+        .collect();
+    let mut progress = NavigationProgress {
+        tab: 1,
+        boundary: 0,
+        last_match: None,
+        wrapped: false,
+    };
+    let cancelled = AtomicBool::new(false);
+    let work = WorkBudget::new(
+        &cancelled,
+        Instant::now() + std::time::Duration::from_secs(5),
+    );
+    let mut actual = Vec::new();
+
+    loop {
+        match scan_forward(&regex, text, &mut progress, 0, None, &work) {
+            ForwardScan::Found(hit) => actual.push(hit.range),
+            ForwardScan::Complete => break,
+            ForwardScan::Incomplete | ForwardScan::Cancelled => {
+                panic!("the sequence should finish within the test budget")
+            }
+        }
+    }
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn anchored_regex_search_keeps_the_original_document_boundaries() {
     let query = Query {
         text: "^".into(),
@@ -371,12 +489,15 @@ fn cancelled_navigation_returns_without_a_match() {
             Command::Next,
             source,
             &origin,
-            false,
             "",
-            WorkBudget::new(
+            &WorkBudget::new(
                 &cancelled,
                 Instant::now() + std::time::Duration::from_secs(5),
             ),
+            NavigationStart {
+                skip_current: false,
+                progress: None,
+            },
         )
         .unwrap(),
         Outcome::Cancelled
@@ -402,12 +523,15 @@ fn navigation_stops_when_its_work_deadline_has_expired() {
         Command::Next,
         source,
         &origin,
-        false,
         "",
-        WorkBudget::new(
+        &WorkBudget::new(
             &AtomicBool::new(false),
             Instant::now() - std::time::Duration::from_millis(1),
         ),
+        NavigationStart {
+            skip_current: false,
+            progress: None,
+        },
     )
     .unwrap_err();
 
@@ -455,7 +579,7 @@ fn zero_width_replacements_preserve_unicode_and_insert_once_per_line() {
         0..0,
         "> ",
         true,
-        WorkBudget::new(
+        &WorkBudget::new(
             &AtomicBool::new(false),
             Instant::now() + std::time::Duration::from_secs(5),
         ),
