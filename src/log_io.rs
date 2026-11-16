@@ -5,6 +5,7 @@
 //! operate in fixed-size blocks and never retain the file contents.
 
 use std::{
+    collections::VecDeque,
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::Path,
@@ -169,11 +170,21 @@ impl LogReader {
         self.render_page_until(offset, self.size, options)
     }
 
-    fn render_page_until(
+    pub(crate) fn render_page_until(
         &mut self,
         offset: u64,
         limit: u64,
         options: PageOptions,
+    ) -> Result<Page, LogError> {
+        self.read_page_until(offset, limit, options, false)
+    }
+
+    fn read_page_until(
+        &mut self,
+        offset: u64,
+        limit: u64,
+        options: PageOptions,
+        keep_tail: bool,
     ) -> Result<Page, LogError> {
         let limit = limit.min(self.size);
         let mut cursor = align_offset(offset.min(limit), self.encoding);
@@ -184,15 +195,18 @@ impl LogReader {
             .max_rows
             .min(MAX_PAGE_ROWS)
             .min((MAX_PAGE_BYTES / row_bytes).max(1));
-        let mut rows = Vec::with_capacity(row_limit);
-        while rows.len() < row_limit && cursor < limit {
+        let mut rows = VecDeque::with_capacity(row_limit);
+        while cursor < limit && row_limit > 0 && (keep_tail || rows.len() < row_limit) {
             let start = cursor;
             let fragment = read_fragment(&mut self.file, cursor, limit, row_bytes, self.encoding)?;
             if fragment.end <= cursor {
                 break;
             }
             cursor = fragment.end;
-            rows.push(LogRow {
+            if rows.len() == row_limit {
+                rows.pop_front();
+            }
+            rows.push_back(LogRow {
                 start,
                 end: cursor,
                 text: decode(&fragment.bytes, self.encoding, start == 0),
@@ -201,14 +215,14 @@ impl LogReader {
             });
         }
         Ok(Page {
-            rows,
+            rows: rows.into(),
             next_offset: cursor,
             file_size: self.size,
             eof: cursor >= self.size,
         })
     }
 
-    /// Renders a bounded viewport ending near `offset`. The backward scan is
+    /// Renders a bounded viewport ending at `offset`. The backward scan is
     /// capped by `max_scan_bytes`; a very long physical line may therefore
     /// begin in the middle and is represented as a continuation fragment.
     pub fn page_before(
@@ -226,10 +240,9 @@ impl LogReader {
             options
                 .max_row_bytes
                 .clamp(minimum_fragment_bytes(self.encoding), MAX_ROW_BYTES),
-            target == self.size,
             self.encoding,
         )?;
-        self.render_page_until(start, target, options)
+        self.read_page_until(start, target, options, true)
     }
 
     /// Advances the sparse index by at most `max_bytes`; useful for background
@@ -434,7 +447,6 @@ fn previous_page_start(
     row_count: usize,
     max_scan_bytes: u64,
     row_bytes: usize,
-    at_file_end: bool,
     encoding: TextEncoding,
 ) -> io::Result<u64> {
     if target == 0 {
@@ -442,8 +454,7 @@ fn previous_page_start(
     }
     let unit = unit_size(encoding) as u64;
     let ends_at_line_boundary = offset_ends_line(file, target, encoding)?;
-    let include_partial_end_row = at_file_end && !ends_at_line_boundary;
-    let required_breaks = row_count.saturating_add(usize::from(!include_partial_end_row));
+    let required_breaks = row_count.saturating_add(usize::from(ends_at_line_boundary));
     let mut scan_start = target.saturating_sub(max_scan_bytes);
     scan_start -= scan_start % unit;
     let viewport_bytes = (row_count.min(MAX_PAGE_ROWS) as u64)

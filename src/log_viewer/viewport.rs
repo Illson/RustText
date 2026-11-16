@@ -35,6 +35,7 @@ struct RenderedPage {
     hidden: u64,
     encoding: TextEncoding,
     reset: bool,
+    scroll_to_bottom: bool,
 }
 
 impl LogViewer {
@@ -121,6 +122,10 @@ impl LogViewer {
         }
         self.viewer.update(cx, |viewer, cx| {
             viewer.set_value(text, window, cx);
+            if loaded.scroll_to_bottom {
+                // The editor clamps this against the content after laying out any wrapped rows.
+                viewer.set_scroll_offset(point(px(0.), px(-f32::MAX)), cx);
+            }
         });
         self.page = Some(loaded.page);
         self.start_index(window, cx);
@@ -232,19 +237,59 @@ impl LogViewer {
         self.load_page(destination, window, cx);
     }
 
-    pub(super) fn previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.bookmark.offset > self.bookmark.hidden {
-            self.navigate(Destination::Before(self.bookmark.offset), window, cx);
+    pub(super) fn scroll_screen(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.viewer.read(cx);
+        let offset = editor.scroll_offset();
+        let edge = if forward {
+            self.scroll_bottom.get()
+        } else {
+            px(0.)
+        };
+        if (offset.y - edge).abs() <= px(0.5) {
+            self.turn_page(forward, window, cx);
+            return;
         }
+        let line_height = editor.line_height().unwrap_or(window.line_height());
+        let step = (editor.input_bounds().size.height - line_height).max(line_height);
+        let y = if forward {
+            offset.y - step
+        } else {
+            offset.y + step
+        };
+        self.viewer.update(cx, |editor, cx| {
+            editor.set_scroll_offset(point(offset.x, y), cx)
+        });
     }
 
-    pub(super) fn next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(page) = &self.page
-            && !page.eof
-            && page.next_offset > self.bookmark.offset
-        {
-            self.navigate(Destination::At(page.next_offset), window, cx);
+    pub(super) fn turn_page(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.available() || self.reading {
+            return false;
         }
+        let destination = if forward {
+            let Some(page) = &self.page else {
+                return false;
+            };
+            if page.eof || page.next_offset <= self.bookmark.offset {
+                return false;
+            }
+            Destination::At(page.next_offset)
+        } else if self.bookmark.offset > self.bookmark.hidden {
+            Destination::Before(self.bookmark.offset)
+        } else {
+            return false;
+        };
+        self.navigate(destination, window, cx);
+        true
     }
 }
 
@@ -283,6 +328,13 @@ fn read_page(
         destination
     };
 
+    let scroll_to_bottom = match destination {
+        Destination::Restore => bookmark.follow_end && bookmark.auto_refresh,
+        Destination::Before(_) | Destination::End | Destination::Append(true) => true,
+        Destination::Percentage(percent) => percent >= 100.,
+        _ => false,
+    };
+
     let mut page = match destination {
         Destination::Restore if bookmark.follow_end && bookmark.auto_refresh => {
             reader.page_before(reader.size(), options, MAX_BACKWARD_SCAN)
@@ -318,9 +370,11 @@ fn read_page(
     .map_err(|error| error.to_string())?;
 
     if page.rows.first().is_some_and(|row| row.start < start) {
-        page = reader
-            .render_page(start, options)
-            .map_err(|error| error.to_string())?;
+        page = match destination {
+            Destination::Before(offset) => reader.render_page_until(start, offset, options),
+            _ => reader.render_page(start, options),
+        }
+        .map_err(|error| error.to_string())?;
     }
 
     let start = page
@@ -334,6 +388,7 @@ fn read_page(
         hidden: floor,
         encoding: reader.encoding(),
         reset,
+        scroll_to_bottom,
     })
 }
 

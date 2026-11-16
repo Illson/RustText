@@ -63,6 +63,39 @@ fn following_keeps_the_final_rows_and_fixed_mode_keeps_the_start() {
 }
 
 #[test]
+fn previous_page_at_hidden_boundary_ends_where_the_current_page_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hidden.log");
+    fs::write(&path, b"zero\none\ntwo\nthree\n").unwrap();
+    let bookmark = LogBookmark {
+        hidden: 9,
+        offset: 13,
+        ..LogBookmark::default()
+    };
+    let previous = read_page(
+        &path,
+        None,
+        &bookmark,
+        Destination::Before(bookmark.offset),
+        PageOptions {
+            max_rows: 4,
+            max_row_bytes: 128,
+        },
+        PreviousPage {
+            observation: None,
+            page: None,
+        },
+        LineIndex::default(),
+    )
+    .unwrap();
+
+    assert_eq!(previous.start, bookmark.hidden);
+    assert_eq!(previous.page.next_offset, bookmark.offset);
+    assert_eq!(previous.page.rows.len(), 1);
+    assert_eq!(previous.page.rows[0].text, "two");
+}
+
+#[test]
 fn refreshing_an_in_place_rewrite_clears_the_hidden_boundary() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rewrite.log");
