@@ -5638,7 +5638,7 @@ dependencies = [
 
 [[package]]
 name = "rusttext"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "crc32fast",
  "encoding_rs",
