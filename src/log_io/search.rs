@@ -22,6 +22,8 @@ const MAX_PREVIEW_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchHit {
+    /// Zero-based physical line index from this search page's start.
+    pub line_index: u64,
     pub line_start: u64,
     pub line_end: u64,
     /// Bounded, decoded preview of the matching line.
@@ -32,6 +34,7 @@ pub struct SearchHit {
 pub struct SearchPage {
     pub hits: Vec<SearchHit>,
     pub next_offset: u64,
+    pub next_line_index: u64,
     pub scanned_bytes: u64,
     pub complete: bool,
     /// Retry offset for an incomplete UTF-8 tail. This may preserve the caller's original
@@ -131,6 +134,7 @@ pub fn search_page(
     let mut stream = BufReader::with_capacity(BLOCK_SIZE * 2, reader.file.try_clone()?);
     stream.seek(SeekFrom::Start(cursor))?;
     let mut pending_line_start = None;
+    let mut line_index = 0;
     // Search resume offsets are line boundaries. For a user supplied arbitrary
     // byte position, consume only the partial line at that position.
     if cursor > 0 && !is_line_boundary(&mut reader.file, cursor, reader.encoding)? {
@@ -139,7 +143,7 @@ pub fn search_page(
             read_buffered_line(&mut stream, cursor, size, max_line_bytes, reader.encoding)?;
         if partial.limit_reached {
             return Err(LogError::LineLimit {
-                offset: cursor,
+                line_index,
                 limit: max_line_bytes,
             });
         }
@@ -147,6 +151,7 @@ pub fn search_page(
             pending_line_start = Some(arbitrary_start);
         }
         cursor = partial.end;
+        line_index += u64::from(partial.terminated);
     }
     let page_start = cursor;
     let result_limit = max_results.min(MAX_SEARCH_RESULTS);
@@ -167,7 +172,7 @@ pub fn search_page(
         }
         if fragment.limit_reached {
             return Err(LogError::LineLimit {
-                offset: cursor,
+                line_index,
                 limit: max_line_bytes,
             });
         }
@@ -175,6 +180,7 @@ pub fn search_page(
         if regex.is_match(&line) {
             let preview = truncate_utf8(&line, preview_bytes);
             hits.push(SearchHit {
+                line_index,
                 line_start: cursor,
                 line_end: fragment.end,
                 preview,
@@ -184,6 +190,7 @@ pub fn search_page(
             pending_line_start = Some(cursor);
         }
         cursor = fragment.end;
+        line_index += u64::from(fragment.terminated);
         if pending_line_start.is_some() {
             break;
         }
@@ -198,6 +205,7 @@ pub fn search_page(
     Ok(SearchPage {
         hits,
         next_offset: pending_line_start.unwrap_or(cursor),
+        next_line_index: line_index,
         scanned_bytes: cursor - page_start,
         complete: cursor >= size && pending_line_start.is_none(),
         pending_line_start,
@@ -206,7 +214,7 @@ pub fn search_page(
     })
 }
 
-fn read_buffered_line(
+pub(super) fn read_buffered_line(
     reader: &mut BufReader<File>,
     start: u64,
     file_size: u64,

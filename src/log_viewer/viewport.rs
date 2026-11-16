@@ -5,7 +5,7 @@ use gpui_kit::*;
 use super::LogViewer;
 use crate::{
     log_file::{self, Change, LogBookmark, Observation},
-    log_io::{LineIndex, LogReader, Page, PageOptions},
+    log_io::{LineIndex, LogReader, Page, PageOptions, align_offset},
     text_format::TextEncoding,
 };
 
@@ -28,17 +28,93 @@ struct PreviousPage {
     page: Option<Page>,
 }
 
+#[derive(Default)]
+struct PageLineNumbers {
+    range: Option<(u64, u64)>,
+    rows: Vec<(usize, u64)>,
+}
+
 struct RenderedPage {
     observation: Observation,
     page: Page,
     start: u64,
     hidden: u64,
     encoding: TextEncoding,
+    line_range: Option<(u64, u64)>,
+    line_rows: Vec<(usize, u64)>,
+    hidden_line_count: Option<u64>,
     reset: bool,
     scroll_to_bottom: bool,
 }
 
 impl LogViewer {
+    pub(super) fn refresh_line_numbers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(observation), Some(page)) = (self.observation.clone(), self.page.clone()) else {
+            return;
+        };
+        let page_start = page
+            .rows
+            .first()
+            .map_or(self.bookmark.offset, |row| row.start);
+        let path = self.path.clone();
+        let encoding = self.encoding_override;
+        let index = self.index.clone();
+        let hidden = self.bookmark.hidden;
+        let generation = self.generation;
+        let observation_stamp = observation.stamp.clone();
+
+        let job = cx.background_spawn(async move {
+            let mut reader = LogReader::open(path, encoding).map_err(|error| error.to_string())?;
+            let mut file = reader
+                .file()
+                .try_clone()
+                .map_err(|error| error.to_string())?;
+            let (_, change) = log_file::observe_file(&mut file, Some(&observation))
+                .map_err(|error| error.to_string())?;
+            if matches!(
+                change,
+                Change::Replaced | Change::Truncated | Change::Rewritten
+            ) {
+                return Err("Содержимое лога изменилось".to_owned());
+            }
+            reader.set_line_index(index);
+            let PageLineNumbers {
+                range: line_range,
+                rows: line_rows,
+            } = line_positions(&mut reader, &page)?;
+            let hidden_line_count = count_hidden_lines(&mut reader, hidden)?;
+            Ok((line_range, line_rows, hidden_line_count))
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok((line_range, line_rows, hidden_line_count)) = job.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |viewer, _, cx| {
+                let page_still_matches = viewer.page.as_ref().is_some_and(|page| {
+                    page.rows
+                        .first()
+                        .map_or(viewer.bookmark.offset, |row| row.start)
+                        == page_start
+                });
+                let observation_still_matches = viewer
+                    .observation
+                    .as_ref()
+                    .is_some_and(|observation| observation.stamp == observation_stamp);
+                if viewer.generation == generation
+                    && page_still_matches
+                    && observation_still_matches
+                {
+                    viewer.line_range = line_range;
+                    viewer.line_rows = line_rows;
+                    viewer.hidden_line_count = hidden_line_count;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn load_page(
         &mut self,
         destination: Destination,
@@ -110,6 +186,9 @@ impl LogViewer {
             );
         }
         self.encoding = loaded.encoding;
+        self.line_range = loaded.line_range;
+        self.line_rows = loaded.line_rows;
+        self.hidden_line_count = loaded.hidden_line_count;
         self.bookmark.record_observation(&loaded.observation);
         self.bookmark.offset = loaded.start;
         self.bookmark.hidden = loaded.hidden;
@@ -330,6 +409,9 @@ fn read_page(
     } else {
         bookmark.hidden.min(reader.size())
     };
+    if !reset {
+        reader.set_line_index(index.clone());
+    }
     let start = reader.seek_start().max(floor);
     let destination = if reset && !matches!(destination, Destination::End) {
         Destination::Start
@@ -365,7 +447,6 @@ fn read_page(
                 .rev()
                 .find(|entry| entry.offset <= offset);
             if !reset && sample.is_some_and(|sample| offset - sample.offset <= MAX_BACKWARD_SCAN) {
-                reader.set_line_index(index);
                 reader.page_at_line(offset, options)
             } else {
                 reader.render_page(offset, options)
@@ -390,15 +471,74 @@ fn read_page(
         .rows
         .first()
         .map_or(page.next_offset.max(start), |row| row.start);
+    let PageLineNumbers {
+        range: line_range,
+        rows: line_rows,
+    } = line_positions(&mut reader, &page)?;
+    let hidden_line_count = count_hidden_lines(&mut reader, floor)?;
     Ok(RenderedPage {
         observation,
         page,
         start,
         hidden: floor,
         encoding: reader.encoding(),
+        line_range,
+        line_rows,
+        hidden_line_count,
         reset,
         scroll_to_bottom,
     })
+}
+
+fn line_positions(reader: &mut LogReader, page: &Page) -> Result<PageLineNumbers, String> {
+    let Some(first_row) = page.rows.first() else {
+        return Ok(PageLineNumbers::default());
+    };
+    let Some(first_line) = reader
+        .line_number_at(first_row.start)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(PageLineNumbers::default());
+    };
+
+    let mut current_line = first_line;
+    let mut last_line = first_line;
+    let mut text_offset = 0;
+    let mut line_rows = Vec::new();
+    for (index, row) in page.rows.iter().enumerate() {
+        if index > 0 && page.rows[index - 1].terminated {
+            current_line = current_line.saturating_add(1);
+        }
+        if index == 0 || page.rows[index - 1].terminated {
+            line_rows.push((text_offset, current_line));
+        }
+        last_line = current_line;
+        text_offset += row.text.len();
+        if row.terminated && index + 1 < page.rows.len() {
+            text_offset += 1;
+        }
+    }
+    Ok(PageLineNumbers {
+        range: Some((first_line, last_line)),
+        rows: line_rows,
+    })
+}
+
+fn count_hidden_lines(reader: &mut LogReader, hidden: u64) -> Result<Option<u64>, String> {
+    if hidden == 0 {
+        return Ok(Some(0));
+    }
+    if hidden >= reader.size() {
+        let index = reader.line_index();
+        return Ok(
+            (index.scanned_to() >= align_offset(reader.size(), reader.encoding()))
+                .then(|| index.physical_line_count(reader.encoding().bom_len())),
+        );
+    }
+    reader
+        .line_number_at(hidden)
+        .map(|line| line.map(|line| line.saturating_sub(1)))
+        .map_err(|error| error.to_string())
 }
 
 fn append_page(

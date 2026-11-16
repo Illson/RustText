@@ -49,7 +49,6 @@ impl Workspace {
                     ),
             )
             .child(div().flex_1())
-            .child(self.update_button(cx))
     }
 
     fn menu_focus(&self, cx: &App) -> FocusHandle {
@@ -187,6 +186,12 @@ impl Workspace {
                         PopupMenuItem::new("Восстановить вкладку")
                             .action(Box::new(ReopenTab))
                             .disabled(!can_reopen),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Настроить открытие файлов в Windows…")
+                            .action(Box::new(RegisterFileAssociations))
+                            .disabled(busy || !cfg!(windows)),
                     )
             })
     }

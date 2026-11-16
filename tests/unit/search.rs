@@ -85,6 +85,30 @@ fn navigates_tabs_with_unicode_words_and_wraps_empty_matches() {
 }
 
 #[test]
+fn replace_all_handles_more_than_ten_thousand_matches() {
+    let source = "a".repeat(10_001);
+    let outcome = replace(
+        &Regex::new("a").unwrap(),
+        false,
+        &source,
+        0..0,
+        "b",
+        true,
+        &WorkBudget::new(
+            &AtomicBool::new(false),
+            Instant::now() + std::time::Duration::from_secs(5),
+        ),
+    )
+    .unwrap();
+
+    let Outcome::Replaced { text, count, .. } = outcome else {
+        panic!("expected all matches to be replaced");
+    };
+    assert_eq!(count, 10_001);
+    assert_eq!(text, "b".repeat(10_001));
+}
+
+#[test]
 fn replaces_captures_and_treats_literal_replacements_literally() {
     let query = Query {
         text: r"код=(\d+)".into(),

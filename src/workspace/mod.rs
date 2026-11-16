@@ -1,6 +1,8 @@
+mod associations;
 mod disk_status;
 mod file_actions;
 mod json_action;
+mod json_validation;
 mod launches;
 mod menus;
 mod search_panel;
@@ -40,6 +42,7 @@ struct Document {
     revision: u64,
     disk_status: disk_status::DiskStatus,
     placeholder: bool,
+    json_status: Option<json_validation::Status>,
     restored_scroll: Option<[f32; 2]>,
     log: Option<Entity<LogViewer>>,
     _subscriptions: [Subscription; 2],
@@ -106,7 +109,7 @@ impl Workspace {
         if !paths.is_empty() {
             this.open_paths(paths, file_actions::OpenMode::NORMAL, window, cx);
         }
-        this.check_for_updates(false, window, cx);
+        this.check_for_updates(window, cx);
         this
     }
 
@@ -147,6 +150,9 @@ impl Workspace {
         let language = file
             .as_ref()
             .map_or_else(|| "text".to_owned(), |file| syntax_for(&file.path));
+        let json_enabled = file
+            .as_ref()
+            .is_some_and(|file| json_validation::is_json_file(&file.path));
 
         let editor = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
@@ -172,6 +178,7 @@ impl Workspace {
                 doc.dirty = doc.saved_text.as_ref() != Some(editor.read(cx).text());
                 doc.revision = doc.revision.wrapping_add(1);
                 cx.notify();
+                this.schedule_json_validation(id, cx);
             }
         });
         let cursor = cx.observe(&editor, move |this, _, cx| {
@@ -191,10 +198,14 @@ impl Workspace {
             revision: 0,
             disk_status: disk_status::DiskStatus::Current,
             placeholder: false,
+            json_status: json_enabled.then_some(json_validation::Status::Checking),
             restored_scroll: None,
             log: None,
             _subscriptions: [change, cursor],
         });
+        if json_enabled {
+            self.schedule_json_validation(id, cx);
+        }
         id
     }
 

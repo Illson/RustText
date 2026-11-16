@@ -18,6 +18,7 @@ actions!(
         OpenLog,
         OpenWindows1251,
         OpenLogWindows1251,
+        RegisterFileAssociations,
         Save,
         SaveAs,
         CloseTab,
@@ -290,11 +291,71 @@ impl Workspace {
             .child(Label::new(doc.format.encoding.label()))
             .child(Label::new(doc.format.line_endings_label()))
     }
+
+    fn jump_to_json_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(super::json_validation::Status::Invalid(problem)) =
+            self.active_document().json_status.as_ref()
+        else {
+            return;
+        };
+        let position = problem.range.start;
+        let editor = self.active_document().editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(position, window, cx)
+        });
+    }
+
+    fn json_validation_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = self.active_document().json_status.clone()?;
+        let (message, invalid) = match status {
+            super::json_validation::Status::Invalid(problem) => (
+                format!(
+                    "Некорректный JSON · строка {}, столбец {} · {}",
+                    problem.line, problem.column, problem.message
+                ),
+                true,
+            ),
+            super::json_validation::Status::TooLarge => (
+                "Проверка JSON не выполнена. Размер превышает 64 МиБ.".to_owned(),
+                false,
+            ),
+            super::json_validation::Status::Checking | super::json_validation::Status::Valid => {
+                return None;
+            }
+        };
+        Some(
+            div()
+                .w_full()
+                .min_h(px(46.))
+                .flex()
+                .items_center()
+                .gap_3()
+                .px_4()
+                .bg(rgb(if invalid { 0x6b1e24 } else { 0x5e431d }))
+                .text_color(rgb(0xffe5e5))
+                .border_b_1()
+                .border_color(rgb(appearance::ERROR))
+                .child(Label::new(message).text_sm())
+                .when(invalid, |element| {
+                    element.child(
+                        Button::new("json-error-location")
+                            .small()
+                            .outline()
+                            .label("Перейти к ошибке")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.jump_to_json_error(window, cx)
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.active_document();
+        let json_banner = self.json_validation_banner(cx);
         let body = if let Some(log) = &doc.log {
             log.clone().into_any_element()
         } else {
@@ -328,6 +389,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenLogWindows1251, window, cx| {
                 this.open_picker(OpenMode::LOG_1251, window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &RegisterFileAssociations, window, cx| {
+                    this.register_file_associations(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(false, window, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save(true, window, cx)))
             .on_action(
@@ -368,8 +434,8 @@ impl Render for Workspace {
                     .border_color(rgb(appearance::BORDER))
                     .child(self.tabs(cx)),
             )
-            .children(self.update_panel(cx))
             .children(doc.log.is_none().then(|| self.document_header(doc)))
+            .children(json_banner)
             .child(
                 div()
                     .flex_1()
@@ -380,5 +446,6 @@ impl Render for Workspace {
             )
             .children(self.search_panel(window, cx))
             .children(doc.log.is_none().then(|| self.status(doc, cx)))
+            .children(self.update_panel(cx))
     }
 }

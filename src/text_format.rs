@@ -20,6 +20,14 @@ pub enum TextEncoding {
 }
 
 impl TextEncoding {
+    pub(crate) fn bom_len(self) -> u64 {
+        match self {
+            Self::Utf8Bom => 3,
+            Self::Utf16Le | Self::Utf16Be => 2,
+            _ => 0,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Utf8 => "UTF-8",

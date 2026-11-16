@@ -237,6 +237,10 @@ impl Workspace {
         let doc = self.documents.last_mut().expect("restored tab exists");
         doc.disk_status = status;
         doc.placeholder = placeholder;
+        if placeholder {
+            doc.json_status = None;
+            doc.revision = doc.revision.wrapping_add(1);
+        }
         if dirty {
             doc.saved_text = baseline;
             doc.dirty = true;

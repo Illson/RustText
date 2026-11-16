@@ -269,6 +269,7 @@ impl Workspace {
                 doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             }
             let recent = RecentFile::new(opened.target.path, doc.format.encoding);
+            self.schedule_json_validation(id, cx);
             self.select(id, window, cx);
             return recent;
         }
@@ -445,6 +446,7 @@ impl Workspace {
                 this.busy = None;
                 this.recent = recent;
                 this.error = history_error.map(recent_warning);
+                let save_succeeded = result.is_ok();
                 match result {
                     Ok(file) => {
                         if let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id) {
@@ -461,6 +463,9 @@ impl Workspace {
                     Err(error) => {
                         this.error = Some(format!("Не удалось сохранить файл. {error}").into())
                     }
+                }
+                if save_succeeded {
+                    this.schedule_json_validation(id, cx);
                 }
                 cx.notify();
             })

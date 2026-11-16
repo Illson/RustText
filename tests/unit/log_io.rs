@@ -111,6 +111,40 @@ fn line_navigation_and_incremental_sparse_index_work() {
 }
 
 #[test]
+fn line_number_lookup_uses_index_and_waits_for_scanned_offsets() {
+    let (_file, mut reader) = reader_with(b"a\r\nb\nc", None);
+    assert_eq!(reader.line_number_at(4).unwrap(), None);
+
+    reader
+        .advance_index(reader.size(), &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(reader.line_number_at(0).unwrap(), Some(1));
+    assert_eq!(reader.line_number_at(2).unwrap(), Some(1));
+    assert_eq!(reader.line_number_at(3).unwrap(), Some(2));
+    assert_eq!(reader.line_number_at(reader.size()).unwrap(), Some(3));
+}
+
+#[test]
+fn physical_line_count_excludes_bom_only_and_trailing_empty_rows() {
+    for (contents, encoding, content_start, expected) in [
+        (&b""[..], Some(TextEncoding::Utf8), 0, 0),
+        (&b"\xef\xbb\xbf"[..], Some(TextEncoding::Utf8Bom), 3, 0),
+        (&b"a\n"[..], Some(TextEncoding::Utf8), 0, 1),
+        (&b"a\n\nb"[..], Some(TextEncoding::Utf8), 0, 3),
+        (&b"\n"[..], Some(TextEncoding::Utf8), 0, 1),
+    ] {
+        let (_file, mut reader) = reader_with(contents, encoding);
+        reader
+            .advance_index(reader.size(), &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(
+            reader.line_index().physical_line_count(content_start),
+            expected
+        );
+    }
+}
+
+#[test]
 fn sparse_index_counts_crlf_once_across_a_64k_boundary() {
     let mut contents = vec![b'x'; BLOCK_SIZE - 1];
     contents.extend_from_slice(b"\r\na\nb\n");
@@ -133,6 +167,118 @@ fn sparse_index_counts_crlf_once_across_a_64k_boundary() {
 }
 
 #[test]
+fn sparse_index_merges_a_trailing_cr_with_an_appended_line_feed() {
+    let mut contents = vec![b'x'; BLOCK_SIZE - 1];
+    contents.push(b'\r');
+    let (file, mut reader) = reader_with(&contents, Some(TextEncoding::Utf8));
+    reader
+        .advance_index(reader.size(), &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(reader.line_index().line_count(), 2);
+    assert_eq!(reader.line_index().entries()[1].offset, BLOCK_SIZE as u64);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(file.path())
+        .unwrap()
+        .write_all(b"\nb")
+        .unwrap();
+    reader.refresh_size().unwrap();
+    reader.advance_index(4, &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(reader.line_index().line_count(), 2);
+    assert_eq!(
+        reader.line_index().entries()[1].offset,
+        (BLOCK_SIZE + 1) as u64
+    );
+    assert_eq!(
+        reader.line_number_at((BLOCK_SIZE + 1) as u64).unwrap(),
+        Some(2)
+    );
+}
+
+#[test]
+fn sparse_index_samples_the_moved_line_start_when_crlf_crosses_threshold() {
+    let mut contents = vec![b'x'; BLOCK_SIZE - 2];
+    contents.push(b'\r');
+    let (file, mut reader) = reader_with(&contents, Some(TextEncoding::Utf8));
+    reader
+        .advance_index(reader.size(), &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(reader.line_index().entries().len(), 1);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(file.path())
+        .unwrap()
+        .write_all(b"\nb")
+        .unwrap();
+    reader.refresh_size().unwrap();
+    reader.advance_index(4, &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(reader.line_index().entries()[1].line, 2);
+    assert_eq!(reader.line_index().entries()[1].offset, BLOCK_SIZE as u64);
+}
+
+#[test]
+fn sparse_index_merges_split_utf16_carriage_return_and_line_feed() {
+    let mut contents = "a"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    contents.push(13);
+    contents.push(0);
+    let (file, mut reader) = reader_with(&contents, Some(TextEncoding::Utf16Le));
+    reader.advance_index(8, &AtomicBool::new(false)).unwrap();
+    assert_eq!(reader.line_index().scanned_to(), 4);
+    assert_eq!(reader.line_index().line_count(), 2);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(file.path())
+        .unwrap()
+        .write_all(&[10, 0, b'b', 0])
+        .unwrap();
+    reader.refresh_size().unwrap();
+    reader.advance_index(8, &AtomicBool::new(false)).unwrap();
+    assert_eq!(reader.line_index().line_count(), 2);
+    assert_eq!(reader.line_number_at(6).unwrap(), Some(2));
+}
+
+#[test]
+fn sparse_index_waits_for_a_complete_utf16_unit_at_odd_eof() {
+    let mut contents = "a"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    contents.push(13);
+    let (file, mut reader) = reader_with(&contents, Some(TextEncoding::Utf16Le));
+    reader.advance_index(8, &AtomicBool::new(false)).unwrap();
+    assert_eq!(reader.line_index().scanned_to(), 2);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(file.path())
+        .unwrap()
+        .write_all(&[0])
+        .unwrap();
+    reader.refresh_size().unwrap();
+    reader.advance_index(8, &AtomicBool::new(false)).unwrap();
+    assert_eq!(reader.line_index().line_count(), 2);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(file.path())
+        .unwrap()
+        .write_all(&[10, 0, b'b', 0])
+        .unwrap();
+    reader.refresh_size().unwrap();
+    reader.advance_index(8, &AtomicBool::new(false)).unwrap();
+    assert_eq!(reader.line_index().line_count(), 2);
+    assert_eq!(reader.line_number_at(6).unwrap(), Some(2));
+}
+
+#[test]
 fn search_streams_lines_and_reports_work_limits_and_cancellation() {
     let (file, _reader) = reader_with("one\nКОД=17\nthree\nКОД=24".as_bytes(), None);
     let query = LogSearchQuery::regex(r"код=(\d+)", false);
@@ -148,6 +294,8 @@ fn search_streams_lines_and_reports_work_limits_and_cancellation() {
     .unwrap();
     assert_eq!(page.hits.len(), 1);
     assert_eq!(page.hits[0].preview, "КОД=17");
+    assert_eq!(page.hits[0].line_index, 1);
+    assert_eq!(page.next_line_index, 2);
     assert!(!page.complete);
     assert_eq!(page.next_offset, page.hits[0].line_end);
 
@@ -196,6 +344,7 @@ fn search_batches_resume_on_the_next_physical_line() {
     .unwrap();
     assert!(first.work_limit_reached);
     assert_eq!(first.next_offset, 8);
+    assert_eq!(first.next_line_index, 2);
     assert!(first.hits.is_empty());
 
     let second = search_page(
@@ -210,6 +359,8 @@ fn search_batches_resume_on_the_next_physical_line() {
     .unwrap();
     assert_eq!(second.hits.len(), 1);
     assert_eq!(second.hits[0].line_start, 8);
+    assert_eq!(second.hits[0].line_index, 0);
+    assert_eq!(second.next_line_index, 1);
 }
 
 #[test]

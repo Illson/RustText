@@ -18,13 +18,19 @@ fn prepare_advances_to_the_next_complete_lf_line() {
     let plan = prepare(&path, 40, TextEncoding::Utf8).unwrap();
     assert_eq!(plan.boundary_offset, 18);
     assert_eq!(plan.removable_bytes, 18);
+    assert_eq!(plan.removed_lines, 2);
 }
 
 #[test]
 fn boundary_treats_crlf_as_one_ending() {
     let (_dir, path) = temp_log(b"aaaa\r\nbbbb\r\ncccc");
-    let plan = hidden_start(&path, 40, TextEncoding::Utf8).unwrap();
-    assert_eq!(plan.boundary_offset, 6);
+    assert_eq!(hidden_start(&path, 40, TextEncoding::Utf8).unwrap(), 6);
+    assert_eq!(
+        prepare(&path, 40, TextEncoding::Utf8)
+            .unwrap()
+            .removed_lines,
+        1
+    );
 }
 
 #[test]
@@ -40,7 +46,8 @@ fn utf8_bom_is_retained_after_trim() {
     let plan = prepare(&path, 70, TextEncoding::Utf8Bom).unwrap();
     let outcome = trim(&path, &plan, &AtomicBool::new(false), |_, _| {}).unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"\xEF\xBB\xBFthird\n");
-    assert_eq!(outcome.removed_bytes, 13);
+    assert_eq!(plan.removable_bytes, 13);
+    assert_eq!(outcome.removed_lines, 2);
     assert_eq!(
         fs::read(outcome.backup_path).unwrap(),
         b"\xEF\xBB\xBFfirst\nsecond\nthird\n"
@@ -62,7 +69,7 @@ fn utf16_le_bom_is_retained_and_lines_are_aligned() {
         expected.extend(unit.to_le_bytes());
     }
     assert_eq!(fs::read(&path).unwrap(), expected);
-    assert_eq!(outcome.remaining_bytes, expected.len() as u64);
+    assert_eq!(outcome.removed_lines, 2);
 }
 
 #[test]
@@ -72,9 +79,9 @@ fn utf16_be_bom_is_retained() {
         bytes.extend(unit.to_be_bytes());
     }
     let (_dir, path) = temp_log(&bytes);
-    let plan = hidden_start(&path, 40, TextEncoding::Utf16Be).unwrap();
-    assert!(plan.boundary_offset >= 2);
-    assert_eq!(plan.boundary_offset % 2, 0);
+    let boundary = hidden_start(&path, 40, TextEncoding::Utf16Be).unwrap();
+    assert!(boundary >= 2);
+    assert_eq!(boundary % 2, 0);
 }
 
 #[test]
@@ -292,5 +299,16 @@ fn trims_a_file_without_a_line_ending_to_eof() {
     assert_eq!(plan.boundary_offset, 10);
     let outcome = trim(&path, &plan, &AtomicBool::new(false), |_, _| {}).unwrap();
     assert!(fs::read(&path).unwrap().is_empty());
-    assert_eq!(outcome.remaining_bytes, 0);
+    assert_eq!(outcome.removed_lines, 1);
+}
+
+#[test]
+fn trim_counts_complete_utf16_characters_with_an_incomplete_tail() {
+    let (_dir, path) = temp_log(b"\xff\xfea\x00x");
+    let plan = prepare(&path, 100, TextEncoding::Utf16Le).unwrap();
+    assert_eq!(plan.boundary_offset, 5);
+    assert_eq!(plan.removed_lines, 1);
+
+    trim(&path, &plan, &AtomicBool::new(false), |_, _| {}).unwrap();
+    assert_eq!(fs::read(path).unwrap(), b"\xff\xfe");
 }

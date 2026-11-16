@@ -590,9 +590,6 @@ fn replace(
             if work.check()? {
                 return Ok(Outcome::Cancelled);
             }
-            if count == MAX_PREVIOUS_MATCHES {
-                return Err("Замена ограничена 10 000 совпадениями за один запуск.".into());
-            }
             let range = captures.get(0).expect("complete match").range();
             result.push_str(&source[last_end..range.start]);
             append_replacement(&captures, expand_captures, replacement, &mut result);

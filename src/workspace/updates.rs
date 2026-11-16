@@ -10,22 +10,21 @@ use gpui_kit::{
 use super::{Workspace, session_runtime::AfterShutdown};
 use crate::{
     appearance,
-    updater::{self, Release, StagedUpdate},
+    updater::{self, StagedUpdate},
 };
 
 #[derive(Default)]
 pub(super) struct Updates {
     state: UpdateState,
     notice: Option<SharedString>,
+    hidden: bool,
 }
 
 #[derive(Default)]
 enum UpdateState {
     #[default]
     Idle,
-    Checking,
-    Available(Release),
-    Downloading,
+    Preparing,
     Ready {
         version: String,
         staged: StagedUpdate,
@@ -34,65 +33,33 @@ enum UpdateState {
 }
 
 impl Workspace {
-    pub(super) fn check_for_updates(
-        &mut self,
-        manual: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.updates.state, UpdateState::Idle) {
             return;
         }
-        self.updates.state = UpdateState::Checking;
-        self.updates.notice = manual.then(|| "Проверка обновлений…".into());
-        let job = cx.background_spawn(async { updater::check() });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = job.await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                this.updates.state = UpdateState::Idle;
-                this.updates.notice = match result {
-                    Ok(Some(release)) => {
-                        this.updates.state = UpdateState::Available(release);
-                        None
-                    }
-                    Ok(None) if manual => {
-                        Some(format!("Установлена актуальная версия {}.", updater::VERSION).into())
-                    }
-                    Err(error) if manual => {
-                        Some(format!("Не удалось проверить обновления. {error}").into())
-                    }
-                    _ => None,
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn download_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let UpdateState::Available(release) = &self.updates.state else {
-            return;
-        };
-        let release = release.clone();
-        self.updates.state = UpdateState::Downloading;
+        self.updates.state = UpdateState::Preparing;
         self.updates.notice = None;
-        let job = cx.background_spawn(async move {
+        let job = cx.background_spawn(async {
+            let Some(release) = updater::check()? else {
+                return Ok(None);
+            };
             let version = release.version.to_string();
-            updater::stage(&release).map(|staged| UpdateState::Ready { version, staged })
+            updater::stage(&release).map(|staged| Some((version, staged)))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                match result {
-                    Ok(state) => this.updates.state = state,
-                    Err(error) => {
-                        this.updates.state = UpdateState::Idle;
-                        this.updates.notice =
-                            Some(format!("Не удалось скачать обновление. {error}").into());
-                    }
+            let _ = this.update_in(cx, |this, _, cx| match result {
+                Ok(Some((version, staged))) => {
+                    this.updates.state = UpdateState::Ready { version, staged };
+                    this.updates.hidden = false;
+                    this.updates.notice = None;
+                    cx.notify();
                 }
-                cx.notify();
+                Ok(None) | Err(_) => {
+                    this.updates.state = UpdateState::Idle;
+                    this.updates.notice = None;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -149,38 +116,22 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn update_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("check-updates")
-            .small()
-            .ghost()
-            .label("Обновления")
-            .tooltip(format!(
-                "Проверить обновления · RustText {}",
-                updater::VERSION
-            ))
-            .disabled(self.busy.is_some() || !matches!(self.updates.state, UpdateState::Idle))
-            .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(true, window, cx)))
-    }
-
     pub(super) fn update_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.updates.hidden {
+            return None;
+        }
         let message = self
             .updates
             .notice
             .clone()
             .or_else(|| match &self.updates.state {
-                UpdateState::Available(release) => {
-                    Some(format!("Доступен RustText {}.", release.version).into())
-                }
-                UpdateState::Downloading => Some("Загрузка и проверка обновления…".into()),
                 UpdateState::Applying => Some("Запуск обновления…".into()),
                 UpdateState::Ready { version, .. } => {
                     Some(format!("RustText {version} готов к установке.").into())
                 }
                 _ => None,
             })?;
-        let download = matches!(self.updates.state, UpdateState::Available(_));
         let ready = matches!(self.updates.state, UpdateState::Ready { .. });
-        let dismissible = download || ready || matches!(self.updates.state, UpdateState::Idle);
         Some(
             div()
                 .flex()
@@ -198,16 +149,6 @@ impl Workspace {
                         .min_w_0()
                         .child(Label::new(message).text_sm()),
                 )
-                .children(download.then(|| {
-                    Button::new("download-update")
-                        .small()
-                        .outline()
-                        .label("Скачать")
-                        .disabled(self.busy.is_some())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.download_update(window, cx)),
-                        )
-                }))
                 .children(ready.then(|| {
                     Button::new("restart-for-update")
                         .small()
@@ -218,18 +159,18 @@ impl Workspace {
                             cx.listener(|this, _, window, cx| this.restart_for_update(window, cx)),
                         )
                 }))
-                .children(dismissible.then(|| {
+                .children((ready || self.updates.notice.is_some()).then(|| {
                     Button::new("dismiss-update")
                         .small()
                         .ghost()
-                        .label(if download || ready {
+                        .label(if ready {
                             "Позже"
                         } else {
                             "Закрыть"
                         })
                         .disabled(self.busy.is_some())
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.updates = Updates::default();
+                            this.updates.hidden = true;
                             cx.notify();
                         }))
                 })),

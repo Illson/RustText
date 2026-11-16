@@ -1,6 +1,7 @@
 mod controls;
 mod file_actions;
 mod find;
+mod global_scrollbar;
 mod index;
 mod viewport;
 
@@ -69,6 +70,9 @@ pub(crate) struct LogViewer {
     bookmark: LogBookmark,
     observation: Option<Observation>,
     page: Option<Page>,
+    line_range: Option<(u64, u64)>,
+    line_rows: Vec<(usize, u64)>,
+    hidden_line_count: Option<u64>,
     index: LineIndex,
     index_paused: bool,
     indexing: Option<Progress>,
@@ -99,6 +103,7 @@ impl LogViewer {
         let log_viewer = cx.entity().downgrade();
         let scroll_bottom = Rc::new(Cell::new(px(0.)));
         let editor_scroll_bottom = scroll_bottom.clone();
+        let editor_scrollbar_drag = Rc::new(global_scrollbar::DragState::default());
         let viewer = cx.new(|cx| {
             let mut editor = EditorState::new(window, cx)
                 .language("text")
@@ -106,9 +111,16 @@ impl LogViewer {
                 .searchable(false)
                 .scroll_beyond_last_line(Some(0))
                 .soft_wrap(true);
-            editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, _, _| {
-                Self::scrollbar(scroll, log_viewer.clone(), &editor_scroll_bottom)
-                    .into_any_element()
+            editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, window, cx| {
+                global_scrollbar::render(
+                    scroll,
+                    log_viewer.clone(),
+                    &editor_scroll_bottom,
+                    editor_scrollbar_drag.clone(),
+                    window,
+                    cx,
+                )
+                .into_any_element()
             })));
             editor
         });
@@ -127,6 +139,9 @@ impl LogViewer {
             bookmark,
             observation: None,
             page: None,
+            line_range: None,
+            line_rows: Vec::new(),
+            hidden_line_count: None,
             index: LineIndex::default(),
             index_paused: false,
             indexing: None,
