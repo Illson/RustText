@@ -4,6 +4,7 @@ mod json_action;
 mod launches;
 mod search_panel;
 mod session_runtime;
+mod updates;
 mod view;
 
 pub(crate) use view::bind_keys;
@@ -52,6 +53,7 @@ pub(crate) struct Workspace {
     session: Option<session_runtime::SessionWriter>,
     session_notice: Option<SharedString>,
     session_error: Option<SharedString>,
+    updates: updates::Updates,
 }
 
 impl Workspace {
@@ -77,6 +79,7 @@ impl Workspace {
             session: None,
             session_notice: None,
             session_error: None,
+            updates: updates::Updates::default(),
         };
         this.init_session(startup, window, cx);
         this.listen_for_launches(instance, window, cx);
@@ -90,6 +93,7 @@ impl Workspace {
         if !paths.is_empty() {
             this.open_paths(paths, file_actions::OpenMode::NORMAL, window, cx);
         }
+        this.check_for_updates(false, window, cx);
         this
     }
 
@@ -219,6 +223,9 @@ impl Workspace {
     }
 
     fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.applying_update() {
+            return;
+        }
         self.error = None;
         self.add_document(None, window, cx);
     }
@@ -283,7 +290,7 @@ impl Workspace {
             return false;
         }
         if self.session.is_some() {
-            return self.begin_session_shutdown(window, cx);
+            return self.begin_session_shutdown(session_runtime::AfterShutdown::Close, window, cx);
         }
         if self.documents.iter().any(|doc| doc.dirty) {
             self.confirm_discard(None, window, cx);
@@ -328,6 +335,9 @@ impl Workspace {
     }
 
     fn reorder_tabs(&mut self, dragged_id: u64, target_id: u64, cx: &mut Context<Self>) {
+        if self.applying_update() {
+            return;
+        }
         let from = self.documents.iter().position(|doc| doc.id == dragged_id);
         let to = self.documents.iter().position(|doc| doc.id == target_id);
         if let (Some(from), Some(to)) = (from, to)

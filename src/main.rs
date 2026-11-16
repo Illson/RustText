@@ -12,6 +12,7 @@ mod search;
 mod session;
 mod single_instance;
 mod text_format;
+mod updater;
 mod workspace;
 
 use gpui_kit::component::{Theme, ThemeMode, set_locale};
@@ -20,6 +21,13 @@ use gpui_kit::*;
 use workspace::Workspace;
 
 fn main() {
+    if let Some(result) = updater::run_helper_if_requested() {
+        if let Err(error) = result {
+            report_startup_error(format!("Не удалось установить обновление. {error}"));
+            std::process::exit(1);
+        }
+        return;
+    }
     log_viewer::enable_measurements();
     let launch = match single_instance::LaunchRequest::from_process() {
         Ok(launch) => launch,
@@ -75,7 +83,11 @@ fn main() {
 }
 
 fn launch_error(error: std::io::Error) {
-    eprintln!("Не удалось запустить RustText. {error}");
+    report_startup_error(format!("Не удалось запустить RustText. {error}"));
+}
+
+fn report_startup_error(message: String) {
+    eprintln!("{message}");
     #[cfg(windows)]
     {
         use windows::{
@@ -83,9 +95,7 @@ fn launch_error(error: std::io::Error) {
             core::PCWSTR,
         };
         let title: Vec<_> = "RustText\0".encode_utf16().collect();
-        let message: Vec<_> = format!("Не удалось запустить RustText. {error}\0")
-            .encode_utf16()
-            .collect();
+        let message: Vec<_> = format!("{message}\0").encode_utf16().collect();
         // Both strings are NUL-terminated and remain alive throughout the call.
         unsafe {
             MessageBoxW(

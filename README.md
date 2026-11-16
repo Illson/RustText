@@ -37,6 +37,12 @@ cargo run --locked -- "C:\путь\к\файлу.txt"
 - «Скрыть начало» ограничивает просмотр и поиск. «Удалить начало…» меняет исходный файл после подтверждения. Для записи нужен эксклюзивный доступ и свободное место под полную резервную копию рядом с исходником. RustText выводит путь к копии после обрезки.
 - Сессия восстанавливает вкладку, позицию, скрытую границу и переключатели. Для лога в сессию записываются только метаданные.
 
+## Обновления
+
+Начиная с версии 0.1.1 RustText проверяет новые стабильные [выпуски на GitHub](https://github.com/Illson/RustText/releases) при запуске. Кнопка «Обновления» запускает повторную проверку.
+
+Когда доступна новая версия, нажмите «Скачать». RustText сверит архив с SHA-256. Кнопка «Перезапустить» сохранит сессию, установит обновление и снова откроет окно.
+
 ## Подготовка архива
 
 Выполните команды из корня репозитория в PowerShell.
@@ -44,10 +50,10 @@ cargo run --locked -- "C:\путь\к\файлу.txt"
 ```powershell
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = '-C target-feature=+crt-static'
 cargo build --release --locked --target x86_64-pc-windows-msvc
-.\tools\Package-RustText.ps1 -ExecutablePath 'target\x86_64-pc-windows-msvc\release\rusttext.exe'
+.\tools\Package-RustText.ps1 -ExecutablePath 'target\x86_64-pc-windows-msvc\release\rusttext.exe' -OutputDirectory 'target\distribution\v0.1.1'
 ```
 
-Архив и контрольная сумма записываются в `target/distribution/`. Замеры и условия проверки приведены в [отчёте](docs/verification.md).
+Для стабильного релиза с тегом вида `v0.1.1` прикрепите к выпуску `RustText.zip` и `RustText.zip.sha256`. По этим именам RustText находит файлы обновления. Замеры первого выпуска приведены в [отчёте](docs/verification.md).
 
 ## Проверка
 

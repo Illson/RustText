@@ -104,6 +104,7 @@ impl Workspace {
                             .small()
                             .ghost()
                             .label("Создать")
+                            .disabled(self.applying_update())
                             .tooltip("Создать вкладку · Ctrl+N")
                             .on_click(cx.listener(|this, _, window, cx| this.new_file(window, cx))),
                     )
@@ -277,16 +278,14 @@ impl Workspace {
     fn tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("tabs")
-            .h(px(43.0))
+            .h_full()
             .flex()
-            .flex_shrink_0()
+            .flex_1()
+            .min_w_0()
             .items_center()
             .overflow_x_scroll()
             .gap_1()
             .px_3()
-            .bg(rgb(0x131a24))
-            .border_b_1()
-            .border_color(rgb(0x293442))
             .children(self.documents.iter().map(|doc| {
                 let id = doc.id;
                 let active = id == self.active;
@@ -431,7 +430,7 @@ impl Render for Workspace {
             log.clone().into_any_element()
         } else {
             Editor::new(&doc.editor)
-                .readonly(doc.placeholder)
+                .readonly(doc.placeholder || self.applying_update())
                 .bordered(false)
                 .h_full()
                 .w_full()
@@ -479,7 +478,19 @@ impl Render for Workspace {
                 this.open_paths(paths.paths().to_vec(), OpenMode::NORMAL, window, cx);
             }))
             .child(self.toolbar(cx))
-            .child(self.tabs(cx))
+            .child(
+                div()
+                    .h(px(43.0))
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .bg(rgb(0x131a24))
+                    .border_b_1()
+                    .border_color(rgb(0x293442))
+                    .child(self.tabs(cx))
+                    .child(div().flex_shrink_0().pr_3().child(self.update_button(cx))),
+            )
+            .children(self.update_panel(cx))
             .children(self.search_panel(cx))
             .child(
                 div()

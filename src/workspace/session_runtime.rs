@@ -16,6 +16,12 @@ use crate::{
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const CLOSING_SESSION: &str = "Сохранение сессии…";
 
+#[derive(Clone, Copy)]
+pub(super) enum AfterShutdown {
+    Close,
+    InstallUpdate,
+}
+
 pub(super) struct SessionWriter {
     journal: Arc<Mutex<Journal>>,
     last_saved: Option<State>,
@@ -209,11 +215,18 @@ impl Workspace {
 
     pub(super) fn begin_session_shutdown(
         &mut self,
+        after: AfterShutdown,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(pending) = self.prepare_session_write(window, cx) else {
-            return true;
+            return match after {
+                AfterShutdown::Close => true,
+                AfterShutdown::InstallUpdate => {
+                    self.finish_update_shutdown(window, cx);
+                    false
+                }
+            };
         };
         self.busy = Some(CLOSING_SESSION);
         cx.notify();
@@ -225,11 +238,14 @@ impl Workspace {
                 this.session_write_finished(revision, state, result, cx);
                 this.busy = None;
                 if saved {
-                    if this.begin_session_shutdown(window, cx) {
+                    if this.begin_session_shutdown(after, window, cx) {
                         window.remove_window();
                     }
                 } else {
-                    this.confirm_close_after_session_error(window, cx);
+                    match after {
+                        AfterShutdown::Close => this.confirm_close_after_session_error(window, cx),
+                        AfterShutdown::InstallUpdate => this.defer_restart_after_session_error(cx),
+                    }
                 }
             });
         })
