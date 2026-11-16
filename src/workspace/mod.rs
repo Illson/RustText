@@ -10,6 +10,7 @@ use gpui_kit::*;
 
 use crate::{
     files::{FileTarget, OpenedFile},
+    recent_files::RecentFiles,
     text_format::{TextEncoding, TextFormat},
 };
 
@@ -29,6 +30,7 @@ pub(crate) struct Workspace {
     active: u64,
     next_id: u64,
     closed: Vec<(PathBuf, bool)>,
+    recent: RecentFiles,
     busy: Option<&'static str>,
     error: Option<SharedString>,
     wrap: bool,
@@ -37,13 +39,15 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new(paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (recent, recent_error) = RecentFiles::load();
         let mut this = Self {
             documents: Vec::new(),
             active: 0,
             next_id: 1,
             closed: Vec::new(),
+            recent,
             busy: None,
-            error: None,
+            error: recent_error.map(recent_warning),
             wrap: false,
             font_size: 15.0,
         };
@@ -269,4 +273,8 @@ fn syntax_for(path: &Path) -> String {
         .and_then(|extension| extension.to_str())
         .unwrap_or("text")
         .to_ascii_lowercase()
+}
+
+fn recent_warning(error: std::io::Error) -> SharedString {
+    format!("Список недавних файлов недоступен. {error}").into()
 }

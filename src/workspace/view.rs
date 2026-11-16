@@ -5,11 +5,12 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::Editor,
     label::Label,
+    menu::{DropdownMenu, PopupMenuItem},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use super::{Document, Workspace};
+use super::{Document, Workspace, file_name};
 use crate::go_to_line;
 
 actions!(
@@ -96,6 +97,7 @@ impl Workspace {
                                 this.open_picker(false, window, cx)
                             })),
                     )
+                    .child(self.recent_files_button(cx))
                     .child(
                         Button::new("open-1251")
                             .small()
@@ -163,6 +165,42 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, _, cx| this.zoom(1.0, cx))),
                     ),
             )
+    }
+
+    fn recent_files_button(&self, cx: &Context<Self>) -> impl IntoElement {
+        let entries = self.recent.entries().to_vec();
+        let workspace = cx.entity().downgrade();
+        Button::new("recent-files")
+            .small()
+            .ghost()
+            .label("Недавние")
+            .disabled(self.busy.is_some())
+            .dropdown_menu(move |menu, _, _| {
+                if entries.is_empty() {
+                    return menu.item(PopupMenuItem::label("Недавних файлов пока нет"));
+                }
+
+                entries.iter().fold(menu.scrollable(true), |menu, entry| {
+                    let entry = entry.clone();
+                    let workspace = workspace.clone();
+                    let name = file_name(&entry.path);
+                    let directory = entry.path.parent().map(display_path).unwrap_or_default();
+                    menu.item(
+                        PopupMenuItem::new(format!("{name} — {directory}")).on_click(
+                            move |_, window, cx| {
+                                let _ = workspace.update(cx, |this, cx| {
+                                    this.open_paths(
+                                        vec![entry.path.clone()],
+                                        entry.windows_1251,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            },
+                        ),
+                    )
+                })
+            })
     }
 
     fn tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {

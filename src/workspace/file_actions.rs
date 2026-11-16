@@ -2,8 +2,11 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::*;
 
-use super::{Workspace, file_name, syntax_for};
-use crate::files::{self, FileTarget, OpenedFile};
+use super::{Workspace, file_name, recent_warning, syntax_for};
+use crate::{
+    files::{self, FileTarget, OpenedFile},
+    recent_files::RecentFile,
+};
 
 impl Workspace {
     pub(super) fn open_picker(
@@ -59,8 +62,10 @@ impl Workspace {
         self.busy = Some("Открытие…");
         self.error = None;
         let executor = cx.background_executor().clone();
+        let mut recent = self.recent.clone();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
+            let mut opened_files = Vec::new();
             let mut first_error = None;
             let mut failures = 0;
             for path in paths {
@@ -69,14 +74,12 @@ impl Workspace {
                     .spawn(async move { files::open(&path, windows_1251) })
                     .await
                 {
-                    Ok(opened) => {
-                        if this
-                            .update_in(cx, |this, window, cx| this.show_opened(opened, window, cx))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
+                    Ok(opened) => match this
+                        .update_in(cx, |this, window, cx| this.show_opened(opened, window, cx))
+                    {
+                        Ok(file) => opened_files.push(file),
+                        Err(_) => return,
+                    },
                     Err(error) => {
                         failures += 1;
                         first_error
@@ -85,15 +88,24 @@ impl Workspace {
                 }
             }
 
+            let (recent, history_error) = executor
+                .spawn(async move {
+                    let error = recent.record(opened_files).err();
+                    (recent, error)
+                })
+                .await;
             this.update_in(cx, |this, _, cx| {
                 this.busy = None;
-                this.error = first_error.map(|error| {
-                    if failures == 1 {
-                        error.into()
-                    } else {
-                        format!("{error} Ошибок при открытии: {failures}").into()
-                    }
-                });
+                this.recent = recent;
+                this.error = first_error
+                    .map(|error| {
+                        if failures == 1 {
+                            error.into()
+                        } else {
+                            format!("{error} Ошибок при открытии: {failures}").into()
+                        }
+                    })
+                    .or_else(|| history_error.map(recent_warning));
                 cx.notify();
             })
             .ok();
@@ -101,14 +113,20 @@ impl Workspace {
         .detach();
     }
 
-    fn show_opened(&mut self, opened: OpenedFile, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_opened(
+        &mut self,
+        opened: OpenedFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> RecentFile {
         if let Some(doc) = self.documents.iter().find(|doc| {
             doc.file
                 .as_ref()
                 .is_some_and(|file| file.path == opened.target.path)
         }) {
+            let recent = RecentFile::new(opened.target.path, doc.format.encoding);
             self.select(doc.id, window, cx);
-            return;
+            return recent;
         }
 
         if self.documents.len() == 1
@@ -117,7 +135,9 @@ impl Workspace {
         {
             self.documents.clear();
         }
+        let recent = RecentFile::new(opened.target.path.clone(), opened.format.encoding);
         self.add_document(Some(opened), window, cx);
+        recent
     }
 
     pub(super) fn save(&mut self, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -204,16 +224,24 @@ impl Workspace {
 
         let snapshot = doc.editor.read(cx).text().clone();
         let format = doc.format;
+        let mut recent = self.recent.clone();
         self.busy = Some("Сохранение…");
         cx.notify();
         let task = cx.background_spawn(async move {
             let result = files::save(target, format, &snapshot.to_string());
-            (snapshot, result)
+            let history_error = result.as_ref().ok().and_then(|file| {
+                recent
+                    .record([RecentFile::new(file.path.clone(), format.encoding)])
+                    .err()
+            });
+            (snapshot, result, recent, history_error)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let (snapshot, result) = task.await;
+            let (snapshot, result, recent, history_error) = task.await;
             this.update_in(cx, |this, _, cx| {
                 this.busy = None;
+                this.recent = recent;
+                this.error = history_error.map(recent_warning);
                 match result {
                     Ok(file) => {
                         if let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id) {

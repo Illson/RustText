@@ -2,6 +2,7 @@
 
 mod files;
 mod go_to_line;
+mod recent_files;
 mod text_format;
 mod workspace;
 
