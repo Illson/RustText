@@ -218,16 +218,28 @@ impl Workspace {
             .as_ref()
             .map_or(self.wrap, |log| log.read(cx).wraps_lines());
         let focus = self.menu_focus(cx);
+        let generator_workspace = cx.entity().downgrade();
+        let can_generate = self.busy.is_none() && !self.applying_update();
         Button::new("tools-menu")
             .small()
             .ghost()
             .label("Инструменты")
             .dropdown_menu(move |menu, window, cx| {
+                let generator_workspace = generator_workspace.clone();
                 let menu = menu
                     .action_context(focus.clone())
                     .min_w(px(280.))
                     .scrollable(true)
                     .label("Текст")
+                    .item(
+                        PopupMenuItem::new("Генератор строк…")
+                            .disabled(!can_generate)
+                            .on_click(move |_, window, cx| {
+                                let _ = generator_workspace.update(cx, |this, cx| {
+                                    this.open_template_generator(window, cx)
+                                });
+                            }),
+                    )
                     .item(
                         PopupMenuItem::new("Форматировать JSON")
                             .action(Box::new(FormatJson))

@@ -1,4 +1,4 @@
-use std::{fs, io::Write as _};
+use std::{fs, io::Write as _, sync::atomic::AtomicBool};
 
 use super::{
     Destination, LineIndex, LogBookmark, LogReader, PageOptions, PreviousPage, append_page,
@@ -42,6 +42,49 @@ fn search_highlight_uses_match_bytes_across_long_row_fragments() {
 
     assert_eq!(local_match_range(&page, 10, Some(&(2..4))), Some(2..4));
     assert_eq!(local_match_range(&page, 10, Some(&(5..6))), Some(0..5));
+}
+
+#[test]
+fn time_only_jump_displays_and_marks_the_record_from_the_viewed_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("several-days.log");
+    let previous_day = "2026-11-16 01:33:42.8750 previous day\n";
+    let matched = "2026-11-17 01:33:42.8750 matching record\n";
+    let reference = "2026-11-17 01:33:42.9150 viewed record\n";
+    fs::write(&path, format!("{previous_day}{matched}{reference}")).unwrap();
+
+    let reference_offset = (previous_day.len() + matched.len()) as u64;
+    let (observation, _) = observe(&path, None).unwrap();
+    let mut bookmark = LogBookmark {
+        offset: reference_offset,
+        ..LogBookmark::default()
+    };
+    bookmark.record_observation(&observation);
+
+    let mut reader = LogReader::open(&path, None).unwrap();
+    let offset = reader
+        .seek_timestamp_near(0, bookmark.offset, "01:33:42.8750", &AtomicBool::new(false))
+        .unwrap()
+        .unwrap();
+    let page = read_page(
+        &path,
+        None,
+        &bookmark,
+        Destination::Match(offset),
+        PageOptions::default(),
+        PreviousPage {
+            observation: Some(observation),
+            page: None,
+        },
+        LineIndex::default(),
+    )
+    .unwrap();
+    assert_eq!(page.start, previous_day.len() as u64);
+    assert_eq!(page.page.rows[0].text, matched.trim_end());
+    assert_eq!(
+        local_match_range(&page.page, page.start, None),
+        Some(0..matched.trim_end().len())
+    );
 }
 
 #[test]

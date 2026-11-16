@@ -13,6 +13,7 @@ mod search;
 mod search_highlight;
 mod session;
 mod single_instance;
+mod template;
 mod text_format;
 mod updater;
 mod workspace;

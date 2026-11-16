@@ -5,8 +5,10 @@ mod json_action;
 mod json_validation;
 mod launches;
 mod menus;
+mod reveal;
 mod search_panel;
 mod session_runtime;
+mod template_generator;
 mod updates;
 mod view;
 
@@ -66,6 +68,7 @@ pub(crate) struct Workspace {
     wrap: bool,
     font_size: f32,
     search: Option<search_panel::SearchPanel>,
+    template_generator: Option<template_generator::TemplateGenerator>,
     session: Option<session_runtime::SessionWriter>,
     session_notice: Option<SharedString>,
     session_error: Option<SharedString>,
@@ -93,6 +96,7 @@ impl Workspace {
             wrap: false,
             font_size: 15.0,
             search: None,
+            template_generator: None,
             session: None,
             session_notice: None,
             session_error: None,

@@ -217,13 +217,33 @@ impl Workspace {
                             if !path.is_file() {
                                 return menu;
                             }
-                            let file = path.clone();
+                            let reveal_path = path.clone();
                             let copy_path = display_path(&path);
                             let workspace = workspace.clone();
-                            menu.item(
-                                PopupMenuItem::new("Показать в Проводнике")
-                                    .on_click(move |_, _, cx| cx.reveal_path(&file)),
-                            )
+                            menu.item(PopupMenuItem::new("Показать в Проводнике").on_click(
+                                move |_, window, cx| {
+                                    let reveal_path = reveal_path.clone();
+                                    let task = cx.background_spawn(async move {
+                                        super::reveal::select_in_explorer(&reveal_path)
+                                    });
+                                    window
+                                        .spawn(cx, async move |cx| {
+                                            if let Err(error) = task.await {
+                                                let detail = error.to_string();
+                                                let _ = cx.update(|window, cx| {
+                                                    drop(window.prompt(
+                                                        PromptLevel::Critical,
+                                                        "Не удалось показать файл в Проводнике.",
+                                                        Some(&detail),
+                                                        &[PromptButton::ok("Закрыть")],
+                                                        cx,
+                                                    ));
+                                                });
+                                            }
+                                        })
+                                        .detach();
+                                },
+                            ))
                             .item(PopupMenuItem::new("Копировать путь").on_click(
                                 move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
@@ -408,7 +428,7 @@ impl Render for Workspace {
                 .text_size(px(self.font_size))
                 .into_any_element()
         };
-        div()
+        let workspace = div()
             .id("rusttext")
             .key_context("RustText")
             .size_full()
@@ -486,6 +506,11 @@ impl Render for Workspace {
             )
             .children(self.search_panel(window, cx))
             .children(doc.log.is_none().then(|| self.status(doc, cx)))
-            .children(self.update_panel(cx))
+            .children(self.update_panel(cx));
+        div()
+            .relative()
+            .size_full()
+            .child(workspace)
+            .children(self.template_generator_panel(cx))
     }
 }

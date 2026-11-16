@@ -57,6 +57,43 @@ impl LogReader {
     ) -> Result<Option<u64>, LogError> {
         Ok(search(self, start_offset, target, cancel)?.offset)
     }
+
+    /// Finds a dated line at or after `target`. Time-only targets use the date
+    /// of the dated line at `reference_offset`, or the first dated line after
+    /// `start_offset` when the reference line has no timestamp.
+    pub fn seek_timestamp_near(
+        &mut self,
+        start_offset: u64,
+        reference_offset: u64,
+        target: &str,
+        cancel: &AtomicBool,
+    ) -> Result<Option<u64>, LogError> {
+        let Some(time) = parse_query_time(target) else {
+            return self.seek_timestamp(start_offset, target, cancel);
+        };
+
+        let start = align_offset(start_offset.min(self.size), self.encoding);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(LogError::Cancelled);
+        }
+        let context = match timestamp_at_reference(self, start, reference_offset)? {
+            Some(timestamp) => Some(timestamp),
+            None => find_dated_line(self, start, cancel, |_| true)?.map(|(_, timestamp)| timestamp),
+        };
+        let Some(context) = context else {
+            return Ok(None);
+        };
+        let target = Timestamp {
+            year: context.year,
+            month: context.month,
+            day: context.day,
+            hour: time.hour,
+            minute: time.minute,
+            second: time.second,
+            nanosecond: time.nanosecond,
+        };
+        Ok(search_target(self, start, target, cancel)?.offset)
+    }
 }
 
 fn search(
@@ -70,6 +107,18 @@ fn search(
     }
     let target = parse_query_timestamp(query).ok_or(LogError::InvalidTimestamp)?;
     let start = align_offset(start_offset.min(reader.size), reader.encoding);
+    search_target(reader, start, target, cancel)
+}
+
+fn search_target(
+    reader: &mut LogReader,
+    start: u64,
+    target: Timestamp,
+    cancel: &AtomicBool,
+) -> Result<SearchOutcome, LogError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(LogError::Cancelled);
+    }
     if start >= reader.size {
         return Ok(SearchOutcome {
             offset: None,
@@ -146,6 +195,76 @@ fn search(
     })
 }
 
+#[derive(Clone, Copy)]
+struct TimeOfDay {
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanosecond: u32,
+}
+
+fn parse_query_time(text: &str) -> Option<TimeOfDay> {
+    let bytes = text.trim().as_bytes();
+    let (time, end) = parse_time(bytes)?;
+    (end == bytes.len()).then_some(time)
+}
+
+fn parse_time(bytes: &[u8]) -> Option<(TimeOfDay, usize)> {
+    if bytes.get(2) != Some(&b':') || bytes.get(5) != Some(&b':') {
+        return None;
+    }
+    let hour = decimal(bytes.get(0..2)?)? as u8;
+    let minute = decimal(bytes.get(3..5)?)? as u8;
+    let second = decimal(bytes.get(6..8)?)? as u8;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    let mut cursor = 8;
+    let mut nanosecond = 0_u32;
+    if matches!(bytes.get(cursor), Some(b'.' | b','))
+        && (bytes.get(cursor) == Some(&b'.')
+            || bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit))
+    {
+        cursor += 1;
+        let fraction_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        let fraction_length = cursor - fraction_start;
+        if !(1..=9).contains(&fraction_length) {
+            return None;
+        }
+        for digit in &bytes[fraction_start..cursor] {
+            nanosecond = nanosecond * 10 + (*digit - b'0') as u32;
+        }
+        nanosecond *= 10_u32.pow(9 - fraction_length as u32);
+    }
+    Some((
+        TimeOfDay {
+            hour,
+            minute,
+            second,
+            nanosecond,
+        },
+        cursor,
+    ))
+}
+
+fn timestamp_at_reference(
+    reader: &mut LogReader,
+    start: u64,
+    reference_offset: u64,
+) -> Result<Option<Timestamp>, LogError> {
+    if reference_offset >= reader.size {
+        return Ok(None);
+    }
+    Ok(match probe_line(reader, reference_offset, start)? {
+        ProbeResult::Dated(line) => Some(line.timestamp),
+        ProbeResult::Unsupported => None,
+    })
+}
+
 fn insert_monotonic_probe(probes: &mut Vec<DatedLine>, line: DatedLine) -> bool {
     let index = probes.partition_point(|probe| probe.start < line.start);
     if probes
@@ -174,6 +293,21 @@ fn forward_scan(
     cancel: &AtomicBool,
     probes: usize,
 ) -> Result<SearchOutcome, LogError> {
+    let offset = find_dated_line(reader, start, cancel, |timestamp| timestamp >= target)?
+        .map(|(offset, _)| offset);
+    Ok(SearchOutcome {
+        offset,
+        probes,
+        used_fallback: true,
+    })
+}
+
+fn find_dated_line(
+    reader: &mut LogReader,
+    start: u64,
+    cancel: &AtomicBool,
+    is_match: impl Fn(Timestamp) -> bool,
+) -> Result<Option<(u64, Timestamp)>, LogError> {
     let mut cursor = start;
     let mut buffered = BufReader::with_capacity(BLOCK_SIZE * 2, reader.file.try_clone()?);
     buffered.seek(SeekFrom::Start(start))?;
@@ -192,12 +326,8 @@ fn forward_scan(
             break;
         }
         let text = decode(&fragment.bytes, reader.encoding, cursor == 0);
-        if parse_timestamp(&text).is_some_and(|timestamp| timestamp >= target) {
-            return Ok(SearchOutcome {
-                offset: Some(cursor),
-                probes,
-                used_fallback: true,
-            });
+        if let Some(timestamp) = parse_timestamp(&text).filter(|&timestamp| is_match(timestamp)) {
+            return Ok(Some((cursor, timestamp)));
         }
         cursor = fragment.end;
         let mut line_continues = fragment.limit_reached;
@@ -219,11 +349,7 @@ fn forward_scan(
             line_continues = next.limit_reached;
         }
     }
-    Ok(SearchOutcome {
-        offset: None,
-        probes,
-        used_fallback: true,
-    })
+    Ok(None)
 }
 
 fn probe_line(
@@ -353,7 +479,7 @@ fn parse_timestamp(text: &str) -> Option<Timestamp> {
         if start > 0 && bytes[start - 1].is_ascii_digit() {
             continue;
         }
-        if let Some(timestamp) = parse_timestamp_at(text, start) {
+        if let Some((timestamp, _)) = parse_timestamp_at(text, start) {
             return Some(timestamp);
         }
     }
@@ -362,89 +488,37 @@ fn parse_timestamp(text: &str) -> Option<Timestamp> {
 
 fn parse_query_timestamp(text: &str) -> Option<Timestamp> {
     let text = text.trim();
-    let timestamp = parse_timestamp_at(text, 0)?;
-    (timestamp_end(text.as_bytes())? == text.len()).then_some(timestamp)
+    let (timestamp, end) = parse_timestamp_at(text, 0)?;
+    (end == text.len()).then_some(timestamp)
 }
 
-fn timestamp_end(bytes: &[u8]) -> Option<usize> {
-    if bytes.len() < 19 {
-        return None;
-    }
-    if bytes.get(19) != Some(&b'.') {
-        return Some(19);
-    }
-    let mut end = 20;
-    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-        end += 1;
-    }
-    (1..=9).contains(&(end - 20)).then_some(end)
-}
-
-fn parse_timestamp_at(text: &str, start: usize) -> Option<Timestamp> {
-    let bytes = text.as_bytes();
-    let value = bytes.get(start..)?;
-    if value.len() < 19
-        || !value[0..4].iter().all(u8::is_ascii_digit)
-        || value[4] != b'-'
-        || !value[5..7].iter().all(u8::is_ascii_digit)
-        || value[7] != b'-'
-        || !value[8..10].iter().all(u8::is_ascii_digit)
-        || !matches!(value[10], b' ' | b'T')
-        || !value[11..13].iter().all(u8::is_ascii_digit)
-        || value[13] != b':'
-        || !value[14..16].iter().all(u8::is_ascii_digit)
-        || value[16] != b':'
-        || !value[17..19].iter().all(u8::is_ascii_digit)
+fn parse_timestamp_at(text: &str, start: usize) -> Option<(Timestamp, usize)> {
+    let value = text.as_bytes().get(start..)?;
+    if value.get(4) != Some(&b'-')
+        || value.get(7) != Some(&b'-')
+        || !matches!(value.get(10), Some(b' ' | b'T'))
     {
         return None;
     }
-
-    let mut cursor = 19;
-    let mut nanosecond = 0_u32;
-    if value.get(cursor) == Some(&b'.') {
-        cursor += 1;
-        let fraction_start = cursor;
-        while value.get(cursor).is_some_and(u8::is_ascii_digit) {
-            cursor += 1;
-        }
-        let fraction_length = cursor - fraction_start;
-        if !(1..=9).contains(&fraction_length) {
-            return None;
-        }
-        for digit in &value[fraction_start..cursor] {
-            nanosecond = nanosecond * 10 + (*digit - b'0') as u32;
-        }
-        for _ in fraction_length..9 {
-            nanosecond *= 10;
-        }
-    }
-
-    let year = decimal(&value[0..4])?;
-    let month = decimal(&value[5..7])? as u8;
-    let day = decimal(&value[8..10])? as u8;
-    let hour = decimal(&value[11..13])? as u8;
-    let minute = decimal(&value[14..16])? as u8;
-    let second = decimal(&value[17..19])? as u8;
-    if year == 0
-        || month == 0
-        || month > 12
-        || day == 0
-        || day > days_in_month(year, month)
-        || hour > 23
-        || minute > 59
-        || second > 60
-    {
+    let year = decimal(value.get(0..4)?)?;
+    let month = decimal(value.get(5..7)?)? as u8;
+    let day = decimal(value.get(8..10)?)? as u8;
+    if year == 0 || !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
         return None;
     }
-    Some(Timestamp {
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-        nanosecond,
-    })
+    let (time, end) = parse_time(&value[11..])?;
+    Some((
+        Timestamp {
+            year,
+            month,
+            day,
+            hour: time.hour,
+            minute: time.minute,
+            second: time.second,
+            nanosecond: time.nanosecond,
+        },
+        11 + end,
+    ))
 }
 
 fn decimal(bytes: &[u8]) -> Option<u16> {

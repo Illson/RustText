@@ -4,6 +4,7 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     label::Label,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::sync::{
     Arc,
@@ -707,5 +708,8 @@ fn option_button(
         .outline()
         .label(label)
         .selected(selected)
+        .when(selected, |button| {
+            button.border_color(rgb(appearance::ACCENT))
+        })
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_search_option(toggle, cx)))
 }

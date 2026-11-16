@@ -92,6 +92,82 @@ fn inconsistent_timestamp_probes_fall_back_to_the_first_qualifying_line() {
 }
 
 #[test]
+fn timestamp_after_the_end_of_an_ordered_log_needs_only_endpoint_probes() {
+    let contents: String = (0..100)
+        .map(|second| format!("{} record\n", timestamp(second)))
+        .collect();
+    let (_file, mut reader) = reader_with(contents.as_bytes(), Some(TextEncoding::Utf8));
+
+    let result = search(&mut reader, 0, &timestamp(100), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result.offset, None);
+    assert!(!result.used_fallback);
+    assert_eq!(result.probes, 2);
+}
+
+#[test]
+fn binary_search_accepts_comma_fraction_separator() {
+    let contents = b"2026-11-17 01:30:20,0800 before\n2026-11-17 01:30:20,0850 target\n2026-11-17 01:30:20,0900 after";
+    let expected = contents
+        .windows(b"2026-11-17 01:30:20,0850".len())
+        .position(|window| window == b"2026-11-17 01:30:20,0850")
+        .unwrap() as u64;
+    let (_file, mut reader) = reader_with(contents, Some(TextEncoding::Utf8));
+
+    let result = search(
+        &mut reader,
+        0,
+        "2026-11-17 01:30:20,0850",
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(result.offset, Some(expected));
+}
+
+#[test]
+fn time_only_search_uses_the_date_at_the_reference_position() {
+    let records = [
+        "2026-11-16 01:33:42.8750 yesterday\n",
+        "2026-11-17 01:33:42.8000 before\n",
+        "2026-11-17 01:33:42.8750 target\n",
+        "2026-11-17 01:33:42.9150 current\n",
+        "2026-11-18 01:33:42.8750 tomorrow",
+    ];
+    let mut contents = Vec::new();
+    let mut expected = 0;
+    let mut reference = 0;
+    for record in records {
+        if record.contains(" target") {
+            expected = contents.len() as u64;
+        }
+        if record.contains(" current") {
+            reference = contents.len() as u64;
+        }
+        contents.extend_from_slice(record.as_bytes());
+    }
+    let (_file, mut reader) = reader_with(&contents, Some(TextEncoding::Utf8));
+
+    let result = reader
+        .seek_timestamp_near(0, reference, "01:33:42.8750", &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(result, Some(expected));
+}
+
+#[test]
+fn time_only_search_uses_first_dated_record_if_reference_is_undated() {
+    let contents = b"startup message\n2026-11-17 01:33:42.8000 before\n2026-11-17 01:33:42.8750 target\n2026-11-18 01:33:42.8750 tomorrow";
+    let expected = contents
+        .windows(b"2026-11-17 01:33:42.8750 target".len())
+        .position(|window| window == b"2026-11-17 01:33:42.8750 target")
+        .unwrap() as u64;
+    let (_file, mut reader) = reader_with(contents, Some(TextEncoding::Utf8));
+
+    let result = reader
+        .seek_timestamp_near(0, 0, "01:33:42.8750", &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(result, Some(expected));
+}
+
+#[test]
 fn invalid_target_timestamp_has_a_specific_error() {
     let (_file, mut reader) = reader_with(b"2026-11-17 01:30:20 event\n", None);
 

@@ -6,6 +6,7 @@ use std::{
     time::Instant,
 };
 
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     component::{
         Disableable, Selectable, Sizable,
@@ -38,7 +39,7 @@ pub(super) struct LogSearch {
 
 impl LogSearch {
     fn new(window: &mut Window, cx: &mut Context<LogViewer>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Текст в логе"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Текст или время в логе"));
         let enter = cx.subscribe_in(&input, window, |viewer, _, event, window, cx| match event {
             InputEvent::PressEnter { .. } => viewer.start_search(false, window, cx),
             InputEvent::Change => {
@@ -54,7 +55,7 @@ impl LogSearch {
             whole_word: false,
             results: None,
             progress: None,
-            message: "Введите текст или шаблон поиска.".into(),
+            message: "Введите текст или время.".into(),
             cancelled_at: None,
             _enter: enter,
         }
@@ -144,7 +145,7 @@ impl LogSearch {
                             .small()
                             .ghost()
                             .label("Ко времени")
-                            .tooltip("Перейти к первой записи с указанным или более поздним временем. Для логов, упорядоченных по времени.")
+                            .tooltip("Введите дату и время или только время. Если даты нет, используется день просматриваемой записи.")
                             .disabled(running || !enabled)
                             .on_click(cx.listener(|this, _, window, cx| this.jump_to_timestamp(window, cx))),
                     )
@@ -283,11 +284,32 @@ impl LogViewer {
         }
     }
 
+    fn first_visible_record_offset(&self, cx: &App) -> u64 {
+        let Some(page) = &self.page else {
+            return self.bookmark.offset;
+        };
+        let editor = self.viewer.read(cx);
+        let top = editor.input_bounds().top();
+        let mut text_offset = 0;
+        for (index, row) in page.rows.iter().enumerate() {
+            if editor
+                .range_to_bounds(&(text_offset..text_offset))
+                .is_some_and(|bounds| bounds.bottom() > top)
+            {
+                return row.start;
+            }
+            text_offset +=
+                row.text.len() + usize::from(row.terminated && index + 1 < page.rows.len());
+        }
+        self.bookmark.offset
+    }
+
     fn jump_to_timestamp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.available() {
             return;
         }
         self.clear_search_highlight(cx);
+        let reference = self.first_visible_record_offset(cx);
         let Some(search) = &mut self.search else {
             return;
         };
@@ -309,7 +331,7 @@ impl LogViewer {
             let cancel = cancel.clone();
             async move {
                 let mut reader = LogReader::open(path, encoding)?;
-                reader.seek_timestamp(hidden, &target, &cancel)
+                reader.seek_timestamp_near(hidden, reference, &target, &cancel)
             }
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -533,6 +555,9 @@ fn option_button(
         .label(label)
         .tooltip(tooltip)
         .selected(selected)
+        .when(selected, |button| {
+            button.border_color(rgb(crate::appearance::ACCENT))
+        })
         .disabled(disabled)
         .on_click(cx.listener(move |this, _, _, cx| {
             let changed = if let Some(search) = &mut this.search {
