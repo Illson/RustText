@@ -19,6 +19,7 @@ use crate::{
     log_file::LogBookmark,
     log_viewer::LogViewer,
     recent_files::{RecentFile, RecentFiles},
+    session::{MAX_CLOSED_TABS, Tab},
     single_instance::SingleInstance,
     text_format::{TextEncoding, TextFormat},
 };
@@ -39,11 +40,17 @@ struct Document {
     _subscriptions: [Subscription; 2],
 }
 
+struct ClosedTab {
+    tab: Tab,
+    draft: Option<Rope>,
+}
+
 pub(crate) struct Workspace {
     documents: Vec<Document>,
     active: u64,
     next_id: u64,
-    closed: Vec<RecentFile>,
+    tab_scroll: ScrollHandle,
+    closed: Vec<ClosedTab>,
     recent: RecentFiles,
     busy: Option<&'static str>,
     error: Option<SharedString>,
@@ -69,6 +76,7 @@ impl Workspace {
             documents: Vec::new(),
             active: 0,
             next_id: 1,
+            tab_scroll: ScrollHandle::new(),
             closed: Vec::new(),
             recent,
             busy: None,
@@ -178,11 +186,13 @@ impl Workspace {
     }
 
     fn select(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(doc) = self.documents.iter().find(|doc| doc.id == id) {
+        if let Some(index) = self.documents.iter().position(|doc| doc.id == id) {
             if self.active != id {
                 self.error = None;
                 self.active = id;
             }
+            self.tab_scroll.scroll_to_item(index);
+            let doc = &self.documents[index];
             let focus = if let Some(log) = &doc.log {
                 self.search = None;
                 log.read(cx).focus_handle(cx)
@@ -223,7 +233,7 @@ impl Workspace {
     }
 
     fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.applying_update() {
+        if self.busy.is_some() || self.applying_update() {
             return;
         }
         self.error = None;
@@ -244,7 +254,7 @@ impl Workspace {
         {
             return;
         }
-        if !doc.dirty {
+        if !doc.dirty || (doc.file.is_none() && self.session.is_some()) {
             self.remove_tab(id, window, cx);
             return;
         }
@@ -257,14 +267,11 @@ impl Workspace {
             return;
         };
         let doc = self.documents.remove(index);
-        if let Some(file) = doc.file {
-            if self.closed.len() == 16 {
-                self.closed.remove(0);
-            }
-            let mut recent = RecentFile::new(file.path, doc.format.encoding);
-            recent.view_as_log = doc.log.is_some();
-            self.closed.push(recent);
+        let (tab, draft) = doc.session_snapshot(doc.file.is_none(), cx);
+        if self.closed.len() == MAX_CLOSED_TABS {
+            self.closed.remove(0);
         }
+        self.closed.push(ClosedTab { tab, draft });
 
         if self.documents.is_empty() {
             self.add_document(None, window, cx);
@@ -277,11 +284,55 @@ impl Workspace {
     }
 
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_none()
-            && let Some(file) = self.closed.pop()
-        {
-            let mode = file_actions::OpenMode::from_recent(&file);
-            self.open_paths(vec![file.path], mode, window, cx);
+        if let Some(entry) = self.closed.last() {
+            self.reopen_closed_tab(entry.tab.id, window, cx);
+        }
+    }
+
+    fn closed_tab_entries(&self) -> Vec<(u64, String)> {
+        self.closed
+            .iter()
+            .rev()
+            .map(|entry| {
+                let label = if let Some(file) = &entry.tab.file {
+                    display_path(&file.path)
+                } else {
+                    let preview: String = entry
+                        .draft
+                        .iter()
+                        .flat_map(|draft| draft.chunks())
+                        .flat_map(str::chars)
+                        .take(60)
+                        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
+                        .collect();
+                    let preview = preview.trim();
+                    if preview.is_empty() {
+                        "Без имени".to_owned()
+                    } else {
+                        format!("Без имени — {preview}")
+                    }
+                };
+                (entry.tab.id, label)
+            })
+            .collect()
+    }
+
+    fn reopen_closed_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        let Some(index) = self.closed.iter().position(|entry| entry.tab.id == id) else {
+            return;
+        };
+        let tab = &self.closed[index].tab;
+        if let Some(file) = &tab.file {
+            let mut recent = RecentFile::new(file.path.clone(), tab.format.encoding);
+            recent.view_as_log = tab.log.is_some();
+            self.open_closed_file(id, recent, window, cx);
+        } else {
+            let ClosedTab { tab, draft } = self.closed.remove(index);
+            let id = self.restore_tab(tab, draft.map(|draft| draft.to_string()), window, cx);
+            self.select(id, window, cx);
         }
     }
 
@@ -374,6 +425,15 @@ fn file_name(path: &Path) -> SharedString {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
         .into()
+}
+
+fn display_path(path: &Path) -> String {
+    let display = path.to_string_lossy();
+    if let Some(unc) = display.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        display.strip_prefix(r"\\?\").unwrap_or(&display).to_owned()
+    }
 }
 
 fn syntax_for(path: &Path) -> String {

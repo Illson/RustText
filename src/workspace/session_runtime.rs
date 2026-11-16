@@ -6,7 +6,7 @@ use std::{
 
 use gpui_kit::{component::input::Rope, *};
 
-use super::{Workspace, disk_status::DiskStatus};
+use super::{ClosedTab, Document, Workspace, disk_status::DiskStatus};
 use crate::{
     files,
     session::{Capture, Journal, Recovered, State, Tab, WindowSize},
@@ -20,6 +20,32 @@ const CLOSING_SESSION: &str = "Сохранение сессии…";
 pub(super) enum AfterShutdown {
     Close,
     InstallUpdate,
+}
+
+impl Document {
+    pub(super) fn session_snapshot(&self, include_draft: bool, cx: &App) -> (Tab, Option<Rope>) {
+        let editor = self.editor.read(cx);
+        let offset = editor.scroll_offset();
+        let scroll = if editor.line_height().is_none() {
+            self.restored_scroll.unwrap_or([0., 0.])
+        } else {
+            [offset.x.into(), offset.y.into()]
+        };
+        let include_draft = include_draft && self.dirty;
+        (
+            Tab {
+                id: self.id,
+                file: self.file.clone(),
+                format: self.format,
+                selection: editor.selected_range(),
+                reversed: editor.is_selection_reversed(),
+                scroll,
+                draft_revision: include_draft.then_some(self.revision),
+                log: self.log.as_ref().map(|log| log.read(cx).bookmark()),
+            },
+            include_draft.then(|| editor.text().clone()),
+        )
+    }
 }
 
 pub(super) struct SessionWriter {
@@ -94,9 +120,31 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Recovered { state, drafts } = recovered;
+        let Recovered {
+            state,
+            drafts,
+            closed_drafts,
+        } = recovered;
         self.wrap = state.wrap;
         self.font_size = state.font_size.clamp(9.0, 35.0);
+        if let Some(id) = state
+            .tabs
+            .iter()
+            .chain(&state.closed)
+            .map(|tab| tab.id)
+            .max()
+        {
+            self.next_id = id + 1;
+        }
+        self.closed = state
+            .closed
+            .into_iter()
+            .zip(closed_drafts)
+            .map(|(tab, draft)| ClosedTab {
+                tab,
+                draft: draft.map(|text| Rope::from(text.as_str())),
+            })
+            .collect();
 
         let mut active = None;
         for (index, (tab, draft)) in state.tabs.into_iter().zip(drafts).enumerate() {
@@ -110,7 +158,7 @@ impl Workspace {
         }
     }
 
-    fn restore_tab(
+    pub(super) fn restore_tab(
         &mut self,
         tab: Tab,
         draft: Option<String>,
@@ -315,34 +363,20 @@ impl Workspace {
     fn capture_session(&self, window: &Window, cx: &App) -> Capture {
         let bounds = window.window_bounds();
         let size = bounds.get_bounds().size;
-        let mut drafts = Vec::with_capacity(self.documents.len());
-        let tabs = self
+        let (tabs, drafts) = self
             .documents
             .iter()
-            .map(|doc| {
-                let editor = doc.editor.read(cx);
-                let offset = editor.scroll_offset();
-                let scroll = if editor.line_height().is_none() {
-                    doc.restored_scroll.unwrap_or([0., 0.])
-                } else {
-                    [offset.x.into(), offset.y.into()]
-                };
-                drafts.push(doc.dirty.then(|| editor.text().clone()));
-                Tab {
-                    id: doc.id,
-                    file: doc.file.clone(),
-                    format: doc.format,
-                    selection: editor.selected_range(),
-                    reversed: editor.is_selection_reversed(),
-                    scroll,
-                    draft_revision: doc.dirty.then_some(doc.revision),
-                    log: doc.log.as_ref().map(|log| log.read(cx).bookmark()),
-                }
-            })
-            .collect();
+            .map(|doc| doc.session_snapshot(true, cx))
+            .unzip();
+        let (closed, closed_drafts) = self
+            .closed
+            .iter()
+            .map(|entry| (entry.tab.clone(), entry.draft.clone()))
+            .unzip();
         Capture {
             state: State {
                 tabs,
+                closed,
                 active: self
                     .documents
                     .iter()
@@ -357,6 +391,7 @@ impl Workspace {
                 font_size: self.font_size,
             },
             drafts,
+            closed_drafts,
         }
     }
 }

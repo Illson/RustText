@@ -13,6 +13,7 @@ use crate::{files::FileTarget, log_file::LogBookmark, text_format::TextFormat};
 
 const FORMAT_VERSION: u32 = 1;
 const RECORD_PREFIX: &str = "checkpoint-";
+pub(crate) const MAX_CLOSED_TABS: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowSize {
@@ -24,6 +25,8 @@ pub struct WindowSize {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub tabs: Vec<Tab>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed: Vec<Tab>,
     pub active: usize,
     pub window: WindowSize,
     pub wrap: bool,
@@ -46,11 +49,13 @@ pub struct Tab {
 pub struct Capture {
     pub state: State,
     pub drafts: Vec<Option<Rope>>,
+    pub closed_drafts: Vec<Option<Rope>>,
 }
 
 pub struct Recovered {
     pub state: State,
     pub drafts: Vec<Option<String>>,
+    pub closed_drafts: Vec<Option<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +63,8 @@ struct Manifest {
     version: u32,
     state: State,
     drafts: Vec<Option<DraftInfo>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    closed_drafts: Vec<Option<DraftInfo>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -163,12 +170,21 @@ impl Journal {
         (None, warning)
     }
 
-    pub fn commit(&mut self, revision: u64, capture: Capture) -> io::Result<()> {
+    pub fn commit(&mut self, revision: u64, mut capture: Capture) -> io::Result<()> {
         if revision <= self.committed_revision {
             return Ok(());
         }
 
         let previous = self.last_valid;
+        if capture.state.closed.len() != capture.closed_drafts.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Количество закрытых вкладок не совпадает с количеством черновиков",
+            ));
+        }
+        let excess = capture.state.closed.len().saturating_sub(MAX_CLOSED_TABS);
+        capture.state.closed.drain(..excess);
+        capture.closed_drafts.drain(..excess);
         let sequence = self
             .last_sequence
             .checked_add(1)
@@ -176,21 +192,11 @@ impl Journal {
         let pending = tempfile::Builder::new()
             .prefix(".pending-")
             .tempdir_in(&self.directory)?;
-        let draft_info = capture
-            .drafts
-            .iter()
-            .enumerate()
-            .map(|(index, draft)| {
-                draft
-                    .as_ref()
-                    .map(|text| write_draft(pending.path(), index, text))
-                    .transpose()
-            })
-            .collect::<io::Result<Vec<_>>>()?;
         let manifest = Manifest {
             version: FORMAT_VERSION,
             state: capture.state,
-            drafts: draft_info,
+            drafts: write_drafts(pending.path(), "draft", &capture.drafts)?,
+            closed_drafts: write_drafts(pending.path(), "closed-draft", &capture.closed_drafts)?,
         };
         let file = File::create(pending.path().join("manifest.json"))?;
         let mut writer = BufWriter::new(file);
@@ -240,12 +246,25 @@ fn records(directory: &Path) -> io::Result<Vec<u64>> {
     Ok(sequences)
 }
 
-fn draft_path(directory: &Path, index: usize) -> PathBuf {
-    directory.join(format!("draft-{index}.txt"))
+fn write_drafts(
+    directory: &Path,
+    prefix: &str,
+    drafts: &[Option<Rope>],
+) -> io::Result<Vec<Option<DraftInfo>>> {
+    drafts
+        .iter()
+        .enumerate()
+        .map(|(index, draft)| {
+            draft
+                .as_ref()
+                .map(|text| write_draft(&directory.join(format!("{prefix}-{index}.txt")), text))
+                .transpose()
+        })
+        .collect()
 }
 
-fn write_draft(directory: &Path, index: usize, text: &Rope) -> io::Result<DraftInfo> {
-    let mut writer = BufWriter::new(File::create(draft_path(directory, index))?);
+fn write_draft(path: &Path, text: &Rope) -> io::Result<DraftInfo> {
+    let mut writer = BufWriter::new(File::create(path)?);
     let mut checksum = crc32fast::Hasher::new();
     for chunk in text.chunks() {
         checksum.update(chunk.as_bytes());
@@ -262,38 +281,64 @@ fn write_draft(directory: &Path, index: usize, text: &Rope) -> io::Result<DraftI
 fn read_record(directory: &Path) -> io::Result<Recovered> {
     let Manifest {
         version,
-        state,
+        mut state,
         drafts,
+        closed_drafts,
     } = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
     if version != FORMAT_VERSION
         || state.active >= state.tabs.len()
         || state.tabs.len() != drafts.len()
+        || state.closed.len() != closed_drafts.len()
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Некорректный манифест сессии",
         ));
     }
-    let drafts = drafts
+    let drafts = read_drafts(directory, "draft", &state.tabs, drafts, 0)?;
+    let excess = state.closed.len().saturating_sub(MAX_CLOSED_TABS);
+    let closed_drafts = read_drafts(
+        directory,
+        "closed-draft",
+        &state.closed,
+        closed_drafts,
+        excess,
+    )?;
+    state.closed.drain(..excess);
+    Ok(Recovered {
+        state,
+        drafts,
+        closed_drafts,
+    })
+}
+
+fn read_drafts(
+    directory: &Path,
+    prefix: &str,
+    tabs: &[Tab],
+    drafts: Vec<Option<DraftInfo>>,
+    skip: usize,
+) -> io::Result<Vec<Option<String>>> {
+    drafts
         .into_iter()
-        .zip(&state.tabs)
+        .zip(tabs)
         .enumerate()
-        .map(|(index, (draft, tab))| match draft {
-            Some(draft) if tab.draft_revision.is_some() => {
-                read_draft(directory, index, draft).map(Some)
+        .skip(skip)
+        .map(|(index, (draft, tab))| match (draft, tab.draft_revision) {
+            (Some(draft), Some(_)) => {
+                read_draft(&directory.join(format!("{prefix}-{index}.txt")), draft).map(Some)
             }
-            None if tab.draft_revision.is_none() => Ok(None),
+            (None, None) => Ok(None),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Отсутствует описание черновика",
             )),
         })
-        .collect::<io::Result<Vec<_>>>()?;
-    Ok(Recovered { state, drafts })
+        .collect()
 }
 
-fn read_draft(directory: &Path, index: usize, info: DraftInfo) -> io::Result<String> {
-    let text = fs::read(draft_path(directory, index))?;
+fn read_draft(path: &Path, info: DraftInfo) -> io::Result<String> {
+    let text = fs::read(path)?;
     if text.len() as u64 != info.bytes || crc32fast::hash(&text) != info.checksum {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

@@ -6,6 +6,7 @@ fn capture(width: f32) -> Capture {
     Capture {
         state: State {
             tabs: vec![],
+            closed: vec![],
             active: 0,
             window: WindowSize {
                 width,
@@ -16,6 +17,7 @@ fn capture(width: f32) -> Capture {
             font_size: 15.0,
         },
         drafts: vec![],
+        closed_drafts: vec![],
     }
 }
 
