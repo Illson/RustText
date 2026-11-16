@@ -18,6 +18,21 @@ pub struct Hit {
     pub range: Range<usize>,
 }
 
+pub const MAX_VISIBLE_MATCHES: usize = 100;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub hit: Hit,
+    pub line: usize,
+    pub excerpt: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchList {
+    pub matches: Vec<SearchMatch>,
+    pub total: usize,
+}
+
 pub struct Source {
     pub tab: u64,
     pub text: Rope,
@@ -27,6 +42,7 @@ pub struct Source {
 pub enum Command {
     Next,
     Previous,
+    List,
     Replace,
     ReplaceAll,
 }
@@ -42,6 +58,7 @@ pub enum Outcome {
         hit: Option<Hit>,
         total: usize,
     },
+    Matches(MatchList),
     Replaced {
         range: Range<usize>,
         text: String,
@@ -59,6 +76,13 @@ pub fn run(
     replacement: &str,
 ) -> Result<Outcome, String> {
     let regex = compile(query)?;
+    if command == Command::List {
+        return Ok(Outcome::Matches(list_matches(
+            &regex,
+            sources,
+            MAX_VISIBLE_MATCHES,
+        )));
+    }
     if command.replaces() {
         let source = sources.into_iter().find(|source| source.tab == origin.tab);
         return Ok(match source {
@@ -80,6 +104,72 @@ pub fn run(
         skip_current,
         command == Command::Previous,
     ))
+}
+
+fn list_matches(regex: &Regex, sources: Vec<Source>, limit: usize) -> MatchList {
+    let limit = limit.min(MAX_VISIBLE_MATCHES);
+    let mut matches = Vec::with_capacity(limit.min(MAX_VISIBLE_MATCHES));
+    let mut total: usize = 0;
+
+    for source in sources {
+        let text = source.text.to_string();
+        let mut line_start = 0;
+        let mut line_cursor = 0;
+        let mut line_number = 1;
+
+        for matched in regex.find_iter(&text) {
+            while let Some(newline) = text[line_cursor..matched.start()].find('\n') {
+                line_start = line_cursor + newline + 1;
+                line_cursor = line_start;
+                line_number += 1;
+            }
+            line_cursor = matched.start();
+
+            total = total.saturating_add(1);
+            if matches.len() >= limit {
+                continue;
+            }
+
+            let line_end = text[matched.end()..]
+                .find('\n')
+                .map_or(text.len(), |offset| matched.end() + offset);
+            let line = &text[line_start..line_end];
+            let range = matched.start() - line_start..matched.end() - line_start;
+            matches.push(SearchMatch {
+                hit: Hit {
+                    tab: source.tab,
+                    range: matched.range(),
+                },
+                line: line_number,
+                excerpt: excerpt(line, range),
+            });
+        }
+    }
+
+    MatchList { matches, total }
+}
+
+fn excerpt(line: &str, range: Range<usize>) -> String {
+    const CONTEXT: usize = 36;
+
+    let mut start = range.start.saturating_sub(CONTEXT);
+    while !line.is_char_boundary(start) {
+        start += 1;
+    }
+
+    let match_end = if range.end.saturating_sub(range.start) > CONTEXT {
+        range.start.saturating_add(CONTEXT)
+    } else {
+        range.end.saturating_add(CONTEXT)
+    };
+    let mut end = match_end.min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if end < line.len() { "…" } else { "" };
+    format!("{prefix}{}{suffix}", &line[start..end])
 }
 
 fn compile(query: &Query) -> Result<Regex, String> {

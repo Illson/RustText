@@ -6,14 +6,21 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 
-use super::Workspace;
-use crate::search::{self, Command, Hit, Outcome, Query, Source};
+use super::{Document, Workspace};
+use crate::{
+    appearance,
+    search::{self, Command, Hit, Outcome, Query, SearchMatch, Source},
+};
 
 pub(super) struct SearchPanel {
     query_input: Entity<InputState>,
     replacement_input: Entity<InputState>,
     options: Query,
     last_hit: Option<(Query, Hit)>,
+    replacing: bool,
+    visible_matches: Vec<SearchMatch>,
+    match_revisions: Vec<(u64, u64)>,
+    request_generation: u64,
     message: SharedString,
     task: Option<Task<()>>,
     _subscriptions: [Subscription; 2],
@@ -39,7 +46,7 @@ impl SearchPanel {
                     if *shift {
                         Command::Previous
                     } else {
-                        Command::Next
+                        Command::List
                     },
                     window,
                     cx,
@@ -62,6 +69,10 @@ impl SearchPanel {
             replacement_input,
             options: Query::default(),
             last_hit: None,
+            replacing: false,
+            visible_matches: Vec::new(),
+            match_revisions: Vec::new(),
+            request_generation: 0,
             message: "Введите текст поиска".into(),
             task: None,
             _subscriptions: [query, replacement],
@@ -75,24 +86,88 @@ impl SearchPanel {
         }
     }
 
-    fn render(&self, busy: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
+    fn render(
+        &self,
+        busy: bool,
+        can_replace: bool,
+        documents: &[Document],
+        window: &Window,
+        cx: &mut Context<Workspace>,
+    ) -> impl IntoElement {
         let controls_disabled = busy || self.task.is_some();
-        let replacements_disabled = controls_disabled || self.options.all_tabs;
+        let replacements_disabled = controls_disabled || self.options.all_tabs || !can_replace;
+        let query = self.query(cx);
+        let panel_height = (f32::from(window.viewport_size().height) - 230.0).clamp(120.0, 190.0);
+        let results_height =
+            (panel_height - 70.0 - if self.replacing { 32.0 } else { 0.0 }).max(18.0);
+        let visible_matches = self
+            .visible_matches
+            .iter()
+            .enumerate()
+            .map(|(index, result)| {
+                let result = result.clone();
+                let tab_name = documents
+                    .iter()
+                    .find(|document| document.id == result.hit.tab)
+                    .map_or_else(|| "Закрытая вкладка".to_owned(), |doc| doc.name.to_string());
+                let label = format!("{tab_name} · строка {} · {}", result.line, result.excerpt);
+                let title = label.clone();
+                let revisions = self.match_revisions.clone();
+                let query = query.clone();
+                Button::new(("search-result", index))
+                    .w_full()
+                    .ghost()
+                    .accessibility_label(title.clone())
+                    .tooltip(title)
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_left()
+                            .child(Label::new(label).truncate()),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let stale = revisions.iter().any(|(id, revision)| {
+                            this.documents
+                                .iter()
+                                .find(|doc| doc.id == *id)
+                                .is_none_or(|document| document.revision != *revision)
+                        });
+                        if stale {
+                            this.reset_search(cx);
+                            this.search_message("Текст изменился. Обновите список совпадений.", cx);
+                            return;
+                        }
+
+                        this.select(result.hit.tab, window, cx);
+                        this.active_document().editor.update(cx, |editor, cx| {
+                            editor.set_selected_range(result.hit.range.clone(), cx);
+                        });
+                        if let Some(panel) = &mut this.search {
+                            panel.last_hit = Some((query.clone(), result.hit.clone()));
+                        }
+                        this.search_message(format!("Строка {}", result.line), cx);
+                    }))
+            })
+            .collect::<Vec<_>>();
         div()
             .flex()
             .flex_col()
-            .flex_shrink_0()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .bg(rgb(0x18202b))
+            .flex_shrink(1.)
+            .max_h(px(panel_height))
+            .overflow_hidden()
+            .gap_0()
+            .px_2()
+            .py_1()
+            .bg(rgb(appearance::SURFACE))
             .border_b_1()
-            .border_color(rgb(0x293442))
+            .border_color(rgb(appearance::BORDER))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .child(
                         div()
                             .flex_1()
@@ -100,24 +175,55 @@ impl SearchPanel {
                             .child(Input::new(&self.query_input)),
                     )
                     .child(command_button(
+                        "find-list",
+                        "Найти",
+                        Command::List,
+                        controls_disabled,
+                        cx,
+                    ))
+                    .child(command_button(
                         "find-prev",
-                        "Назад",
+                        "↑",
                         Command::Previous,
                         controls_disabled,
                         cx,
                     ))
                     .child(command_button(
                         "find-next",
-                        "Далее",
+                        "↓",
                         Command::Next,
                         controls_disabled,
                         cx,
                     ))
                     .child(
+                        Button::new("toggle-replace")
+                            .small()
+                            .ghost()
+                            .label(if self.replacing { "×" } else { "Замена" })
+                            .tooltip(if self.replacing {
+                                "Скрыть поле замены"
+                            } else {
+                                "Найти и заменить · Ctrl+H"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let Some(panel) = &mut this.search else {
+                                    return;
+                                };
+                                panel.replacing = !panel.replacing;
+                                if panel.replacing {
+                                    panel.replacement_input.update(cx, |input, cx| {
+                                        input.focus(window, cx);
+                                    });
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("close-search")
                             .small()
                             .ghost()
-                            .label("Закрыть")
+                            .label("×")
+                            .tooltip("Закрыть поиск")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.close_search(window, cx)),
                             ),
@@ -127,41 +233,50 @@ impl SearchPanel {
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .child(option_button(
                         "pattern-regex",
-                        "Регулярка",
+                        ".*",
                         OptionToggle::Regex,
                         self.options.regex,
                         cx,
                     ))
                     .child(option_button(
                         "pattern-case",
-                        "С учётом регистра",
+                        "Aa",
                         OptionToggle::Case,
                         self.options.case_sensitive,
                         cx,
                     ))
                     .child(option_button(
                         "pattern-word",
-                        "Целое слово",
+                        "Слово",
                         OptionToggle::WholeWord,
                         self.options.whole_word,
                         cx,
                     ))
                     .child(option_button(
                         "scope-all",
-                        "Все текстовые вкладки",
+                        "Вкладки",
                         OptionToggle::AllTabs,
                         self.options.all_tabs,
                         cx,
-                    )),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_xs()
+                            .text_color(rgb(appearance::MUTED))
+                            .child(Label::new(self.message.clone())),
+                    ),
             )
-            .child(
+            .children(self.replacing.then(|| {
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .child(
                         div().flex_1().min_w_0().child(
                             Input::new(&self.replacement_input).disabled(replacements_disabled),
@@ -176,19 +291,21 @@ impl SearchPanel {
                     ))
                     .child(command_button(
                         "replace-all",
-                        "Заменить всё",
+                        "Всё",
                         Command::ReplaceAll,
                         replacements_disabled,
                         cx,
-                    )),
-            )
-            .child(
+                    ))
+            }))
+            .children((!visible_matches.is_empty()).then(|| {
                 div()
-                    .max_h(px(56.0))
-                    .overflow_hidden()
-                    .text_sm()
-                    .child(Label::new(self.message.clone())),
-            )
+                    .id("text-search-results")
+                    .max_h(px(results_height))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .children(visible_matches)
+            }))
     }
 }
 
@@ -207,6 +324,7 @@ impl Workspace {
             self.search = Some(SearchPanel::new(window, cx));
         }
         let panel = self.search.as_mut().expect("search panel is present");
+        panel.replacing = replace && !panel.options.all_tabs;
         let input = if replace && !panel.options.all_tabs {
             &panel.replacement_input
         } else {
@@ -219,10 +337,17 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn search_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    pub(super) fn search_panel(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let active = self.active_document();
+        let can_replace = active.log.is_none() && !active.placeholder;
+        let busy = self.busy.is_some() || self.applying_update();
         self.search
             .as_ref()
-            .map(|panel| panel.render(self.busy.is_some(), cx))
+            .map(|panel| panel.render(busy, can_replace, &self.documents, window, cx))
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -235,10 +360,13 @@ impl Workspace {
         if let Some(panel) = &mut self.search {
             panel.task = None;
             panel.last_hit = None;
+            panel.request_generation = panel.request_generation.wrapping_add(1);
+            panel.visible_matches.clear();
+            panel.match_revisions.clear();
             panel.message = if panel.options.all_tabs {
                 "Поиск по всем вкладкам. Замена доступна в текущей вкладке.".into()
             } else {
-                "Enter — найти следующее совпадение".into()
+                "Enter — показать совпадения".into()
             };
             cx.notify();
         }
@@ -250,7 +378,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy.is_some() || self.search.is_none() {
+        if self.busy.is_some() || self.applying_update() || self.search.is_none() {
             return;
         }
         let active = self.active_document();
@@ -266,6 +394,8 @@ impl Workspace {
         if panel.task.is_some() || (command.replaces() && query.all_tabs) {
             return;
         }
+        panel.request_generation = panel.request_generation.wrapping_add(1);
+        let request_generation = panel.request_generation;
 
         let replacement = panel.replacement_input.read(cx).value().to_string();
         let skip_current = panel
@@ -287,6 +417,7 @@ impl Workspace {
             .collect();
         panel.message = "Поиск…".into();
         let origin_id = origin.tab;
+        let result_versions = versions.clone();
         let job = cx.background_spawn({
             let query = query.clone();
             async move {
@@ -303,11 +434,13 @@ impl Workspace {
         let task = cx.spawn_in(window, async move |this, cx| {
             let outcome = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if let Some(panel) = &mut this.search {
-                    panel.task = None;
-                } else {
+                let Some(panel) = &mut this.search else {
+                    return;
+                };
+                if panel.request_generation != request_generation {
                     return;
                 }
+                panel.task = None;
                 let inputs_changed = versions.iter().any(|(id, revision)| {
                     !this
                         .documents
@@ -317,7 +450,14 @@ impl Workspace {
                 if this.busy.is_some() || inputs_changed || this.active != origin_id {
                     this.search_message("Текст или вкладка изменились. Повторите поиск.", cx);
                 } else {
-                    this.apply_search_outcome(outcome, query, origin_id, window, cx);
+                    this.apply_search_outcome(
+                        outcome,
+                        query,
+                        origin_id,
+                        result_versions,
+                        window,
+                        cx,
+                    );
                 }
             });
         });
@@ -337,6 +477,7 @@ impl Workspace {
         outcome: Result<Outcome, String>,
         query: Query,
         origin_id: u64,
+        versions: Vec<(u64, u64)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -356,9 +497,17 @@ impl Workspace {
                 self.search_message(format!("Совпадений: {total}"), cx);
             }
             Ok(Outcome::NoReplacements | Outcome::Found { hit: None, .. }) => {
+                if let Some(panel) = &mut self.search {
+                    panel.visible_matches.clear();
+                    panel.match_revisions.clear();
+                }
                 self.search_message("Совпадений нет", cx);
             }
             Ok(Outcome::Replaced { range, text, count }) => {
+                if let Some(panel) = &mut self.search {
+                    panel.visible_matches.clear();
+                    panel.match_revisions.clear();
+                }
                 if let Some(doc) = self.documents.iter().find(|doc| doc.id == origin_id) {
                     doc.editor.update(cx, |editor, cx| {
                         editor.set_selected_range(range, cx);
@@ -370,6 +519,32 @@ impl Workspace {
                     panel.last_hit = None;
                 }
                 self.search_message(format!("Заменено: {count}"), cx);
+            }
+            Ok(Outcome::Matches(list)) => {
+                let first = list.matches.first().cloned();
+                if let Some(first) = first {
+                    self.select(first.hit.tab, window, cx);
+                    self.active_document().editor.update(cx, |editor, cx| {
+                        editor.set_selected_range(first.hit.range.clone(), cx);
+                    });
+                    if let Some(panel) = &mut self.search {
+                        panel.last_hit = Some((query, first.hit.clone()));
+                    }
+                }
+                if let Some(panel) = &mut self.search {
+                    panel.visible_matches = list.matches;
+                    panel.match_revisions = versions;
+                }
+                let message = if list.total > search::MAX_VISIBLE_MATCHES {
+                    format!(
+                        "Совпадений: {} · показаны первые {}",
+                        list.total,
+                        search::MAX_VISIBLE_MATCHES
+                    )
+                } else {
+                    format!("Совпадений: {}", list.total)
+                };
+                self.search_message(message, cx);
             }
         }
     }

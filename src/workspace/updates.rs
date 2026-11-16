@@ -8,7 +8,10 @@ use gpui_kit::{
 };
 
 use super::{Workspace, session_runtime::AfterShutdown};
-use crate::updater::{self, Release, StagedUpdate};
+use crate::{
+    appearance,
+    updater::{self, Release, StagedUpdate},
+};
 
 #[derive(Default)]
 pub(super) struct Updates {
@@ -186,9 +189,9 @@ impl Workspace {
                 .items_center()
                 .gap_2()
                 .px_3()
-                .bg(rgb(0x18202b))
+                .bg(rgb(appearance::SURFACE))
                 .border_b_1()
-                .border_color(rgb(0x293442))
+                .border_color(rgb(appearance::BORDER))
                 .child(
                     div()
                         .flex_1()

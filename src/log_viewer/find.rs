@@ -52,9 +52,20 @@ impl LogSearch {
         }
     }
 
-    fn render(&self, enabled: bool, cx: &mut Context<LogViewer>) -> impl IntoElement {
+    fn render(
+        &self,
+        enabled: bool,
+        window: &Window,
+        cx: &mut Context<LogViewer>,
+    ) -> impl IntoElement {
         let running = self.progress.is_some();
         let can_continue = self.results.as_ref().is_some_and(|page| !page.complete);
+        let max_height = if window.viewport_size().height < px(460.) {
+            px(100.)
+        } else {
+            px(180.)
+        };
+        let results_height = max_height - px(58.);
         let message = self.progress.as_ref().map_or_else(
             || self.message.clone(),
             |progress| {
@@ -71,13 +82,15 @@ impl LogSearch {
         div()
             .flex()
             .flex_col()
-            .flex_shrink_0()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .bg(rgb(0x18202b))
+            .flex_shrink(1.)
+            .max_h(max_height)
+            .overflow_hidden()
+            .gap_0()
+            .px_2()
+            .py_1()
+            .bg(rgb(crate::appearance::SURFACE))
             .border_b_1()
-            .border_color(rgb(0x293442))
+            .border_color(rgb(crate::appearance::BORDER))
             .child(
                 div()
                     .flex()
@@ -113,7 +126,8 @@ impl LogSearch {
                         Button::new("log-find-cancel")
                             .small()
                             .ghost()
-                            .label("Отменить поиск")
+                            .label("Отмена")
+                            .tooltip("Отменить поиск")
                             .disabled(!running)
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_search(cx))),
                     )
@@ -121,7 +135,8 @@ impl LogSearch {
                         Button::new("log-find-close")
                             .small()
                             .ghost()
-                            .label("Закрыть поиск")
+                            .label("×")
+                            .tooltip("Закрыть поиск")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.reset_search();
                                 this.search = None;
@@ -137,7 +152,8 @@ impl LogSearch {
                     .gap_2()
                     .child(option_button(
                         "log-regex",
-                        "Регулярка",
+                        ".*",
+                        "Регулярное выражение",
                         self.regex,
                         running,
                         |search| &mut search.regex,
@@ -145,7 +161,8 @@ impl LogSearch {
                     ))
                     .child(option_button(
                         "log-case",
-                        "С учётом регистра",
+                        "Aa",
+                        "Учитывать регистр",
                         self.case_sensitive,
                         running,
                         |search| &mut search.case_sensitive,
@@ -153,7 +170,8 @@ impl LogSearch {
                     ))
                     .child(option_button(
                         "log-word",
-                        "Целое слово",
+                        "Слово",
+                        "Искать целое слово",
                         self.whole_word,
                         running,
                         |search| &mut search.whole_word,
@@ -168,7 +186,7 @@ impl LogSearch {
                     .map(|page| {
                         div()
                             .id("log-search-results")
-                            .max_h(px(99.))
+                            .max_h(results_height)
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
@@ -192,10 +210,14 @@ impl LogViewer {
         cx.notify();
     }
 
-    pub(super) fn search_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    pub(super) fn search_panel(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         self.search
             .as_ref()
-            .map(|search| search.render(self.available(), cx))
+            .map(|search| search.render(self.available(), window, cx))
     }
 
     pub(super) fn reset_search(&mut self) {
@@ -351,6 +373,7 @@ pub(super) fn progress_percent(done: u64, total: u64) -> u64 {
 fn option_button(
     id: &'static str,
     label: &'static str,
+    tooltip: &'static str,
     selected: bool,
     disabled: bool,
     field: fn(&mut LogSearch) -> &mut bool,
@@ -360,6 +383,7 @@ fn option_button(
         .small()
         .outline()
         .label(label)
+        .tooltip(tooltip)
         .selected(selected)
         .disabled(disabled)
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -374,11 +398,21 @@ fn option_button(
 
 fn result_button(hit: &SearchHit, cx: &mut Context<LogViewer>) -> Button {
     let offset = hit.line_start;
+    let label = format!("Байт {offset}: {}", hit.preview);
+    let tooltip = label.clone();
     Button::new(("log-hit", offset))
-        .small()
-        .ghost()
         .w_full()
-        .label(format!("Байт {offset}: {}", hit.preview))
+        .ghost()
+        .accessibility_label(tooltip.clone())
+        .tooltip(tooltip)
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .text_left()
+                .child(Label::new(label).truncate()),
+        )
         .on_click(cx.listener(move |this, _, window, cx| {
             this.navigate(Destination::Match(offset), window, cx)
         }))

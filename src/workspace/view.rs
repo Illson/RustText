@@ -1,21 +1,23 @@
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Selectable, Sizable,
+    ActiveTheme, Disableable, Sizable,
     button::{Button, ButtonVariants},
     input::Editor,
     label::Label,
-    menu::{DropdownMenu, PopupMenuItem},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use super::{Document, Workspace, display_path, file_actions::OpenMode, file_name};
-use crate::{go_to_line, search::Command};
+use super::{Document, Workspace, display_path, file_actions::OpenMode};
+use crate::{appearance, go_to_line, search::Command};
 
 actions!(
     rusttext,
     [
         NewFile,
         OpenFile,
+        OpenLog,
+        OpenWindows1251,
+        OpenLogWindows1251,
         Save,
         SaveAs,
         CloseTab,
@@ -27,7 +29,8 @@ actions!(
         NextMatch,
         PreviousMatch,
         ZoomIn,
-        ZoomOut
+        ZoomOut,
+        ToggleWrap
     ]
 );
 
@@ -70,237 +73,40 @@ impl Render for DraggedTab {
 }
 
 impl Workspace {
+    fn document_header(&self, doc: &Document) -> impl IntoElement {
+        div()
+            .h(px(34.))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .bg(rgb(appearance::SURFACE))
+            .border_b_1()
+            .border_color(rgb(appearance::BORDER))
+            .child(div().max_w(px(280.)).truncate().child(doc.name.clone()))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(if doc.dirty {
+                        appearance::ACCENT
+                    } else {
+                        appearance::MUTED
+                    }))
+                    .child(if doc.placeholder {
+                        "ТОЛЬКО ЧТЕНИЕ"
+                    } else if doc.dirty {
+                        "НЕ СОХРАНЕНО"
+                    } else {
+                        "ТЕКСТ"
+                    }),
+            )
+    }
+
     fn go_to_line(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy.is_none() && self.active_document().log.is_none() {
             go_to_line::open(self.active_document().editor.clone(), window, cx);
         }
-    }
-
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let busy = self.busy.is_some();
-        let log = self.active_document().log.as_ref();
-        let can_edit = !busy && log.is_none();
-        let wrap = log.map_or(self.wrap, |viewer| viewer.read(cx).wraps_lines());
-        div()
-            .h(px(46.0))
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_3()
-            .bg(rgb(0x18202b))
-            .border_b_1()
-            .border_color(rgb(0x293442))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        Button::new("new")
-                            .small()
-                            .ghost()
-                            .label("Создать")
-                            .disabled(self.busy.is_some() || self.applying_update())
-                            .tooltip("Создать вкладку · Ctrl+N")
-                            .on_click(cx.listener(|this, _, window, cx| this.new_file(window, cx))),
-                    )
-                    .child(
-                        Button::new("open")
-                            .small()
-                            .ghost()
-                            .label("Открыть")
-                            .disabled(busy)
-                            .tooltip("Открыть файл · Ctrl+O")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_picker(OpenMode::NORMAL, window, cx)
-                            })),
-                    )
-                    .child(self.recent_files_button(cx))
-                    .child(self.open_log_button(cx))
-                    .child(
-                        Button::new("open-1251")
-                            .small()
-                            .ghost()
-                            .label("1251")
-                            .disabled(busy)
-                            .tooltip("Открыть файл в кодировке Windows-1251")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_picker(OpenMode::WINDOWS_1251, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("save")
-                            .small()
-                            .ghost()
-                            .label("Сохранить")
-                            .disabled(!can_edit)
-                            .tooltip("Сохранить файл · Ctrl+S")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.save(false, window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("save-as")
-                            .small()
-                            .ghost()
-                            .label("Сохранить как…")
-                            .disabled(!can_edit)
-                            .tooltip("Сохранить как · Ctrl+Shift+S")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.save(true, window, cx)),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        Button::new("find-text")
-                            .small()
-                            .ghost()
-                            .label("Поиск")
-                            .tooltip("Найти · Ctrl+F")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_search(false, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("format-json")
-                            .small()
-                            .ghost()
-                            .label("JSON")
-                            .tooltip("Форматировать JSON · Ctrl+Shift+J")
-                            .disabled(!can_edit)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.format_json(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("wrap")
-                            .small()
-                            .ghost()
-                            .label("Перенос")
-                            .selected(wrap)
-                            .tooltip("Перенос длинных строк")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_wrap(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("zoom-out")
-                            .small()
-                            .ghost()
-                            .label("−")
-                            .disabled(log.is_some())
-                            .tooltip("Уменьшить шрифт")
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom(-1.0, cx))),
-                    )
-                    .child(
-                        Button::new("zoom-in")
-                            .small()
-                            .ghost()
-                            .label("+")
-                            .disabled(log.is_some())
-                            .tooltip("Увеличить шрифт")
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom(1.0, cx))),
-                    ),
-            )
-    }
-
-    fn open_log_button(&self, cx: &Context<Self>) -> impl IntoElement {
-        let workspace = cx.entity().downgrade();
-        Button::new("open-as-log")
-            .small()
-            .ghost()
-            .label("Лог")
-            .disabled(self.busy.is_some())
-            .dropdown_menu(move |menu, _, _| {
-                let utf8 = workspace.clone();
-                let cp1251 = workspace.clone();
-                menu.item(
-                    PopupMenuItem::new("Открыть как лог").on_click(move |_, window, cx| {
-                        let _ =
-                            utf8.update(cx, |this, cx| this.open_picker(OpenMode::LOG, window, cx));
-                    }),
-                )
-                .item(PopupMenuItem::new("Открыть лог в Windows-1251").on_click(
-                    move |_, window, cx| {
-                        let _ = cp1251.update(cx, |this, cx| {
-                            this.open_picker(OpenMode::LOG_1251, window, cx)
-                        });
-                    },
-                ))
-            })
-    }
-
-    fn recent_files_button(&self, cx: &Context<Self>) -> impl IntoElement {
-        let entries = self.recent.entries().to_vec();
-        let closed_entries = self.closed_tab_entries();
-        let workspace = cx.entity().downgrade();
-        Button::new("recent-files")
-            .small()
-            .ghost()
-            .label("Недавние")
-            .disabled(self.busy.is_some())
-            .dropdown_menu(move |menu, window, cx| {
-                let closed_entries_for_menu = closed_entries.clone();
-                let closed_workspace = workspace.clone();
-                let menu = menu.submenu(
-                    "Закрытые вкладки",
-                    window,
-                    cx,
-                    move |menu, _, _| {
-                        if closed_entries_for_menu.is_empty() {
-                            return menu.item(PopupMenuItem::label("Закрытых вкладок нет"));
-                        }
-
-                        closed_entries_for_menu.iter().fold(
-                            menu.scrollable(true),
-                            |menu, (id, label)| {
-                                let id = *id;
-                                let label = label.clone();
-                                let workspace = closed_workspace.clone();
-                                menu.item(PopupMenuItem::new(label).on_click(
-                                    move |_, window, cx| {
-                                        let _ = workspace.update(cx, |this, cx| {
-                                            this.reopen_closed_tab(id, window, cx);
-                                        });
-                                    },
-                                ))
-                            },
-                        )
-                    },
-                );
-
-                if entries.is_empty() {
-                    return menu.item(PopupMenuItem::label("Недавних файлов пока нет"));
-                }
-
-                entries.iter().fold(menu.scrollable(true), |menu, entry| {
-                    let entry = entry.clone();
-                    let workspace = workspace.clone();
-                    let name = file_name(&entry.path);
-                    let directory = entry.path.parent().map(display_path).unwrap_or_default();
-                    menu.item(
-                        PopupMenuItem::new(format!("{name} — {directory}")).on_click(
-                            move |_, window, cx| {
-                                let _ = workspace.update(cx, |this, cx| {
-                                    this.open_paths(
-                                        vec![entry.path.clone()],
-                                        OpenMode::from_recent(&entry),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            },
-                        ),
-                    )
-                })
-            })
     }
 
     fn tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -342,8 +148,16 @@ impl Workspace {
                             .gap_1()
                             .rounded_md()
                             .border_1()
-                            .border_color(if active { rgb(0x4a6380) } else { rgb(0x263141) })
-                            .bg(if active { rgb(0x26364a) } else { rgb(0x18202b) })
+                            .border_color(if active {
+                                rgb(appearance::ACCENT)
+                            } else {
+                                rgb(appearance::BORDER)
+                            })
+                            .bg(if active {
+                                rgb(appearance::ACTIVE)
+                            } else {
+                                rgb(appearance::SURFACE)
+                            })
                             .on_drag(
                                 DraggedTab {
                                     id,
@@ -442,11 +256,11 @@ impl Workspace {
             .h(px(31.0))
             .gap_4()
             .px_4()
-            .bg(rgb(0x18202b))
+            .bg(rgb(appearance::SURFACE))
             .border_t_1()
-            .border_color(rgb(0x293442))
+            .border_color(rgb(appearance::BORDER))
             .text_sm()
-            .text_color(rgb(0xaebdd0))
+            .text_color(rgb(appearance::MUTED))
             .child(
                 div()
                     .flex_1()
@@ -456,7 +270,7 @@ impl Workspace {
                         self.error.is_some()
                             || doc.disk_status.notice().is_some()
                             || self.session_error.is_some(),
-                        |el| el.text_color(rgb(0xffb4ad)),
+                        |el| el.text_color(rgb(appearance::ERROR)),
                     )
                     .child(Label::new(message)),
             )
@@ -479,7 +293,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.active_document();
         let body = if let Some(log) = &doc.log {
             log.clone().into_any_element()
@@ -499,11 +313,20 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x10161f))
-            .text_color(rgb(0xe4eaf2))
+            .bg(rgb(appearance::BACKGROUND))
+            .text_color(rgb(appearance::FOREGROUND))
             .on_action(cx.listener(|this, _: &NewFile, window, cx| this.new_file(window, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.open_picker(OpenMode::NORMAL, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenLog, window, cx| {
+                this.open_picker(OpenMode::LOG, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenWindows1251, window, cx| {
+                this.open_picker(OpenMode::WINDOWS_1251, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenLogWindows1251, window, cx| {
+                this.open_picker(OpenMode::LOG_1251, window, cx)
             }))
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(false, window, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save(true, window, cx)))
@@ -529,24 +352,24 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.0, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(-1.0, cx)))
+            .on_action(cx.listener(|this, _: &ToggleWrap, window, cx| this.toggle_wrap(window, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.open_paths(paths.paths().to_vec(), OpenMode::NORMAL, window, cx);
             }))
-            .child(self.toolbar(cx))
+            .child(self.menubar(cx))
             .child(
                 div()
-                    .h(px(43.0))
+                    .h(px(38.0))
                     .flex()
                     .flex_shrink_0()
                     .items_center()
-                    .bg(rgb(0x131a24))
+                    .bg(rgb(appearance::SURFACE))
                     .border_b_1()
-                    .border_color(rgb(0x293442))
-                    .child(self.tabs(cx))
-                    .child(div().flex_shrink_0().pr_3().child(self.update_button(cx))),
+                    .border_color(rgb(appearance::BORDER))
+                    .child(self.tabs(cx)),
             )
             .children(self.update_panel(cx))
-            .children(self.search_panel(cx))
+            .children(doc.log.is_none().then(|| self.document_header(doc)))
             .child(
                 div()
                     .flex_1()
@@ -555,6 +378,7 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(body),
             )
+            .children(self.search_panel(window, cx))
             .children(doc.log.is_none().then(|| self.status(doc, cx)))
     }
 }

@@ -241,3 +241,52 @@ fn zero_width_replacements_preserve_unicode_and_insert_once_per_line() {
     assert_eq!(text, "> ёж\n> кот");
     assert_eq!(count, 2);
 }
+
+#[test]
+fn match_listing_keeps_bounded_line_excerpts_and_unicode_byte_ranges() {
+    let query = Query {
+        text: "кот".into(),
+        ..Query::default()
+    };
+    let text = "ёж\nначало котик конец\nкот";
+    let page = list_matches(
+        &compile(&query).unwrap(),
+        vec![Source {
+            tab: 7,
+            text: Rope::from(text),
+        }],
+        MAX_VISIBLE_MATCHES,
+    );
+
+    assert_eq!(page.total, 2);
+    assert_eq!(page.matches.len(), 2);
+    assert_eq!(page.matches[0].line, 2);
+    assert_eq!(page.matches[0].excerpt, "начало котик конец");
+    assert_eq!(page.matches[1].line, 3);
+    for result in &page.matches {
+        assert_eq!(result.hit.tab, 7);
+        assert_eq!(text.get(result.hit.range.clone()), Some("кот"));
+    }
+}
+
+#[test]
+fn match_listing_caps_visible_rows_but_counts_every_match() {
+    let query = Query {
+        text: "x".into(),
+        ..Query::default()
+    };
+    let text = "x ".repeat(MAX_VISIBLE_MATCHES + 17);
+    let page = list_matches(
+        &compile(&query).unwrap(),
+        vec![Source {
+            tab: 3,
+            text: Rope::from(text),
+        }],
+        MAX_VISIBLE_MATCHES,
+    );
+
+    assert_eq!(page.matches.len(), MAX_VISIBLE_MATCHES);
+    assert_eq!(page.total, MAX_VISIBLE_MATCHES + 17);
+    assert_eq!(page.matches[0].hit.range, 0..1);
+    assert_eq!(page.matches[MAX_VISIBLE_MATCHES - 1].hit.range, 198..199);
+}
