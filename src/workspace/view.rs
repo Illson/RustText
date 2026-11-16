@@ -3,6 +3,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::Editor,
     label::Label,
+    menu::{ContextMenuExt, PopupMenuItem},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -141,7 +142,7 @@ impl Workspace {
                             || doc.name.clone(),
                             |status| format!("{} ({status})", doc.name).into(),
                         );
-                        div()
+                        let tab = div()
                             .id(("tab", id))
                             .flex()
                             .flex_shrink_0()
@@ -188,9 +189,15 @@ impl Workspace {
                                         || "Без имени".to_owned(),
                                         |file| display_path(&file.path),
                                     ))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.select(id, window, cx)
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, event: &ClickEvent, window, cx| {
+                                            if event.click_count() == 2 {
+                                                this.close_tab(id, window, cx);
+                                            } else {
+                                                this.select(id, window, cx);
+                                            }
+                                        },
+                                    )),
                             )
                             .child(
                                 Button::new(("close-tab", id))
@@ -201,7 +208,40 @@ impl Workspace {
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.close_tab(id, window, cx)
                                     })),
+                            );
+                        let Some(path) = doc.file.as_ref().map(|file| file.path.clone()) else {
+                            return tab.into_any_element();
+                        };
+                        let workspace = cx.entity().downgrade();
+                        tab.context_menu(move |menu, _, _| {
+                            if !path.is_file() {
+                                return menu;
+                            }
+                            let file = path.clone();
+                            let copy_path = display_path(&path);
+                            let workspace = workspace.clone();
+                            menu.item(
+                                PopupMenuItem::new("Показать в Проводнике")
+                                    .on_click(move |_, _, cx| cx.reveal_path(&file)),
                             )
+                            .item(PopupMenuItem::new("Копировать путь").on_click(
+                                move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copy_path.clone(),
+                                    ));
+                                },
+                            ))
+                            .separator()
+                            .item(
+                                PopupMenuItem::new("Закрыть вкладку").on_click(
+                                    move |_, window, cx| {
+                                        let _ = workspace
+                                            .update(cx, |this, cx| this.close_tab(id, window, cx));
+                                    },
+                                ),
+                            )
+                        })
+                        .into_any_element()
                     }))
                     .child(div().id("new-tab-space").flex_1().h_full().on_mouse_down(
                         MouseButton::Left,

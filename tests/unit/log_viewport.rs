@@ -2,9 +2,47 @@ use std::{fs, io::Write as _};
 
 use super::{
     Destination, LineIndex, LogBookmark, LogReader, PageOptions, PreviousPage, append_page,
-    assemble_page_text, read_page,
+    assemble_page_text, local_match_range, read_page,
 };
-use crate::log_file::observe;
+use crate::{
+    log_file::observe,
+    log_io::{LogRow, Page},
+};
+
+#[test]
+fn search_highlight_uses_match_bytes_across_long_row_fragments() {
+    let page = Page {
+        rows: vec![
+            LogRow {
+                start: 10,
+                end: 12,
+                text: "ab".into(),
+                continues: true,
+                terminated: false,
+            },
+            LogRow {
+                start: 12,
+                end: 16,
+                text: "çd".into(),
+                continues: false,
+                terminated: true,
+            },
+            LogRow {
+                start: 16,
+                end: 20,
+                text: "next".into(),
+                continues: false,
+                terminated: false,
+            },
+        ],
+        next_offset: 20,
+        file_size: 20,
+        eof: true,
+    };
+
+    assert_eq!(local_match_range(&page, 10, Some(&(2..4))), Some(2..4));
+    assert_eq!(local_match_range(&page, 10, Some(&(5..6))), Some(0..5));
+}
 
 #[test]
 fn copied_long_json_line_omits_editor_fragment_breaks_but_keeps_log_newlines() {

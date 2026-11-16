@@ -16,7 +16,7 @@ use gpui_kit::{
     *,
 };
 
-use super::{LogViewer, Progress, measurement_start, viewport::Destination};
+use super::{LogViewer, Progress, measurement_start};
 use crate::log_io::{
     self, LogError, LogReader, LogSearchQuery, SearchHit, SearchLimits, SearchPage,
 };
@@ -42,7 +42,7 @@ impl LogSearch {
         let enter = cx.subscribe_in(&input, window, |viewer, _, event, window, cx| match event {
             InputEvent::PressEnter { .. } => viewer.start_search(false, window, cx),
             InputEvent::Change => {
-                viewer.reset_search();
+                viewer.reset_search(cx);
                 cx.notify();
             }
             _ => {}
@@ -174,7 +174,7 @@ impl LogSearch {
                             .label("×")
                             .tooltip("Закрыть поиск")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.reset_search();
+                                this.reset_search(cx);
                                 this.search = None;
                                 window.focus(&this.focus_handle(cx), cx);
                                 cx.notify();
@@ -261,7 +261,8 @@ impl LogViewer {
         })
     }
 
-    pub(super) fn reset_search(&mut self) {
+    pub(super) fn reset_search(&mut self, cx: &mut Context<LogViewer>) {
+        self.clear_search_highlight(cx);
         if let Some(search) = &mut self.search {
             if let Some(progress) = search.progress.take() {
                 progress.set_cancelled();
@@ -286,6 +287,7 @@ impl LogViewer {
         if !self.available() {
             return;
         }
+        self.clear_search_highlight(cx);
         let Some(search) = &mut self.search else {
             return;
         };
@@ -326,7 +328,7 @@ impl LogViewer {
                     match result {
                         Ok(Some(offset)) => {
                             search.message = "Переход к записи по времени.".into();
-                            viewer.navigate(Destination::Match(offset), window, cx);
+                            viewer.highlight_log_record(offset, window, cx);
                         }
                         Ok(None) => {
                             search.message = "Подходящих записей с датой и временем нет.".into()
@@ -345,6 +347,7 @@ impl LogViewer {
         if !self.available() {
             return;
         }
+        self.clear_search_highlight(cx);
         let Some(search) = &mut self.search else {
             return;
         };
@@ -532,10 +535,15 @@ fn option_button(
         .selected(selected)
         .disabled(disabled)
         .on_click(cx.listener(move |this, _, _, cx| {
-            if let Some(search) = &mut this.search {
+            let changed = if let Some(search) = &mut this.search {
                 let value = field(search);
                 *value = !*value;
-                this.reset_search();
+                true
+            } else {
+                false
+            };
+            if changed {
+                this.reset_search(cx);
                 cx.notify();
             }
         }))
@@ -543,6 +551,7 @@ fn option_button(
 
 fn result_button(hit: &SearchHit, first_line: Option<u64>, cx: &mut Context<LogViewer>) -> Button {
     let offset = hit.line_start;
+    let match_range = hit.match_range.clone();
     let label = match first_line {
         Some(first_line) => format!("Строка {} · {}", first_line + hit.line_index, hit.preview),
         None => hit.preview.clone(),
@@ -562,7 +571,7 @@ fn result_button(hit: &SearchHit, first_line: Option<u64>, cx: &mut Context<LogV
                 .child(Label::new(label).truncate()),
         )
         .on_click(cx.listener(move |this, _, window, cx| {
-            this.navigate(Destination::Match(offset), window, cx)
+            this.highlight_log_match(offset, Some(match_range.clone()), window, cx)
         }))
 }
 

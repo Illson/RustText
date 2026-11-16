@@ -7,6 +7,7 @@ mod viewport;
 
 use std::{
     cell::Cell,
+    ops::Range,
     path::PathBuf,
     rc::Rc,
     sync::Arc,
@@ -82,6 +83,8 @@ pub(crate) struct LogViewer {
     percentage: Entity<InputState>,
     trim_percentage: Entity<InputState>,
     search: Option<LogSearch>,
+    search_match: Option<(u64, Option<Range<usize>>)>,
+    search_highlight: Option<crate::search_highlight::SearchHighlight>,
     notice: Option<SharedString>,
     reading: bool,
     generation: u64,
@@ -151,6 +154,8 @@ impl LogViewer {
             percentage,
             trim_percentage,
             search: None,
+            search_match: None,
+            search_highlight: None,
             notice: None,
             reading: false,
             generation: 0,
@@ -181,6 +186,38 @@ impl LogViewer {
         self.viewer
             .update(cx, |editor, cx| editor.set_soft_wrap(self.wrap, window, cx));
         cx.notify();
+    }
+
+    pub(super) fn clear_search_highlight(&mut self, cx: &mut Context<Self>) {
+        self.search_match = None;
+        if let Some(highlight) = self.search_highlight.take() {
+            highlight.clear(cx);
+        }
+    }
+
+    pub(super) fn highlight_log_match(
+        &mut self,
+        offset: u64,
+        match_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.available() {
+            return;
+        }
+        self.clear_search_highlight(cx);
+        self.search_match = Some((offset, match_range));
+        self.notice = None;
+        self.load_page(Destination::Match(offset), window, cx);
+    }
+
+    pub(super) fn highlight_log_record(
+        &mut self,
+        offset: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.highlight_log_match(offset, None, window, cx);
     }
 
     pub(crate) fn writing_file(&self) -> bool {

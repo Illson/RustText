@@ -90,6 +90,10 @@ pub(super) fn render(
     let handle = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
         move |bounds, hitbox, window, _| {
+            window.set_cursor_style(CursorStyle::Arrow, &hitbox);
+            if drag_state.active.get() {
+                window.set_window_cursor_style(CursorStyle::Arrow);
+            }
             let track_origin = bounds.origin.y;
             let state = drag_state.clone();
             let down_viewer = handle_viewer.clone();
@@ -249,7 +253,7 @@ fn seek(
                 });
             }
             ScrollTarget::File { .. } if fraction >= 1.0 => {
-                viewer.load_page(Destination::End, window, cx);
+                viewer.navigate(Destination::End, window, cx);
             }
             ScrollTarget::File { start, travel } => {
                 let offset = seek_target(start, travel, fraction);
@@ -259,7 +263,7 @@ fn seek(
                 } else {
                     0.0
                 };
-                viewer.load_page(Destination::Percentage(percent), window, cx);
+                viewer.navigate(Destination::Percentage(percent), window, cx);
             }
         }
     });

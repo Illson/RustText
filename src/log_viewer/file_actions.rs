@@ -73,7 +73,7 @@ impl LogViewer {
         };
         self.preparing_trim = true;
         self.notice = None;
-        self.reset_search();
+        self.reset_search(cx);
         let job = self.boundary_task(
             percent,
             false,
@@ -107,7 +107,7 @@ impl LogViewer {
     pub(super) fn reveal_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.available() {
             self.bookmark.hidden = 0;
-            self.reset_search();
+            self.reset_search(cx);
             self.navigate(Destination::Start, window, cx);
         }
     }
@@ -127,7 +127,7 @@ impl LogViewer {
 
         self.preparing_trim = true;
         self.stop_index();
-        self.reset_search();
+        self.reset_search(cx);
         let task = self.boundary_task(
             percent,
             true,

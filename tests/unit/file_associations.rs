@@ -23,13 +23,14 @@ fn windows_argument_quoting_escapes_embedded_quotes_and_trailing_slashes() {
 }
 
 #[test]
-fn registration_plan_lists_log_text_and_json_types() {
+fn registration_plan_lists_log_text_json_and_xml_types() {
     assert_eq!(
         ASSOCIATIONS,
         [
             (".log", "RustText.Log"),
             (".txt", "RustText.Text"),
-            (".json", "RustText.Json")
+            (".json", "RustText.Json"),
+            (".xml", "RustText.Xml")
         ]
     );
     assert_eq!(REGISTERED_APP_NAME, "RustText");

@@ -7,10 +7,11 @@ const REGISTERED_APP_NAME: &str = "RustText";
 #[cfg(any(windows, test))]
 const CAPABILITIES_PATH: &str = "Software\\RustText\\Capabilities";
 #[cfg(any(windows, test))]
-const ASSOCIATIONS: [(&str, &str); 3] = [
+const ASSOCIATIONS: [(&str, &str); 4] = [
     (".log", "RustText.Log"),
     (".txt", "RustText.Text"),
     (".json", "RustText.Json"),
+    (".xml", "RustText.Xml"),
 ];
 
 #[cfg(any(windows, test))]
@@ -78,6 +79,12 @@ impl Workspace {
 
 #[cfg(windows)]
 fn register_and_open_settings() -> std::io::Result<()> {
+    register_for_current_user()?;
+    open_default_apps_settings()
+}
+
+#[cfg(windows)]
+pub(crate) fn register_for_current_user() -> std::io::Result<()> {
     let executable = std::env::current_exe()?;
     let executable = executable.to_str().ok_or_else(|| {
         std::io::Error::new(
@@ -85,17 +92,20 @@ fn register_and_open_settings() -> std::io::Result<()> {
             "Путь к RustText содержит неподдерживаемые символы.",
         )
     })?;
-    let plan = RegistrationPlan::new(executable);
-    register_application(&plan)?;
-    open_default_apps_settings()
+    register_application(&RegistrationPlan::new(executable))
 }
 
 #[cfg(not(windows))]
-fn register_and_open_settings() -> std::io::Result<()> {
+pub(crate) fn register_for_current_user() -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "Регистрация типов файлов доступна только в Windows.",
     ))
+}
+
+#[cfg(not(windows))]
+fn register_and_open_settings() -> std::io::Result<()> {
+    register_for_current_user()
 }
 
 #[cfg(windows)]
@@ -187,6 +197,7 @@ fn register_application(plan: &RegistrationPlan) -> std::io::Result<()> {
             match extension {
                 ".log" => "RustText log file",
                 ".json" => "RustText JSON file",
+                ".xml" => "RustText XML file",
                 _ => "RustText text file",
             },
         )?;

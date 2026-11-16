@@ -10,6 +10,7 @@ mod log_trim;
 mod log_viewer;
 mod recent_files;
 mod search;
+mod search_highlight;
 mod session;
 mod single_instance;
 mod text_format;
@@ -28,6 +29,20 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    let mut arguments = std::env::args_os();
+    let _executable = arguments.next();
+    let register_flag = std::ffi::OsStr::new("--register-file-associations");
+    let register_file_associations =
+        arguments.next().as_deref() == Some(register_flag) && arguments.next().is_none();
+    if register_file_associations {
+        match workspace::register_for_current_user() {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("Не удалось зарегистрировать типы файлов RustText: {error}");
+                std::process::exit(1);
+            }
+        }
     }
     log_viewer::enable_measurements();
     let launch = match single_instance::LaunchRequest::from_process() {

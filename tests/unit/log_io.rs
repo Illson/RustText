@@ -294,6 +294,7 @@ fn search_streams_lines_and_reports_work_limits_and_cancellation() {
     .unwrap();
     assert_eq!(page.hits.len(), 1);
     assert_eq!(page.hits[0].preview, "КОД=17");
+    assert_eq!(page.hits[0].match_range, 0..9);
     assert_eq!(page.hits[0].line_index, 1);
     assert_eq!(page.next_line_index, 2);
     assert!(!page.complete);

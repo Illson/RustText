@@ -10,6 +10,7 @@ mod session_runtime;
 mod updates;
 mod view;
 
+pub(crate) use associations::register_for_current_user;
 pub(crate) use view::bind_keys;
 
 use std::{

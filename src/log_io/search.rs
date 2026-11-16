@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    ops::Range,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -26,6 +27,8 @@ pub struct SearchHit {
     pub line_index: u64,
     pub line_start: u64,
     pub line_end: u64,
+    /// First match's UTF-8 byte range relative to the decoded physical line.
+    pub match_range: Range<usize>,
     /// Bounded, decoded preview of the matching line.
     pub preview: String,
 }
@@ -177,12 +180,13 @@ pub fn search_page(
             });
         }
         let line = decode(&fragment.bytes, reader.encoding, cursor == 0);
-        if regex.is_match(&line) {
+        if let Some(found) = regex.find(&line) {
             let preview = truncate_utf8(&line, preview_bytes);
             hits.push(SearchHit {
                 line_index,
                 line_start: cursor,
                 line_end: fragment.end,
+                match_range: found.range(),
                 preview,
             });
         }

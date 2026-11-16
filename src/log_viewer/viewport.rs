@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, ops::Range};
 
 use gpui_kit::*;
 
@@ -179,7 +179,7 @@ impl LogViewer {
         let first = self.page.is_none();
         if loaded.reset {
             self.reset_index();
-            self.reset_search();
+            self.reset_search(cx);
             self.notice.get_or_insert(
                 "Прежнее содержимое лога не подтверждено. Позиция и скрытая граница сброшены."
                     .into(),
@@ -193,6 +193,10 @@ impl LogViewer {
         self.bookmark.offset = loaded.start;
         self.bookmark.hidden = loaded.hidden;
         self.observation = Some(loaded.observation);
+        let keep_steady = self.search_highlight.is_some();
+        if let Some(highlight) = self.search_highlight.take() {
+            highlight.clear(cx);
+        }
         let text = assemble_page_text(&loaded.page);
         self.viewer.update(cx, |viewer, cx| {
             viewer.set_value(text, window, cx);
@@ -202,6 +206,16 @@ impl LogViewer {
             }
         });
         self.page = Some(loaded.page);
+        if let (Some((offset, match_range)), Some(page)) =
+            (self.search_match.as_ref(), self.page.as_ref())
+            && let Some(range) = local_match_range(page, *offset, match_range.as_ref())
+        {
+            self.search_highlight = Some(if keep_steady {
+                crate::search_highlight::SearchHighlight::steady(&self.viewer, range, cx)
+            } else {
+                crate::search_highlight::SearchHighlight::new(&self.viewer, range, cx)
+            });
+        }
         self.start_index(window, cx);
 
         if first && let Some(start) = crate::log_viewer::measurement_start() {
@@ -239,7 +253,7 @@ impl LogViewer {
             }
             Ok((observation, change)) => {
                 self.reset_index();
-                self.reset_search();
+                self.reset_search(cx);
                 self.notice = Some(
                     match change {
                         Change::Truncated => "Лог очищен или сокращён. Позиция просмотра сброшена.",
@@ -271,7 +285,7 @@ impl LogViewer {
                     format!("Файл лога временно недоступен. {error}").into()
                 };
                 if self.observation.take().is_some() || self.notice.as_ref() != Some(&message) {
-                    self.reset_search();
+                    self.reset_search(cx);
                     self.reset_index();
                     self.page = None;
                     self.notice = Some(message);
@@ -306,6 +320,7 @@ impl LogViewer {
         if !self.available() {
             return;
         }
+        self.clear_search_highlight(cx);
         self.notice = None;
         self.load_page(destination, window, cx);
     }
@@ -364,6 +379,38 @@ impl LogViewer {
         self.navigate(destination, window, cx);
         true
     }
+}
+
+fn local_match_range(
+    page: &Page,
+    line_start: u64,
+    match_range: Option<&Range<usize>>,
+) -> Option<Range<usize>> {
+    let mut text_offset = 0usize;
+    for (index, row) in page.rows.iter().enumerate() {
+        if row.start == line_start {
+            let start = text_offset;
+            let mut end = start + row.text.len();
+            let mut fragment = index;
+            while page.rows[fragment].continues && fragment + 1 < page.rows.len() {
+                fragment += 1;
+                end += page.rows[fragment].text.len();
+            }
+
+            if let Some(range) = match_range
+                && range.start < range.end
+                && range.end <= end - start
+            {
+                return Some((start + range.start)..(start + range.end));
+            }
+            return (end > start).then_some(start..end);
+        }
+        text_offset += row.text.len();
+        if row.terminated && index + 1 < page.rows.len() {
+            text_offset += 1;
+        }
+    }
+    None
 }
 
 fn assemble_page_text(page: &Page) -> String {
