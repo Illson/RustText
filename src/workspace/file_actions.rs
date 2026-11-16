@@ -253,6 +253,9 @@ impl Workspace {
                 doc.restored_scroll = None;
                 doc.disk_status = DiskStatus::Current;
                 doc.revision = doc.revision.wrapping_add(1);
+                if let Some(tab) = restore {
+                    doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
+                }
             }
             let recent = RecentFile::new(opened.target.path, doc.format.encoding);
             self.select(id, window, cx);
