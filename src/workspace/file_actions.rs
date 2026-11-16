@@ -48,18 +48,27 @@ enum LoadedDocument {
     Log(FileTarget),
 }
 
-fn should_replace_opened_document(
+struct ReopenExisting<'a> {
+    replace_text: bool,
+    restore: Option<&'a Tab>,
+}
+
+fn reopen_existing_document<'a>(
     dirty: bool,
     placeholder: bool,
     current_target: Option<&FileTarget>,
     opened_target: &FileTarget,
     current_encoding: TextEncoding,
     opened_encoding: TextEncoding,
-) -> bool {
-    !dirty
-        && (placeholder
-            || current_target != Some(opened_target)
-            || current_encoding != opened_encoding)
+    restore: Option<&'a Tab>,
+) -> ReopenExisting<'a> {
+    ReopenExisting {
+        replace_text: !dirty
+            && (placeholder
+                || current_target != Some(opened_target)
+                || current_encoding != opened_encoding),
+        restore: if dirty { None } else { restore },
+    }
 }
 
 fn read_document(path: &Path, mode: OpenMode) -> std::io::Result<LoadedDocument> {
@@ -236,14 +245,16 @@ impl Workspace {
                     .is_some_and(|file| file.path == opened.target.path)
         }) {
             let id = doc.id;
-            if should_replace_opened_document(
+            let reopen = reopen_existing_document(
                 doc.dirty,
                 doc.placeholder,
                 doc.file.as_ref(),
                 &opened.target,
                 doc.format.encoding,
                 opened.format.encoding,
-            ) {
+                restore,
+            );
+            if reopen.replace_text {
                 doc.editor
                     .update(cx, |editor, cx| editor.set_value(opened.text, window, cx));
                 doc.saved_text = Some(doc.editor.read(cx).text().clone());
@@ -253,9 +264,9 @@ impl Workspace {
                 doc.restored_scroll = None;
                 doc.disk_status = DiskStatus::Current;
                 doc.revision = doc.revision.wrapping_add(1);
-                if let Some(tab) = restore {
-                    doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
-                }
+            }
+            if let Some(tab) = reopen.restore {
+                doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             }
             let recent = RecentFile::new(opened.target.path, doc.format.encoding);
             self.select(id, window, cx);

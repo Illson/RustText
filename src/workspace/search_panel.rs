@@ -5,24 +5,41 @@ use gpui_kit::component::{
     label::Label,
 };
 use gpui_kit::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Instant;
 
 use super::{Document, Workspace};
 use crate::{
     appearance,
-    search::{self, Command, Hit, Outcome, Query, SearchMatch, Source},
+    search::{
+        self, Command, Hit, NavigationProgress, NavigationStart, Outcome, Query, SearchMatch,
+        Source,
+    },
 };
+
+struct SearchResume {
+    query: Query,
+    origin: Hit,
+    versions: Vec<(u64, u64)>,
+    progress: NavigationProgress,
+}
 
 pub(super) struct SearchPanel {
     query_input: Entity<InputState>,
     replacement_input: Entity<InputState>,
     options: Query,
-    last_hit: Option<(Query, Hit)>,
+    last_hit: Option<(Query, Hit, u64)>,
+    resume: Option<SearchResume>,
     replacing: bool,
     visible_matches: Vec<SearchMatch>,
     match_revisions: Vec<(u64, u64)>,
     request_generation: u64,
     message: SharedString,
     task: Option<Task<()>>,
+    cancellation: Arc<AtomicBool>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -69,12 +86,14 @@ impl SearchPanel {
             replacement_input,
             options: Query::default(),
             last_hit: None,
+            resume: None,
             replacing: false,
             visible_matches: Vec::new(),
             match_revisions: Vec::new(),
             request_generation: 0,
             message: "Введите текст поиска".into(),
             task: None,
+            cancellation: Arc::new(AtomicBool::new(false)),
             _subscriptions: [query, replacement],
         }
     }
@@ -128,13 +147,10 @@ impl SearchPanel {
                             .child(Label::new(label).truncate()),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        let stale = revisions.iter().any(|(id, revision)| {
-                            this.documents
-                                .iter()
-                                .find(|doc| doc.id == *id)
-                                .is_none_or(|document| document.revision != *revision)
-                        });
-                        if stale {
+                        let versions =
+                            search_documents(&this.documents, query.all_tabs, result.hit.tab)
+                                .map(|doc| (doc.id, doc.revision));
+                        if !versions.eq(revisions.iter().copied()) {
                             this.reset_search(cx);
                             this.search_message("Текст изменился. Обновите список совпадений.", cx);
                             return;
@@ -144,8 +160,10 @@ impl SearchPanel {
                         this.active_document().editor.update(cx, |editor, cx| {
                             editor.set_selected_range(result.hit.range.clone(), cx);
                         });
+                        let revision = this.active_document().revision;
                         if let Some(panel) = &mut this.search {
-                            panel.last_hit = Some((query.clone(), result.hit.clone()));
+                            panel.last_hit = Some((query.clone(), result.hit.clone(), revision));
+                            panel.resume = None;
                         }
                         this.search_message(format!("Строка {}", result.line), cx);
                     }))
@@ -351,6 +369,9 @@ impl Workspace {
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.search {
+            panel.cancellation.store(true, Ordering::Relaxed);
+        }
         if self.search.take().is_some() {
             self.select(self.active, window, cx);
         }
@@ -358,11 +379,14 @@ impl Workspace {
 
     fn reset_search(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = &mut self.search {
+            panel.cancellation.store(true, Ordering::Relaxed);
             panel.task = None;
+            panel.cancellation = Arc::new(AtomicBool::new(false));
             panel.last_hit = None;
             panel.request_generation = panel.request_generation.wrapping_add(1);
             panel.visible_matches.clear();
             panel.match_revisions.clear();
+            panel.resume = None;
             panel.message = if panel.options.all_tabs {
                 "Поиск по всем вкладкам. Замена доступна в текущей вкладке.".into()
             } else {
@@ -389,6 +413,7 @@ impl Workspace {
             tab: active.id,
             range: active.editor.read(cx).selected_range(),
         };
+        let origin_revision = active.revision;
         let panel = self.search.as_mut().expect("search panel is present");
         let query = panel.query(cx);
         if panel.task.is_some() || (command.replaces() && query.all_tabs) {
@@ -398,15 +423,19 @@ impl Workspace {
         let request_generation = panel.request_generation;
 
         let replacement = panel.replacement_input.read(cx).value().to_string();
-        let skip_current = panel
+        panel.cancellation.store(true, Ordering::Relaxed);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        panel.cancellation = cancellation.clone();
+        let last_hit = panel
             .last_hit
             .as_ref()
-            .is_some_and(|(last_query, hit)| *last_query == query && *hit == origin);
+            .filter(|(last_query, hit, revision)| {
+                *last_query == query && hit.tab == origin.tab && *revision == origin_revision
+            })
+            .map(|(_, hit, _)| hit);
+        let skip_current = last_hit == Some(&origin);
         let mut versions = Vec::new();
-        let documents = self
-            .documents
-            .iter()
-            .filter(|doc| doc.log.is_none() && (query.all_tabs || doc.id == origin.tab))
+        let documents = search_documents(&self.documents, query.all_tabs, origin.tab)
             .map(|doc| {
                 versions.push((doc.id, doc.revision));
                 Source {
@@ -415,24 +444,52 @@ impl Workspace {
                 }
             })
             .collect();
+        let resume = panel
+            .resume
+            .as_ref()
+            .filter(|resume| {
+                resume.query == query
+                    && resume.origin.tab == origin.tab
+                    && resume.versions == versions
+                    && (resume.origin.range == origin.range
+                        || (!resume.progress.wrapped
+                            && resume.progress.boundary <= origin.range.start
+                            && origin.range.start >= resume.origin.range.start))
+            })
+            .map(|resume| resume.progress.clone())
+            .or_else(|| {
+                last_hit
+                    .filter(|hit| skip_current || hit.range.start < origin.range.start)
+                    .map(|hit| NavigationProgress::after_hit(hit.tab, hit.range.clone()))
+            });
         panel.message = "Поиск…".into();
-        let origin_id = origin.tab;
-        let result_versions = versions.clone();
         let job = cx.background_spawn({
             let query = query.clone();
+            let cancellation = cancellation.clone();
+            let resume = resume.clone();
+            let origin = origin.clone();
             async move {
+                let deadline = Instant::now() + search::MAX_SEARCH_TIME;
+                let work = search::WorkBudget::new(&cancellation, deadline);
                 search::run(
                     &query,
                     command,
                     documents,
                     &origin,
-                    skip_current,
                     &replacement,
+                    &work,
+                    NavigationStart {
+                        skip_current,
+                        progress: resume,
+                    },
                 )
             }
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let outcome = job.await;
+            if cancellation.load(Ordering::Relaxed) {
+                return;
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 let Some(panel) = &mut this.search else {
                     return;
@@ -441,23 +498,24 @@ impl Workspace {
                     return;
                 }
                 panel.task = None;
-                let inputs_changed = versions.iter().any(|(id, revision)| {
-                    !this
-                        .documents
-                        .iter()
-                        .any(|doc| doc.id == *id && doc.revision == *revision)
-                });
-                if this.busy.is_some() || inputs_changed || this.active != origin_id {
+                let current_versions =
+                    search_documents(&this.documents, query.all_tabs, origin.tab)
+                        .map(|doc| (doc.id, doc.revision));
+                let inputs_changed = !current_versions.eq(versions.iter().copied());
+                let caret_changed = this
+                    .documents
+                    .iter()
+                    .find(|doc| doc.id == origin.tab)
+                    .is_none_or(|doc| doc.editor.read(cx).selected_range() != origin.range);
+                if this.busy.is_some()
+                    || this.applying_update()
+                    || inputs_changed
+                    || this.active != origin.tab
+                    || caret_changed
+                {
                     this.search_message("Текст или вкладка изменились. Повторите поиск.", cx);
                 } else {
-                    this.apply_search_outcome(
-                        outcome,
-                        query,
-                        origin_id,
-                        result_versions,
-                        window,
-                        cx,
-                    );
+                    this.apply_search_outcome(outcome, query, origin, versions, window, cx);
                 }
             });
         });
@@ -476,39 +534,47 @@ impl Workspace {
         &mut self,
         outcome: Result<Outcome, String>,
         query: Query,
-        origin_id: u64,
+        origin: Hit,
         versions: Vec<(u64, u64)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match outcome {
             Err(error) => self.search_message(error, cx),
-            Ok(Outcome::Found {
-                hit: Some(hit),
-                total,
-            }) => {
+            Ok(Outcome::Found { hit: Some(hit) }) => {
                 self.select(hit.tab, window, cx);
                 self.active_document().editor.update(cx, |editor, cx| {
                     editor.set_selected_range(hit.range.clone(), cx);
                 });
+                let hit_revision = self.active_document().revision;
                 if let Some(panel) = &mut self.search {
-                    panel.last_hit = Some((query, hit));
+                    panel.last_hit = Some((query, hit, hit_revision));
+                    panel.resume = None;
                 }
-                self.search_message(format!("Совпадений: {total}"), cx);
+                self.search_message("Совпадение выбрано", cx);
             }
-            Ok(Outcome::NoReplacements | Outcome::Found { hit: None, .. }) => {
+            Ok(Outcome::Incomplete { progress }) => {
                 if let Some(panel) = &mut self.search {
+                    panel.resume = Some(SearchResume {
+                        query,
+                        origin,
+                        versions,
+                        progress,
+                    });
+                }
+                self.search_message("Поиск приостановлен. Нажмите F3, чтобы продолжить.", cx);
+            }
+            Ok(Outcome::NoReplacements | Outcome::Found { hit: None } | Outcome::Cancelled) => {
+                if let Some(panel) = &mut self.search {
+                    panel.resume = None;
+                    panel.last_hit = None;
                     panel.visible_matches.clear();
                     panel.match_revisions.clear();
                 }
                 self.search_message("Совпадений нет", cx);
             }
             Ok(Outcome::Replaced { range, text, count }) => {
-                if let Some(panel) = &mut self.search {
-                    panel.visible_matches.clear();
-                    panel.match_revisions.clear();
-                }
-                if let Some(doc) = self.documents.iter().find(|doc| doc.id == origin_id) {
+                if let Some(doc) = self.documents.iter().find(|doc| doc.id == origin.tab) {
                     doc.editor.update(cx, |editor, cx| {
                         editor.set_selected_range(range, cx);
                         editor.replace(text, window, cx);
@@ -517,33 +583,37 @@ impl Workspace {
                 }
                 if let Some(panel) = &mut self.search {
                     panel.last_hit = None;
+                    panel.resume = None;
+                    panel.visible_matches.clear();
+                    panel.match_revisions.clear();
                 }
                 self.search_message(format!("Заменено: {count}"), cx);
             }
             Ok(Outcome::Matches(list)) => {
-                let first = list.matches.first().cloned();
-                if let Some(first) = first {
+                let last_hit = list.matches.first().map(|first| {
                     self.select(first.hit.tab, window, cx);
                     self.active_document().editor.update(cx, |editor, cx| {
                         editor.set_selected_range(first.hit.range.clone(), cx);
                     });
-                    if let Some(panel) = &mut self.search {
-                        panel.last_hit = Some((query, first.hit.clone()));
-                    }
+                    (query, first.hit.clone(), self.active_document().revision)
+                });
+                let mut message = if list.complete {
+                    format!("Совпадений: {}", list.total)
+                } else {
+                    format!("Подсчёт остановлен · найдено {}", list.total)
+                };
+                if list.total > search::MAX_VISIBLE_MATCHES {
+                    message.push_str(&format!(
+                        " · показаны первые {}",
+                        search::MAX_VISIBLE_MATCHES
+                    ));
                 }
                 if let Some(panel) = &mut self.search {
+                    panel.last_hit = last_hit;
+                    panel.resume = None;
                     panel.visible_matches = list.matches;
                     panel.match_revisions = versions;
                 }
-                let message = if list.total > search::MAX_VISIBLE_MATCHES {
-                    format!(
-                        "Совпадений: {} · показаны первые {}",
-                        list.total,
-                        search::MAX_VISIBLE_MATCHES
-                    )
-                } else {
-                    format!("Совпадений: {}", list.total)
-                };
                 self.search_message(message, cx);
             }
         }
@@ -561,6 +631,16 @@ impl Workspace {
             self.reset_search(cx);
         }
     }
+}
+
+fn search_documents(
+    documents: &[Document],
+    all_tabs: bool,
+    tab: u64,
+) -> impl Iterator<Item = &Document> {
+    documents
+        .iter()
+        .filter(move |doc| doc.log.is_none() && (all_tabs || doc.id == tab))
 }
 
 fn command_button(

@@ -196,9 +196,12 @@ impl LogReader {
             .min(MAX_PAGE_ROWS)
             .min((MAX_PAGE_BYTES / row_bytes).max(1));
         let mut rows = VecDeque::with_capacity(row_limit);
+        let is_utf8 = matches!(self.encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom);
+        let mut incomplete_utf8_tail = false;
         while cursor < limit && row_limit > 0 && (keep_tail || rows.len() < row_limit) {
             let start = cursor;
             let fragment = read_fragment(&mut self.file, cursor, limit, row_bytes, self.encoding)?;
+            incomplete_utf8_tail = is_utf8 && limit == self.size && fragment.incomplete_tail;
             if fragment.end <= cursor {
                 break;
             }
@@ -213,12 +216,15 @@ impl LogReader {
                 continues: !fragment.terminated && cursor < self.size,
                 terminated: fragment.terminated,
             });
+            if incomplete_utf8_tail {
+                break;
+            }
         }
         Ok(Page {
             rows: rows.into(),
             next_offset: cursor,
             file_size: self.size,
-            eof: cursor >= self.size,
+            eof: cursor >= self.size || incomplete_utf8_tail,
         })
     }
 
@@ -300,6 +306,8 @@ pub(super) struct Fragment {
     pub(super) bytes: Vec<u8>,
     pub(super) end: u64,
     pub(super) terminated: bool,
+    pub(super) limit_reached: bool,
+    pub(super) incomplete_tail: bool,
 }
 
 fn read_fragment(
@@ -339,11 +347,12 @@ fn read_fragment(
         }
         if let Some((index, delimiter_len)) = find_delimiter(&buffer[..usable], encoding) {
             if index > remaining {
-                let consumed = if unit == 2 {
+                let mut consumed = if unit == 2 {
                     remaining - remaining % 2
                 } else {
                     remaining
                 };
+                consumed = avoid_utf16_surrogate_split(&buffer[..usable], consumed, encoding);
                 bytes.extend_from_slice(&buffer[..consumed]);
                 cursor += consumed as u64;
                 if matches!(encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom) {
@@ -354,6 +363,8 @@ fn read_fragment(
                     bytes,
                     end: cursor,
                     terminated: false,
+                    limit_reached: false,
+                    incomplete_tail: false,
                 });
             }
             bytes.extend_from_slice(&buffer[..index]);
@@ -362,20 +373,24 @@ fn read_fragment(
                 bytes,
                 end: cursor,
                 terminated: true,
+                limit_reached: false,
+                incomplete_tail: false,
             });
         }
         let consumed = usable.min(remaining);
-        let consumed = if unit == 2 {
+        let mut consumed = if unit == 2 {
             consumed - consumed % 2
         } else {
             consumed
         };
+        consumed = avoid_utf16_surrogate_split(&buffer[..usable], consumed, encoding);
         if consumed == 0 {
             break;
         }
         bytes.extend_from_slice(&buffer[..consumed]);
         cursor += consumed as u64;
     }
+    let raw_cursor = cursor;
     if matches!(encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom) {
         trim_utf8_boundary(&mut bytes);
         cursor = start + bytes.len() as u64;
@@ -383,11 +398,34 @@ fn read_fragment(
         bytes.pop();
         cursor -= 1;
     }
+    let limit_reached = cursor < file_size && bytes.len() >= cap;
     Ok(Fragment {
         bytes,
         end: cursor,
         terminated: false,
+        limit_reached,
+        incomplete_tail: raw_cursor == file_size && cursor < raw_cursor,
     })
+}
+
+fn avoid_utf16_surrogate_split(bytes: &[u8], consumed: usize, encoding: TextEncoding) -> usize {
+    if !matches!(encoding, TextEncoding::Utf16Le | TextEncoding::Utf16Be)
+        || consumed < 2
+        || bytes.len() < consumed + 2
+    {
+        return consumed;
+    }
+    let code_unit = |pair: &[u8]| match encoding {
+        TextEncoding::Utf16Be => u16::from_be_bytes([pair[0], pair[1]]),
+        _ => u16::from_le_bytes([pair[0], pair[1]]),
+    };
+    let last = code_unit(&bytes[consumed - 2..consumed]);
+    let next = code_unit(&bytes[consumed..consumed + 2]);
+    if (0xd800..=0xdbff).contains(&last) && (0xdc00..=0xdfff).contains(&next) {
+        consumed - 2
+    } else {
+        consumed
+    }
 }
 
 pub(super) fn find_delimiter(bytes: &[u8], encoding: TextEncoding) -> Option<(usize, usize)> {

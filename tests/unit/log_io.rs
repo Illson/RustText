@@ -1,5 +1,5 @@
 use super::*;
-use std::io::Write;
+use std::{fs, io::Write};
 
 fn reader_with(
     contents: &[u8],
@@ -65,6 +65,35 @@ fn utf8_fragment_and_crlf_boundaries_preserve_characters_and_rows() {
     assert_eq!(page.rows[1].text, "🙂z");
     assert!(page.rows[1].terminated);
     assert_eq!(page.rows[2].text, "next");
+}
+
+#[test]
+fn utf16_fragments_keep_surrogate_pairs_together_at_the_byte_limit() {
+    for encoding in [TextEncoding::Utf16Le, TextEncoding::Utf16Be] {
+        let mut contents = Vec::new();
+        for character in format!("{}🙂z\nnext", "x".repeat(1_023)).encode_utf16() {
+            let bytes = match encoding {
+                TextEncoding::Utf16Be => character.to_be_bytes(),
+                _ => character.to_le_bytes(),
+            };
+            contents.extend_from_slice(&bytes);
+        }
+        let (_file, mut reader) = reader_with(&contents, Some(encoding));
+        let page = reader
+            .render_page(
+                0,
+                PageOptions {
+                    max_rows: 4,
+                    max_row_bytes: 2_048,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(page.rows[0].text, "x".repeat(1_023));
+        assert_eq!(page.rows[1].text, "🙂z");
+        assert!(page.rows[1].terminated);
+        assert_eq!(page.rows[2].text, "next");
+    }
 }
 
 #[test]
@@ -324,6 +353,182 @@ fn search_reports_unprocessable_long_lines_and_bad_patterns() {
             &AtomicBool::new(false),
         ),
         Err(LogError::InvalidRegex(_))
+    ));
+}
+
+#[test]
+fn search_matches_available_text_before_an_incomplete_utf8_tail() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("partial-tail.log");
+    fs::write(&path, b"hit \xf0\x9f\x99").unwrap();
+    let first = search_page(
+        &path,
+        None,
+        &LogSearchQuery::literal("hit", true),
+        0,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    assert_eq!(first.hits.len(), 1);
+    assert_eq!(first.hits[0].preview, "hit ");
+    assert_eq!(first.hits[0].line_start, 0);
+    assert!(!first.complete);
+    assert_eq!(first.next_offset, 0);
+    assert_eq!(first.pending_line_start, Some(0));
+    assert_eq!(first.file_size, 7);
+
+    let emoji_query = LogSearchQuery::literal("🙂", true);
+    let emoji_before_append = search_page(
+        &path,
+        None,
+        &emoji_query,
+        0,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(emoji_before_append.hits.is_empty());
+    assert_eq!(emoji_before_append.pending_line_start, Some(0));
+
+    let repeated = search_page(
+        &path,
+        None,
+        &LogSearchQuery::literal("hit", true),
+        first.next_offset,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(repeated.next_offset, first.next_offset);
+    assert_eq!(repeated.hits.len(), 1);
+
+    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writer.write_all(b"\x82\nnext hit\n").unwrap();
+    drop(writer);
+    let appended_size = fs::metadata(&path).unwrap().len();
+    assert!(appended_size > first.file_size);
+    let resumed = search_page(
+        &path,
+        None,
+        &LogSearchQuery::literal("hit", true),
+        first.pending_line_start.unwrap(),
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(resumed.hits.len(), 2);
+    assert_eq!(resumed.hits[0].line_start, 0);
+    assert_eq!(resumed.hits[0].preview, "hit 🙂");
+    assert_eq!(resumed.hits[1].preview, "next hit");
+    assert!(resumed.complete);
+
+    let emoji_after_append = search_page(
+        &path,
+        None,
+        &emoji_query,
+        emoji_before_append.next_offset,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(emoji_after_append.hits.len(), 1);
+    assert_eq!(emoji_after_append.hits[0].preview, "hit 🙂");
+    assert!(emoji_after_append.complete);
+}
+
+#[test]
+fn retry_after_partial_line_preserves_the_original_arbitrary_start() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("partial-from-offset.log");
+    fs::write(&path, b"skip hit \xf0\x9f\x99").unwrap();
+    let query = LogSearchQuery::literal("hit", true);
+    let first = search_page(
+        &path,
+        None,
+        &query,
+        5,
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(first.hits.is_empty());
+    assert_eq!(first.pending_line_start, Some(5));
+
+    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writer.write_all(b"\x82\n").unwrap();
+    drop(writer);
+    let resumed = search_page(
+        &path,
+        None,
+        &query,
+        first.pending_line_start.unwrap(),
+        5,
+        SearchLimits::default(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(resumed.hits.is_empty());
+    assert!(resumed.complete);
+}
+
+#[test]
+fn search_distinguishes_exact_limit_from_a_codepoint_split_by_the_limit() {
+    let limits = SearchLimits {
+        max_line_bytes: 4,
+        ..SearchLimits::default()
+    };
+    let (exact_file, _reader) = reader_with(b"abcd", None);
+    let exact = search_page(
+        exact_file.path(),
+        None,
+        &LogSearchQuery::literal("abcd", true),
+        0,
+        5,
+        limits,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(exact.hits.len(), 1);
+    assert!(exact.complete);
+
+    let (utf8_file, _reader) = reader_with("abc🙂".as_bytes(), None);
+    assert!(matches!(
+        search_page(
+            utf8_file.path(),
+            None,
+            &LogSearchQuery::literal("abc", true),
+            0,
+            5,
+            limits,
+            &AtomicBool::new(false),
+        ),
+        Err(LogError::LineLimit { .. })
+    ));
+
+    let utf16 = ['a' as u16, 0xd83d, 0xde42]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let (utf16_file, _reader) = reader_with(&utf16, Some(TextEncoding::Utf16Le));
+    assert!(matches!(
+        search_page(
+            utf16_file.path(),
+            Some(TextEncoding::Utf16Le),
+            &LogSearchQuery::literal("a", true),
+            0,
+            5,
+            limits,
+            &AtomicBool::new(false),
+        ),
+        Err(LogError::LineLimit { .. })
     ));
 }
 

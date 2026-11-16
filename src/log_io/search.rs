@@ -34,6 +34,11 @@ pub struct SearchPage {
     pub next_offset: u64,
     pub scanned_bytes: u64,
     pub complete: bool,
+    /// Retry offset for an incomplete UTF-8 tail. This may preserve the caller's original
+    /// arbitrary byte start when that start caused the current physical line to be skipped.
+    pub pending_line_start: Option<u64>,
+    /// File length observed while this page was searched.
+    pub file_size: u64,
     /// Resume at `next_offset` to continue after a bounded batch.
     pub work_limit_reached: bool,
 }
@@ -119,26 +124,27 @@ pub fn search_page(
     let mut reader = LogReader::open(path, encoding_override)?;
     let size = reader.size;
     let mut cursor = align_offset(start_offset.min(size), reader.encoding);
+    let max_line_bytes = limits.max_line_bytes.clamp(
+        minimum_fragment_bytes(reader.encoding),
+        MAX_SEARCH_LINE_BYTES,
+    );
     let mut stream = BufReader::with_capacity(BLOCK_SIZE * 2, reader.file.try_clone()?);
     stream.seek(SeekFrom::Start(cursor))?;
+    let mut pending_line_start = None;
     // Search resume offsets are line boundaries. For a user supplied arbitrary
     // byte position, consume only the partial line at that position.
     if cursor > 0 && !is_line_boundary(&mut reader.file, cursor, reader.encoding)? {
-        let partial = read_buffered_line(
-            &mut stream,
-            cursor,
-            size,
-            limits.max_line_bytes.clamp(
-                minimum_fragment_bytes(reader.encoding),
-                MAX_SEARCH_LINE_BYTES,
-            ),
-            reader.encoding,
-        )?;
-        if !partial.terminated && partial.end < size {
+        let arbitrary_start = cursor;
+        let partial =
+            read_buffered_line(&mut stream, cursor, size, max_line_bytes, reader.encoding)?;
+        if partial.limit_reached {
             return Err(LogError::LineLimit {
                 offset: cursor,
-                limit: limits.max_line_bytes,
+                limit: max_line_bytes,
             });
+        }
+        if partial.incomplete_tail {
+            pending_line_start = Some(arbitrary_start);
         }
         cursor = partial.end;
     }
@@ -147,27 +153,22 @@ pub fn search_page(
     let preview_bytes = limits.preview_bytes.min(MAX_PREVIEW_BYTES);
     let mut hits = Vec::new();
     let mut work_limit_reached = false;
-    while cursor < size && hits.len() < result_limit {
+    while pending_line_start.is_none() && cursor < size && hits.len() < result_limit {
         if cancel.load(Ordering::Relaxed) {
             return Err(LogError::Cancelled);
         }
-        let fragment = read_buffered_line(
-            &mut stream,
-            cursor,
-            size,
-            limits.max_line_bytes.clamp(
-                minimum_fragment_bytes(reader.encoding),
-                MAX_SEARCH_LINE_BYTES,
-            ),
-            reader.encoding,
-        )?;
+        let fragment =
+            read_buffered_line(&mut stream, cursor, size, max_line_bytes, reader.encoding)?;
         if fragment.end <= cursor {
+            if fragment.incomplete_tail {
+                pending_line_start = Some(cursor);
+            }
             break;
         }
-        if !fragment.terminated && fragment.end < size {
+        if fragment.limit_reached {
             return Err(LogError::LineLimit {
                 offset: cursor,
-                limit: limits.max_line_bytes,
+                limit: max_line_bytes,
             });
         }
         let line = decode(&fragment.bytes, reader.encoding, cursor == 0);
@@ -179,7 +180,13 @@ pub fn search_page(
                 preview,
             });
         }
+        if fragment.incomplete_tail {
+            pending_line_start = Some(cursor);
+        }
         cursor = fragment.end;
+        if pending_line_start.is_some() {
+            break;
+        }
         if cursor - page_start >= limits.max_scanned_bytes
             && cursor < size
             && hits.len() < result_limit
@@ -190,9 +197,11 @@ pub fn search_page(
     }
     Ok(SearchPage {
         hits,
-        next_offset: cursor,
+        next_offset: pending_line_start.unwrap_or(cursor),
         scanned_bytes: cursor - page_start,
-        complete: cursor >= size,
+        complete: cursor >= size && pending_line_start.is_none(),
+        pending_line_start,
+        file_size: size,
         work_limit_reached,
     })
 }
@@ -240,6 +249,8 @@ fn read_buffered_line(
                     bytes,
                     end: cursor,
                     terminated: false,
+                    limit_reached: true,
+                    incomplete_tail: false,
                 });
             }
             let boundary_cr = delimiter_len == unit
@@ -268,6 +279,8 @@ fn read_buffered_line(
                 bytes,
                 end: cursor,
                 terminated: true,
+                limit_reached: false,
+                incomplete_tail: false,
             });
         }
         let take = (cap - bytes.len()).min(usable);
@@ -279,15 +292,19 @@ fn read_buffered_line(
         reader.consume(take);
         cursor += take as u64;
     }
+    let raw_cursor = cursor;
     if matches!(encoding, TextEncoding::Utf8 | TextEncoding::Utf8Bom) {
         trim_utf8_boundary(&mut bytes);
         cursor = start + bytes.len() as u64;
         reader.seek(SeekFrom::Start(cursor))?;
     }
+    let limit_reached = raw_cursor.saturating_sub(start) >= cap as u64 && raw_cursor < file_size;
     Ok(Fragment {
         bytes,
         end: cursor,
         terminated: false,
+        limit_reached,
+        incomplete_tail: raw_cursor == file_size && cursor < raw_cursor,
     })
 }
 
