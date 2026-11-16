@@ -59,6 +59,129 @@ fn copied_utf8_fragments_preserve_characters_and_real_line_breaks() {
 }
 
 #[test]
+fn restoring_bookmark_resets_after_same_size_in_place_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("same-size-rewrite.log");
+    fs::write(&path, b"first\nsecret\nending\n").unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let (observation, _) = observe(&path, None).unwrap();
+    let mut bookmark = LogBookmark {
+        hidden: 6,
+        offset: 13,
+        ..LogBookmark::default()
+    };
+    bookmark.record_observation(&observation);
+    let bookmark: LogBookmark =
+        serde_json::from_slice(&serde_json::to_vec(&bookmark).unwrap()).unwrap();
+
+    fs::write(&path, b"FIRST\nREWR!T\nending\n").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let (rewritten, _) = observe(&path, None).unwrap();
+    assert_eq!(rewritten.stamp, observation.stamp);
+    let refreshed = restore_page(&path, &bookmark);
+
+    assert!(refreshed.reset);
+    assert_eq!((refreshed.start, refreshed.hidden), (0, 0));
+    assert_eq!(refreshed.page.rows[0].text, "FIRST");
+}
+
+#[test]
+fn restoring_bookmark_resets_after_rewrite_and_growth_with_unchanged_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tail-rewrite.log");
+    let old = format!("head\n{}\nold-tail\n", "x".repeat(400));
+    fs::write(&path, &old).unwrap();
+    let (observation, _) = observe(&path, None).unwrap();
+    let mut bookmark = LogBookmark {
+        hidden: 406,
+        offset: 415,
+        ..LogBookmark::default()
+    };
+    bookmark.record_observation(&observation);
+
+    let rewritten = format!("head\n{}\nnew-tail-and-growth\n", "x".repeat(400));
+    assert!(rewritten.starts_with("head\n"));
+    assert!(rewritten.len() > old.len());
+    fs::write(&path, rewritten).unwrap();
+    let refreshed = restore_page(&path, &bookmark);
+
+    assert!(refreshed.reset);
+    assert_eq!((refreshed.start, refreshed.hidden), (0, 0));
+    assert_eq!(refreshed.page.rows[0].text, "head");
+}
+
+#[test]
+fn pure_append_preserves_hidden_boundary_and_restore_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("append-restore.log");
+    fs::write(&path, b"first\nsecond\nthird\n").unwrap();
+    let (observation, _) = observe(&path, None).unwrap();
+    let mut bookmark = LogBookmark {
+        hidden: 6,
+        offset: 13,
+        ..LogBookmark::default()
+    };
+    bookmark.record_observation(&observation);
+
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"fourth\n").unwrap();
+    drop(file);
+    let restored = restore_page(&path, &bookmark);
+
+    assert!(!restored.reset);
+    assert_eq!(
+        (restored.start, restored.hidden),
+        (bookmark.offset, bookmark.hidden)
+    );
+    assert_eq!(restored.page.rows[0].text, "third");
+}
+
+#[test]
+fn legacy_bookmark_with_nonzero_boundary_uses_compatibility_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-bookmark.log");
+    fs::write(&path, b"first\nsecond\nthird\n").unwrap();
+    let (observation, _) = observe(&path, None).unwrap();
+    let mut bookmark = LogBookmark {
+        hidden: 6,
+        offset: 13,
+        ..LogBookmark::default()
+    };
+    bookmark.record_observation(&observation);
+
+    let mut serialized = serde_json::to_value(&bookmark).unwrap();
+    let object = serialized.as_object_mut().unwrap();
+    object.remove("fingerprint");
+    let legacy: LogBookmark = serde_json::from_value(serialized).unwrap();
+    let restored = restore_page(&path, &legacy);
+
+    assert!(restored.reset);
+    assert_eq!((restored.start, restored.hidden), (0, 0));
+    assert_eq!(restored.page.rows[0].text, "first");
+}
+
+fn restore_page(path: &std::path::Path, bookmark: &LogBookmark) -> super::RenderedPage {
+    read_page(
+        path,
+        None,
+        bookmark,
+        Destination::Restore,
+        PageOptions::default(),
+        PreviousPage {
+            observation: None,
+            page: None,
+        },
+        LineIndex::default(),
+    )
+    .unwrap()
+}
+
+#[test]
 fn append_reuses_complete_rows_and_extends_one_partial_row() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.log");
@@ -119,11 +242,13 @@ fn previous_page_at_hidden_boundary_ends_where_the_current_page_starts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hidden.log");
     fs::write(&path, b"zero\none\ntwo\nthree\n").unwrap();
-    let bookmark = LogBookmark {
+    let (observation, _) = observe(&path, None).unwrap();
+    let mut bookmark = LogBookmark {
         hidden: 9,
         offset: 13,
         ..LogBookmark::default()
     };
+    bookmark.record_observation(&observation);
     let previous = read_page(
         &path,
         None,

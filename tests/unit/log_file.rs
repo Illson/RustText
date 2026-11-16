@@ -30,18 +30,17 @@ fn observes_append_rewrite_truncation_and_replacement() {
     let (replacement, change) = observe(&path, Some(&cleared)).unwrap();
     assert_eq!(change, Change::Replaced);
 
-    let bookmark = LogBookmark {
-        identity: Some(first.stamp.identity),
-        size: first.stamp.len,
+    let mut bookmark = LogBookmark {
         offset: 7,
         hidden: 5,
         follow_end: true,
         ..LogBookmark::default()
     };
+    bookmark.record_observation(&first);
     let restored: LogBookmark =
         serde_json::from_str(&serde_json::to_string(&bookmark).unwrap()).unwrap();
     assert_eq!(restored, bookmark);
-    assert!(restored.can_restore(&grown.stamp));
-    assert!(!restored.can_restore(&cleared.stamp));
-    assert!(!restored.can_restore(&replacement.stamp));
+    assert!(restored.matches_stamp(&grown.stamp));
+    assert!(!restored.matches_stamp(&cleared.stamp));
+    assert!(!restored.matches_stamp(&replacement.stamp));
 }
