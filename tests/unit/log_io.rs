@@ -184,7 +184,7 @@ fn search_batches_resume_on_the_next_physical_line() {
 }
 
 #[test]
-fn page_before_returns_a_viewport_near_the_requested_offset() {
+fn page_before_ends_at_the_requested_offset_within_a_line() {
     let (_file, mut reader) = reader_with(b"one\ntwo\nthree\nfour\nfive\n", None);
     let page = reader
         .page_before(
@@ -197,8 +197,10 @@ fn page_before_returns_a_viewport_near_the_requested_offset() {
         )
         .unwrap();
     assert_eq!(page.rows.len(), 2);
-    assert_eq!(page.rows[0].text, "two");
-    assert_eq!(page.rows[1].text, "three");
+    assert_eq!(page.rows[0].text, "three");
+    assert_eq!(page.rows[1].text, "four");
+    assert!(page.rows[1].continues);
+    assert_eq!(page.next_offset, 18);
 }
 
 #[test]
@@ -264,6 +266,32 @@ fn page_before_many_long_lines_uses_byte_fallback_to_reach_end() {
     assert_eq!(page.next_offset, size);
     assert!(page.rows[0].continues);
     assert!(page.rows[1].terminated);
+}
+
+#[test]
+fn page_before_repositions_when_long_lines_expand_into_multiple_rows() {
+    let mut contents = Vec::new();
+    for _ in 0..5 {
+        contents.extend(std::iter::repeat_n(b'x', 10));
+        contents.push(b'\n');
+    }
+    let (_file, mut reader) = reader_with(&contents, None);
+
+    let page = reader
+        .page_before(
+            reader.size(),
+            PageOptions {
+                max_rows: 3,
+                max_row_bytes: 8,
+            },
+            1024,
+        )
+        .unwrap();
+
+    assert_eq!(page.rows.len(), 3);
+    assert_eq!(page.next_offset, reader.size());
+    assert!(page.rows[0].start > 0);
+    assert!(page.eof);
 }
 
 #[test]

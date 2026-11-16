@@ -1,6 +1,7 @@
-use std::sync::atomic::Ordering;
+use std::{cell::Cell, sync::atomic::Ordering};
 
 use gpui_kit::{
+    base::{Scrollbar, ScrollbarHandle, input::EditorScrollbarContext},
     component::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
@@ -16,6 +17,49 @@ use super::{
 };
 
 impl LogViewer {
+    pub(super) fn scrollbar(
+        scroll: EditorScrollbarContext,
+        viewer: WeakEntity<Self>,
+        scroll_bottom: &Cell<Pixels>,
+    ) -> impl IntoElement {
+        let bottom =
+            (scroll.viewport_bounds().size.height - scroll.content_size().height).min(px(0.));
+        scroll_bottom.set(bottom);
+        div()
+            .size_full()
+            .relative()
+            .child(Scrollbar::new(&scroll).axis(scroll.axis()))
+            .child(
+                canvas(
+                    |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                    move |_, hitbox, window, _| {
+                        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                            if !phase.capture() || !hitbox.should_handle_scroll(window) {
+                                return;
+                            }
+                            let delta = event.delta.pixel_delta(px(1.));
+                            if delta.y == px(0.) || delta.x.abs() > delta.y.abs() {
+                                return;
+                            }
+                            let forward = delta.y < px(0.);
+                            let offset = scroll.offset().y;
+                            // The editor consumes wheel events even at its scroll limits.
+                            let edge = if forward { bottom } else { px(0.) };
+                            if (offset - edge).abs() <= px(0.5) {
+                                let _ = viewer.update(cx, |viewer, cx| {
+                                    if viewer.turn_page(forward, window, cx) {
+                                        cx.stop_propagation();
+                                    }
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+    }
+
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let enabled = self.available();
         let at_end = self.page.as_ref().is_none_or(|page| page.eof);
@@ -50,7 +94,9 @@ impl LogViewer {
                             .ghost()
                             .label("Назад")
                             .disabled(!enabled || self.bookmark.offset <= self.bookmark.hidden)
-                            .on_click(cx.listener(|this, _, window, cx| this.previous(window, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.turn_page(false, window, cx);
+                            })),
                     )
                     .child(
                         Button::new("log-next")
@@ -58,7 +104,9 @@ impl LogViewer {
                             .ghost()
                             .label("Дальше")
                             .disabled(!enabled || at_end)
-                            .on_click(cx.listener(|this, _, window, cx| this.next(window, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.turn_page(true, window, cx);
+                            })),
                     )
                     .child(
                         Button::new("log-end")
@@ -293,8 +341,12 @@ impl Render for LogViewer {
             .on_action(cx.listener(|this, _: &LogEnd, window, cx| {
                 this.navigate(Destination::End, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &LogPrevious, window, cx| this.previous(window, cx)))
-            .on_action(cx.listener(|this, _: &LogNext, window, cx| this.next(window, cx)))
+            .on_action(cx.listener(|this, _: &LogPrevious, window, cx| {
+                this.scroll_screen(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LogNext, window, cx| {
+                this.scroll_screen(true, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &LogFind, window, cx| this.open_search(window, cx)))
             .child(self.toolbar(cx))
             .children(self.search_panel(cx))

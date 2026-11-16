@@ -5,7 +5,9 @@ mod index;
 mod viewport;
 
 use std::{
+    cell::Cell,
     path::PathBuf,
+    rc::Rc,
     sync::Arc,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
@@ -71,6 +73,7 @@ pub(crate) struct LogViewer {
     index_paused: bool,
     indexing: Option<Progress>,
     viewer: Entity<EditorState>,
+    scroll_bottom: Rc<Cell<Pixels>>,
     wrap: bool,
     percentage: Entity<InputState>,
     trim_percentage: Entity<InputState>,
@@ -93,12 +96,21 @@ impl LogViewer {
         cx: &mut Context<Self>,
     ) -> Self {
         let encoding_override = windows_1251.then_some(TextEncoding::Windows1251);
+        let log_viewer = cx.entity().downgrade();
+        let scroll_bottom = Rc::new(Cell::new(px(0.)));
+        let editor_scroll_bottom = scroll_bottom.clone();
         let viewer = cx.new(|cx| {
-            EditorState::new(window, cx)
+            let mut editor = EditorState::new(window, cx)
                 .language("text")
                 .line_number(false)
                 .searchable(false)
-                .soft_wrap(false)
+                .scroll_beyond_last_line(Some(0))
+                .soft_wrap(true);
+            editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, _, _| {
+                Self::scrollbar(scroll, log_viewer.clone(), &editor_scroll_bottom)
+                    .into_any_element()
+            })));
+            editor
         });
         let percentage = cx.new(|cx| InputState::new(window, cx).placeholder("0–100"));
         let trim_percentage = cx.new(|cx| InputState::new(window, cx).default_value("50"));
@@ -119,7 +131,8 @@ impl LogViewer {
             index_paused: false,
             indexing: None,
             viewer,
-            wrap: false,
+            scroll_bottom,
+            wrap: true,
             percentage,
             trim_percentage,
             search: None,
