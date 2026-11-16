@@ -218,6 +218,7 @@ impl LogBookmark {
             return Ok(false);
         }
         let Some(saved) = &self.fingerprint else {
+            // Older sessions have no recorded evidence for a nonzero boundary.
             return Ok(at_start);
         };
 
@@ -228,6 +229,8 @@ impl LogBookmark {
             }
             boundary_digest(&observation.head, &observation.tail)
         } else {
+            // Appending moves EOF. Compare the same byte ranges we sampled
+            // when saving this bookmark.
             let count = self.size.min(WITNESS_BYTES);
             let tail = read_at(file, self.size - count, count)?;
             boundary_digest(&observation.head[..count as usize], &tail)
