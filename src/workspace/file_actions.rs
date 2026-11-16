@@ -111,6 +111,28 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.load_paths(paths, mode, None, window, cx);
+    }
+
+    pub(super) fn open_closed_file(
+        &mut self,
+        id: u64,
+        recent: RecentFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mode = OpenMode::from_recent(&recent);
+        self.load_paths(vec![recent.path], mode, Some(id), window, cx);
+    }
+
+    fn load_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        mode: OpenMode,
+        closed_id: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() || self.busy.is_some() {
             return;
         }
@@ -147,6 +169,7 @@ impl Workspace {
                 }
             }
 
+            let opened_any = !opened_files.is_empty();
             let (recent, history_error) = executor
                 .spawn(async move {
                     let error = recent.record(opened_files).err();
@@ -154,6 +177,11 @@ impl Workspace {
                 })
                 .await;
             this.update_in(cx, |this, _, cx| {
+                if let Some(id) = closed_id
+                    && opened_any
+                {
+                    this.closed.retain(|entry| entry.tab.id != id);
+                }
                 this.busy = None;
                 this.recent = recent;
                 this.error = first_error

@@ -13,6 +13,7 @@ fn capture(text: &str) -> Capture {
                 draft_revision: Some(1),
                 log: None,
             }],
+            closed: Vec::new(),
             active: 0,
             window: WindowSize {
                 width: 870.,
@@ -23,6 +24,7 @@ fn capture(text: &str) -> Capture {
             font_size: 16.,
         },
         drafts: vec![Some(Rope::from(text))],
+        closed_drafts: Vec::new(),
     }
 }
 
@@ -137,4 +139,87 @@ fn a_log_bookmark_round_trips_without_storing_file_contents() {
     let restored = restored.unwrap();
     assert_eq!(restored.drafts, [None]);
     assert_eq!(restored.state.tabs[0].log.as_ref(), Some(&bookmark));
+}
+
+#[test]
+fn closed_scratch_tabs_keep_unicode_text_across_restart() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut state = capture("open");
+    state.state.closed.push(Tab {
+        id: 2,
+        file: None,
+        format: TextFormat::default(),
+        selection: 4..4,
+        reversed: false,
+        scroll: [3., 9.],
+        draft_revision: Some(5),
+        log: None,
+    });
+    state
+        .closed_drafts
+        .push(Some(Rope::from("Заметки 🦀 café")));
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+
+    journal.commit(1, state).unwrap();
+    drop(journal);
+
+    let mut reopened = Journal::open(temporary.path().to_path_buf()).unwrap();
+    let (recovered, warning) = reopened.restore();
+    assert!(warning.is_none());
+    let recovered = recovered.unwrap();
+    assert_eq!(
+        recovered.closed_drafts,
+        [Some("Заметки 🦀 café".to_owned())]
+    );
+    assert_eq!(recovered.state.closed[0].id, 2);
+    assert_eq!(recovered.state.closed[0].selection, 4..4);
+}
+
+#[test]
+fn restores_records_written_before_closed_tab_history_was_added() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    journal.commit(1, capture("старый формат")).unwrap();
+    let manifest_path = journal.record_path(1).join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["state"].as_object_mut().unwrap().remove("closed");
+    manifest.as_object_mut().unwrap().remove("closed_drafts");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    let recovered = recovered.unwrap();
+    assert!(recovered.state.closed.is_empty());
+    assert!(recovered.closed_drafts.is_empty());
+    assert_eq!(recovered.drafts, [Some("старый формат".into())]);
+}
+
+#[test]
+fn commits_keep_only_the_newest_hundred_closed_tabs() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut state = capture("open");
+    state.state.closed = (0..MAX_CLOSED_TABS + 1)
+        .map(|id| Tab {
+            id: id as u64,
+            file: None,
+            format: TextFormat::default(),
+            selection: 0..0,
+            reversed: false,
+            scroll: [0., 0.],
+            draft_revision: None,
+            log: None,
+        })
+        .collect();
+    state.closed_drafts = vec![None; MAX_CLOSED_TABS + 1];
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+
+    journal.commit(1, state).unwrap();
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    let recovered = recovered.unwrap();
+    assert_eq!(recovered.state.closed.len(), MAX_CLOSED_TABS);
+    assert_eq!(recovered.state.closed.first().unwrap().id, 1);
+    assert_eq!(recovered.state.closed.last().unwrap().id, 100);
+    assert_eq!(recovered.closed_drafts.len(), MAX_CLOSED_TABS);
 }

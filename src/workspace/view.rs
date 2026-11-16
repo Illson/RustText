@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable,
     button::{Button, ButtonVariants},
@@ -10,7 +8,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use super::{Document, Workspace, file_actions::OpenMode, file_name};
+use super::{Document, Workspace, display_path, file_actions::OpenMode, file_name};
 use crate::{go_to_line, search::Command};
 
 actions!(
@@ -104,7 +102,7 @@ impl Workspace {
                             .small()
                             .ghost()
                             .label("Создать")
-                            .disabled(self.applying_update())
+                            .disabled(self.busy.is_some() || self.applying_update())
                             .tooltip("Создать вкладку · Ctrl+N")
                             .on_click(cx.listener(|this, _, window, cx| this.new_file(window, cx))),
                     )
@@ -241,13 +239,43 @@ impl Workspace {
 
     fn recent_files_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let entries = self.recent.entries().to_vec();
+        let closed_entries = self.closed_tab_entries();
         let workspace = cx.entity().downgrade();
         Button::new("recent-files")
             .small()
             .ghost()
             .label("Недавние")
             .disabled(self.busy.is_some())
-            .dropdown_menu(move |menu, _, _| {
+            .dropdown_menu(move |menu, window, cx| {
+                let closed_entries_for_menu = closed_entries.clone();
+                let closed_workspace = workspace.clone();
+                let menu = menu.submenu(
+                    "Закрытые вкладки",
+                    window,
+                    cx,
+                    move |menu, _, _| {
+                        if closed_entries_for_menu.is_empty() {
+                            return menu.item(PopupMenuItem::label("Закрытых вкладок нет"));
+                        }
+
+                        closed_entries_for_menu.iter().fold(
+                            menu.scrollable(true),
+                            |menu, (id, label)| {
+                                let id = *id;
+                                let label = label.clone();
+                                let workspace = closed_workspace.clone();
+                                menu.item(PopupMenuItem::new(label).on_click(
+                                    move |_, window, cx| {
+                                        let _ = workspace.update(cx, |this, cx| {
+                                            this.reopen_closed_tab(id, window, cx);
+                                        });
+                                    },
+                                ))
+                            },
+                        )
+                    },
+                );
+
                 if entries.is_empty() {
                     return menu.item(PopupMenuItem::label("Недавних файлов пока нет"));
                 }
@@ -283,74 +311,101 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .items_center()
-            .overflow_x_scroll()
-            .gap_1()
             .px_3()
-            .children(self.documents.iter().map(|doc| {
-                let id = doc.id;
-                let active = id == self.active;
-                let suffix = doc
-                    .disk_status
-                    .tab_suffix()
-                    .or(doc.placeholder.then_some("откройте заново"));
-                let name = suffix.map_or_else(
-                    || doc.name.clone(),
-                    |status| format!("{} ({status})", doc.name).into(),
-                );
+            .child(
                 div()
-                    .id(("tab", id))
+                    .id("tab-list")
                     .flex()
-                    .flex_shrink_0()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
                     .items_center()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.tab_scroll)
                     .gap_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(if active { rgb(0x4a6380) } else { rgb(0x263141) })
-                    .bg(if active { rgb(0x26364a) } else { rgb(0x18202b) })
-                    .on_drag(
-                        DraggedTab {
-                            id,
-                            name: name.clone(),
-                        },
-                        |drag, _, _, cx| {
-                            cx.new(|_| DraggedTab {
-                                id: drag.id,
-                                name: drag.name.clone(),
-                            })
-                        },
-                    )
-                    .on_drop(cx.listener(move |this, drag: &DraggedTab, _, cx| {
-                        this.reorder_tabs(drag.id, id, cx);
+                    .children(self.documents.iter().map(|doc| {
+                        let id = doc.id;
+                        let active = id == self.active;
+                        let suffix = doc
+                            .disk_status
+                            .tab_suffix()
+                            .or(doc.placeholder.then_some("откройте заново"));
+                        let name = suffix.map_or_else(
+                            || doc.name.clone(),
+                            |status| format!("{} ({status})", doc.name).into(),
+                        );
+                        div()
+                            .id(("tab", id))
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if active { rgb(0x4a6380) } else { rgb(0x263141) })
+                            .bg(if active { rgb(0x26364a) } else { rgb(0x18202b) })
+                            .on_drag(
+                                DraggedTab {
+                                    id,
+                                    name: name.clone(),
+                                },
+                                |drag, _, _, cx| {
+                                    cx.new(|_| DraggedTab {
+                                        id: drag.id,
+                                        name: drag.name.clone(),
+                                    })
+                                },
+                            )
+                            .on_drop(cx.listener(move |this, drag: &DraggedTab, _, cx| {
+                                this.reorder_tabs(drag.id, id, cx);
+                            }))
+                            .child(
+                                Button::new(("select-tab", id))
+                                    .small()
+                                    .ghost()
+                                    .label(if doc.dirty {
+                                        format!("●  {name}").into()
+                                    } else {
+                                        name
+                                    })
+                                    .max_w(px(230.0))
+                                    .tooltip(doc.file.as_ref().map_or_else(
+                                        || "Без имени".to_owned(),
+                                        |file| display_path(&file.path),
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.select(id, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("close-tab", id))
+                                    .small()
+                                    .ghost()
+                                    .label("×")
+                                    .tooltip("Закрыть вкладку · Ctrl+W")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.close_tab(id, window, cx)
+                                    })),
+                            )
                     }))
-                    .child(
-                        Button::new(("select-tab", id))
-                            .small()
-                            .ghost()
-                            .label(if doc.dirty {
-                                format!("●  {name}").into()
-                            } else {
-                                name
-                            })
-                            .max_w(px(230.0))
-                            .tooltip(doc.file.as_ref().map_or_else(
-                                || "Без имени".to_owned(),
-                                |file| display_path(&file.path),
-                            ))
-                            .on_click(
-                                cx.listener(move |this, _, window, cx| this.select(id, window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new(("close-tab", id))
-                            .small()
-                            .ghost()
-                            .label("×")
-                            .tooltip("Закрыть вкладку · Ctrl+W")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.close_tab(id, window, cx)
-                            })),
-                    )
-            }))
+                    .child(div().id("new-tab-space").flex_1().h_full().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            if event.click_count == 2 {
+                                this.new_file(window, cx);
+                            }
+                        }),
+                    )),
+            )
+            .child(
+                Button::new("new-tab")
+                    .small()
+                    .ghost()
+                    .label("+")
+                    .disabled(self.busy.is_some() || self.applying_update())
+                    .tooltip("Создать вкладку · Ctrl+N")
+                    .on_click(cx.listener(|this, _, window, cx| this.new_file(window, cx))),
+            )
             .child(
                 Button::new("reopen")
                     .small()
@@ -501,14 +556,5 @@ impl Render for Workspace {
                     .child(body),
             )
             .children(doc.log.is_none().then(|| self.status(doc, cx)))
-    }
-}
-
-fn display_path(path: &Path) -> String {
-    let display = path.to_string_lossy();
-    if let Some(unc) = display.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{unc}")
-    } else {
-        display.strip_prefix(r"\\?\").unwrap_or(&display).to_owned()
     }
 }
