@@ -10,6 +10,9 @@ use tempfile::NamedTempFile;
 
 use crate::text_format::TextFormat;
 
+#[cfg(windows)]
+mod windows_save;
+
 pub(crate) const MAX_EDITOR_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +112,13 @@ pub fn save(mut target: FileTarget, format: TextFormat, text: &str) -> io::Resul
         .path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Укажите папку файла"))?;
+    #[cfg(windows)]
+    let mut pending = if target.version.is_some() {
+        windows_save::private_temporary_file(directory)?
+    } else {
+        NamedTempFile::new_in(directory)?
+    };
+    #[cfg(not(windows))]
     let mut pending = NamedTempFile::new_in(directory)?;
     pending.write_all(&bytes)?;
     pending.as_file().sync_all()?;
@@ -117,15 +127,17 @@ pub fn save(mut target: FileTarget, format: TextFormat, text: &str) -> io::Resul
         return Err(file_changed());
     }
 
-    let version = FileVersion::from_metadata(&pending.as_file().metadata()?)?;
     if target.version.is_some() {
+        #[cfg(windows)]
+        windows_save::replace(&target.path, pending, directory)?;
+        #[cfg(not(windows))]
         pending.persist(&target.path).map_err(|error| error.error)?;
     } else {
         pending
             .persist_noclobber(&target.path)
             .map_err(|error| error.error)?;
     }
-    target.version = Some(version);
+    target.version = Some(FileVersion::from_metadata(&fs::metadata(&target.path)?)?);
     Ok(target)
 }
 

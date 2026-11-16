@@ -5,17 +5,33 @@ use gpui_kit::component::{
     label::Label,
 };
 use gpui_kit::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Instant;
 
 use super::Workspace;
-use crate::search::{self, Command, Hit, Outcome, Query, Source};
+use crate::search::{
+    self, Command, Hit, NavigationProgress, NavigationStart, Outcome, Query, Source,
+};
+
+struct SearchResume {
+    query: Query,
+    origin: Hit,
+    versions: Vec<(u64, u64)>,
+    progress: NavigationProgress,
+}
 
 pub(super) struct SearchPanel {
     query_input: Entity<InputState>,
     replacement_input: Entity<InputState>,
     options: Query,
-    last_hit: Option<(Query, Hit)>,
+    last_hit: Option<(Query, Hit, u64)>,
+    resume: Option<SearchResume>,
     message: SharedString,
     task: Option<Task<()>>,
+    cancellation: Arc<AtomicBool>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -62,8 +78,10 @@ impl SearchPanel {
             replacement_input,
             options: Query::default(),
             last_hit: None,
+            resume: None,
             message: "Введите текст поиска".into(),
             task: None,
+            cancellation: Arc::new(AtomicBool::new(false)),
             _subscriptions: [query, replacement],
         }
     }
@@ -226,6 +244,9 @@ impl Workspace {
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.search {
+            panel.cancellation.store(true, Ordering::Relaxed);
+        }
         if self.search.take().is_some() {
             self.select(self.active, window, cx);
         }
@@ -233,8 +254,11 @@ impl Workspace {
 
     fn reset_search(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = &mut self.search {
+            panel.cancellation.store(true, Ordering::Relaxed);
             panel.task = None;
+            panel.cancellation = Arc::new(AtomicBool::new(false));
             panel.last_hit = None;
+            panel.resume = None;
             panel.message = if panel.options.all_tabs {
                 "Поиск по всем вкладкам. Замена доступна в текущей вкладке.".into()
             } else {
@@ -261,6 +285,7 @@ impl Workspace {
             tab: active.id,
             range: active.editor.read(cx).selected_range(),
         };
+        let origin_revision = active.revision;
         let panel = self.search.as_mut().expect("search panel is present");
         let query = panel.query(cx);
         if panel.task.is_some() || (command.replaces() && query.all_tabs) {
@@ -268,10 +293,17 @@ impl Workspace {
         }
 
         let replacement = panel.replacement_input.read(cx).value().to_string();
-        let skip_current = panel
+        panel.cancellation.store(true, Ordering::Relaxed);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        panel.cancellation = cancellation.clone();
+        let last_hit = panel
             .last_hit
             .as_ref()
-            .is_some_and(|(last_query, hit)| *last_query == query && *hit == origin);
+            .filter(|(last_query, hit, revision)| {
+                *last_query == query && hit.tab == origin.tab && *revision == origin_revision
+            })
+            .map(|(_, hit, _)| hit);
+        let skip_current = last_hit == Some(&origin);
         let mut versions = Vec::new();
         let documents = self
             .documents
@@ -285,23 +317,54 @@ impl Workspace {
                 }
             })
             .collect();
+        let resume = panel
+            .resume
+            .as_ref()
+            .filter(|resume| {
+                resume.query == query
+                    && resume.origin.tab == origin.tab
+                    && resume.versions == versions
+                    && (resume.origin.range == origin.range
+                        || (!resume.progress.wrapped
+                            && resume.progress.boundary <= origin.range.start
+                            && origin.range.start >= resume.origin.range.start))
+            })
+            .map(|resume| resume.progress.clone())
+            .or_else(|| {
+                last_hit
+                    .filter(|hit| skip_current || hit.range.start < origin.range.start)
+                    .map(|hit| NavigationProgress::after_hit(hit.tab, hit.range.clone()))
+            });
         panel.message = "Поиск…".into();
         let origin_id = origin.tab;
+        let origin_for_guard = origin.clone();
         let job = cx.background_spawn({
             let query = query.clone();
+            let cancellation = cancellation.clone();
+            let resume = resume.clone();
+            let origin = origin.clone();
             async move {
+                let deadline = Instant::now() + search::MAX_SEARCH_TIME;
+                let work = search::WorkBudget::new(&cancellation, deadline);
                 search::run(
                     &query,
                     command,
                     documents,
                     &origin,
-                    skip_current,
                     &replacement,
+                    &work,
+                    NavigationStart {
+                        skip_current,
+                        progress: resume,
+                    },
                 )
             }
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let outcome = job.await;
+            if cancellation.load(Ordering::Relaxed) {
+                return;
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(panel) = &mut this.search {
                     panel.task = None;
@@ -314,10 +377,37 @@ impl Workspace {
                         .iter()
                         .any(|doc| doc.id == *id && doc.revision == *revision)
                 });
-                if this.busy.is_some() || inputs_changed || this.active != origin_id {
+                let caret_changed = this
+                    .documents
+                    .iter()
+                    .find(|doc| doc.id == origin_id)
+                    .is_none_or(|doc| {
+                        doc.editor.read(cx).selected_range() != origin_for_guard.range
+                    });
+                if this.busy.is_some()
+                    || inputs_changed
+                    || this.active != origin_id
+                    || caret_changed
+                {
                     this.search_message("Текст или вкладка изменились. Повторите поиск.", cx);
                 } else {
-                    this.apply_search_outcome(outcome, query, origin_id, window, cx);
+                    match outcome {
+                        Ok(Outcome::Incomplete { progress }) => {
+                            if let Some(panel) = &mut this.search {
+                                panel.resume = Some(SearchResume {
+                                    query,
+                                    origin,
+                                    versions,
+                                    progress,
+                                });
+                            }
+                            this.search_message(
+                                "Поиск приостановлен. Нажмите F3, чтобы продолжить.",
+                                cx,
+                            );
+                        }
+                        outcome => this.apply_search_outcome(outcome, query, origin_id, window, cx),
+                    }
                 }
             });
         });
@@ -342,20 +432,26 @@ impl Workspace {
     ) {
         match outcome {
             Err(error) => self.search_message(error, cx),
-            Ok(Outcome::Found {
-                hit: Some(hit),
-                total,
-            }) => {
+            Ok(Outcome::Found { hit: Some(hit) }) => {
                 self.select(hit.tab, window, cx);
                 self.active_document().editor.update(cx, |editor, cx| {
                     editor.set_selected_range(hit.range.clone(), cx);
                 });
+                let hit_revision = self.active_document().revision;
                 if let Some(panel) = &mut self.search {
-                    panel.last_hit = Some((query, hit));
+                    panel.last_hit = Some((query, hit, hit_revision));
+                    panel.resume = None;
                 }
-                self.search_message(format!("Совпадений: {total}"), cx);
+                self.search_message("Совпадение выбрано", cx);
             }
-            Ok(Outcome::NoReplacements | Outcome::Found { hit: None, .. }) => {
+            Ok(Outcome::Incomplete { .. }) => {
+                self.search_message("Поиск приостановлен. Нажмите F3, чтобы продолжить.", cx);
+            }
+            Ok(Outcome::NoReplacements | Outcome::Found { hit: None } | Outcome::Cancelled) => {
+                if let Some(panel) = &mut self.search {
+                    panel.resume = None;
+                    panel.last_hit = None;
+                }
                 self.search_message("Совпадений нет", cx);
             }
             Ok(Outcome::Replaced { range, text, count }) => {
@@ -368,6 +464,7 @@ impl Workspace {
                 }
                 if let Some(panel) = &mut self.search {
                     panel.last_hit = None;
+                    panel.resume = None;
                 }
                 self.search_message(format!("Заменено: {count}"), cx);
             }

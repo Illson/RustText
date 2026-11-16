@@ -25,19 +25,43 @@ impl Workspace {
         } else {
             selected
         };
-        let source = state.text().slice(range.clone()).to_string();
-        self.error = None;
-        match json_format::format(&source, newline) {
-            Ok(formatted) if formatted != source => {
-                editor.update(cx, |state, cx| {
-                    state.set_selected_range(range, cx);
-                    state.replace(formatted, window, cx);
-                    state.focus(window, cx);
-                });
-            }
-            Ok(_) => {}
-            Err(error) => self.error = Some(error.into()),
+        if range.len() > json_format::MAX_JSON_BYTES {
+            self.error = Some("Выбранный JSON превышает лимит 64 МиБ".into());
+            cx.notify();
+            return;
         }
+        let (id, revision, snapshot) = (doc.id, doc.revision, state.text().clone());
+        let input = range.clone();
+        self.error = None;
+        self.busy = Some("Форматирование JSON…");
         cx.notify();
+        let task = cx.background_spawn(async move {
+            let source = snapshot.slice(input).to_string();
+            json_format::format(&source, newline)
+                .map(|formatted| (formatted != source).then_some(formatted))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                let active = this.active_document();
+                if active.id != id || active.revision != revision {
+                    this.error =
+                        Some("Вкладка или текст изменились во время форматирования".into());
+                } else {
+                    match result {
+                        Ok(Some(formatted)) => editor.update(cx, |state, cx| {
+                            state.set_selected_range(range, cx);
+                            state.replace(formatted, window, cx);
+                            state.focus(window, cx);
+                        }),
+                        Ok(None) => {}
+                        Err(error) => this.error = Some(error.into()),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }

@@ -176,6 +176,12 @@ impl Journal {
         }
 
         let previous = self.last_valid;
+        if capture.state.tabs.len() != capture.drafts.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Количество открытых вкладок не совпадает с количеством черновиков",
+            ));
+        }
         if capture.state.closed.len() != capture.closed_drafts.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -192,11 +198,12 @@ impl Journal {
         let pending = tempfile::Builder::new()
             .prefix(".pending-")
             .tempdir_in(&self.directory)?;
+        // Each checkpoint owns its drafts so corrupting one cannot invalidate the fallback.
         let manifest = Manifest {
             version: FORMAT_VERSION,
-            state: capture.state,
             drafts: write_drafts(pending.path(), "draft", &capture.drafts)?,
             closed_drafts: write_drafts(pending.path(), "closed-draft", &capture.closed_drafts)?,
+            state: capture.state,
         };
         let file = File::create(pending.path().join("manifest.json"))?;
         let mut writer = BufWriter::new(file);
@@ -264,7 +271,7 @@ fn write_drafts(
 }
 
 fn write_draft(path: &Path, text: &Rope) -> io::Result<DraftInfo> {
-    let mut writer = BufWriter::new(File::create(path)?);
+    let mut writer = BufWriter::with_capacity(256 * 1024, File::create(path)?);
     let mut checksum = crc32fast::Hasher::new();
     for chunk in text.chunks() {
         checksum.update(chunk.as_bytes());

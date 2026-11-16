@@ -182,6 +182,71 @@ fn restore_page(path: &std::path::Path, bookmark: &LogBookmark) -> super::Render
 }
 
 #[test]
+fn assembled_view_keeps_existing_no_trailing_newline_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("terminated.log");
+    fs::write(&path, "last line\n").unwrap();
+    let mut reader = LogReader::open(&path, None).unwrap();
+    let page = reader.render_page(0, PageOptions::default()).unwrap();
+
+    assert!(page.rows[0].terminated);
+    assert_eq!(assemble_page_text(&page), "last line");
+}
+
+#[test]
+fn appending_a_partial_utf8_character_refreshes_the_last_page_without_following() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial-utf8.log");
+    fs::write(&path, b"hit \xf0\x9f").unwrap();
+    let options = PageOptions {
+        max_rows: 4,
+        max_row_bytes: 128,
+    };
+    let mut reader = LogReader::open(&path, None).unwrap();
+    let before = reader.render_page(0, options).unwrap();
+    assert!(before.eof);
+    assert_eq!(assemble_page_text(&before), "hit ");
+
+    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writer.write_all(b"\x99\x82\nnext").unwrap();
+    drop(writer);
+
+    let mut reader = LogReader::open(&path, None).unwrap();
+    let after = append_page(&mut reader, before, options, false).unwrap();
+    assert_eq!(assemble_page_text(&after), "hit 🙂\nnext");
+    assert!(after.eof);
+}
+
+#[test]
+fn appending_a_partial_utf8_character_refreshes_a_full_page_without_following() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("full-page.log");
+    fs::write(&path, b"first\nhit \xf0\x9f").unwrap();
+    let options = PageOptions {
+        max_rows: 2,
+        max_row_bytes: 128,
+    };
+    let mut reader = LogReader::open(&path, None).unwrap();
+    let before = reader.render_page(0, options).unwrap();
+    assert_eq!(before.rows.len(), options.max_rows);
+    assert_eq!(assemble_page_text(&before), "first\nhit ");
+    assert_eq!(before.next_offset, 10);
+    assert!(
+        before.eof,
+        "a page ending at a partial character must refresh on append"
+    );
+
+    let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writer.write_all(b"\x99\x82\nnext\n").unwrap();
+    drop(writer);
+
+    let mut reader = LogReader::open(&path, None).unwrap();
+    let after = append_page(&mut reader, before, options, false).unwrap();
+    assert_eq!(assemble_page_text(&after), "first\nhit 🙂");
+    assert!(!after.eof);
+}
+
+#[test]
 fn append_reuses_complete_rows_and_extends_one_partial_row() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.log");
