@@ -5,13 +5,69 @@ use gpui_kit::*;
 use super::{Workspace, disk_status::DiskStatus, file_name, recent_warning, syntax_for};
 use crate::{
     files::{self, FileTarget, OpenedFile},
+    log_file::LogBookmark,
     recent_files::RecentFile,
+    text_format::TextEncoding,
 };
+
+#[derive(Clone, Copy)]
+pub(super) struct OpenMode {
+    windows_1251: bool,
+    view_as_log: bool,
+}
+
+impl OpenMode {
+    pub(super) const NORMAL: Self = Self {
+        windows_1251: false,
+        view_as_log: false,
+    };
+    pub(super) const WINDOWS_1251: Self = Self {
+        windows_1251: true,
+        view_as_log: false,
+    };
+    pub(super) const LOG: Self = Self {
+        windows_1251: false,
+        view_as_log: true,
+    };
+    pub(super) const LOG_1251: Self = Self {
+        windows_1251: true,
+        view_as_log: true,
+    };
+
+    pub(super) fn from_recent(file: &RecentFile) -> Self {
+        Self {
+            windows_1251: file.windows_1251,
+            view_as_log: file.view_as_log,
+        }
+    }
+}
+
+enum LoadedDocument {
+    Text(OpenedFile),
+    Log(FileTarget),
+}
+
+fn read_document(path: &Path, mode: OpenMode) -> std::io::Result<LoadedDocument> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Выберите обычный файл.",
+        ));
+    }
+    if mode.view_as_log || metadata.len() > files::MAX_EDITOR_BYTES {
+        Ok(LoadedDocument::Log(FileTarget::from_picker(
+            path.to_path_buf(),
+        )?))
+    } else {
+        files::open(path, mode.windows_1251).map(LoadedDocument::Text)
+    }
+}
 
 impl Workspace {
     pub(super) fn open_picker(
         &mut self,
-        windows_1251: bool,
+        mode: OpenMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -33,7 +89,7 @@ impl Workspace {
                 this.busy = None;
                 match result {
                     Ok(Ok(Some(paths))) if !paths.is_empty() => {
-                        this.open_paths(paths, windows_1251, window, cx);
+                        this.open_paths(paths, mode, window, cx);
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
@@ -51,7 +107,7 @@ impl Workspace {
     pub(super) fn open_paths(
         &mut self,
         paths: Vec<PathBuf>,
-        windows_1251: bool,
+        mode: OpenMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -71,12 +127,15 @@ impl Workspace {
             for path in paths {
                 let name = file_name(&path);
                 match executor
-                    .spawn(async move { files::open(&path, windows_1251) })
+                    .spawn(async move { read_document(&path, mode) })
                     .await
                 {
-                    Ok(opened) => match this
-                        .update_in(cx, |this, window, cx| this.show_opened(opened, window, cx))
-                    {
+                    Ok(opened) => match this.update_in(cx, |this, window, cx| match opened {
+                        LoadedDocument::Text(document) => this.show_opened(document, window, cx),
+                        LoadedDocument::Log(target) => {
+                            this.show_log(target, mode.windows_1251, window, cx)
+                        }
+                    }) {
                         Ok(file) => opened_files.push(file),
                         Err(_) => return,
                     },
@@ -120,9 +179,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> RecentFile {
         if let Some(doc) = self.documents.iter_mut().find(|doc| {
-            doc.file
-                .as_ref()
-                .is_some_and(|file| file.path == opened.target.path)
+            doc.log.is_none()
+                && doc
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.path == opened.target.path)
         }) {
             let id = doc.id;
             if !doc.dirty && (doc.placeholder || doc.file.as_ref() != Some(&opened.target)) {
@@ -152,12 +213,53 @@ impl Workspace {
         recent
     }
 
+    fn show_log(
+        &mut self,
+        target: FileTarget,
+        windows_1251: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> RecentFile {
+        let mut recent = RecentFile::new(
+            target.path.clone(),
+            if windows_1251 {
+                TextEncoding::Windows1251
+            } else {
+                TextEncoding::Utf8
+            },
+        );
+        recent.view_as_log = true;
+        if let Some(doc) = self.documents.iter().find(|doc| {
+            doc.log.is_some()
+                && doc
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.path == target.path)
+                && matches!(doc.format.encoding, TextEncoding::Windows1251) == windows_1251
+        }) {
+            self.select(doc.id, window, cx);
+            return recent;
+        }
+        if self.documents.len() == 1
+            && self.active_document().file.is_none()
+            && !self.active_document().dirty
+        {
+            self.documents.clear();
+        }
+        let id = self.insert_log(target, windows_1251, LogBookmark::default(), window, cx);
+        self.select(id, window, cx);
+        recent
+    }
+
     pub(super) fn save(&mut self, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy.is_some() {
             return;
         }
         self.error = None;
         let doc = self.active_document();
+        if doc.log.is_some() {
+            return;
+        }
         if doc.placeholder {
             self.error = Some("Откройте исходный файл, когда он станет доступен.".into());
             cx.notify();

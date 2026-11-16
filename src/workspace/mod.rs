@@ -1,6 +1,7 @@
 mod disk_status;
 mod file_actions;
 mod json_action;
+mod launches;
 mod search_panel;
 mod session_runtime;
 mod view;
@@ -14,7 +15,10 @@ use gpui_kit::*;
 
 use crate::{
     files::{FileTarget, OpenedFile},
-    recent_files::RecentFiles,
+    log_file::LogBookmark,
+    log_viewer::LogViewer,
+    recent_files::{RecentFile, RecentFiles},
+    single_instance::SingleInstance,
     text_format::{TextEncoding, TextFormat},
 };
 
@@ -30,6 +34,7 @@ struct Document {
     disk_status: disk_status::DiskStatus,
     placeholder: bool,
     restored_scroll: Option<[f32; 2]>,
+    log: Option<Entity<LogViewer>>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -37,7 +42,7 @@ pub(crate) struct Workspace {
     documents: Vec<Document>,
     active: u64,
     next_id: u64,
-    closed: Vec<(PathBuf, bool)>,
+    closed: Vec<RecentFile>,
     recent: RecentFiles,
     busy: Option<&'static str>,
     error: Option<SharedString>,
@@ -53,6 +58,7 @@ impl Workspace {
     pub(crate) fn new(
         paths: Vec<PathBuf>,
         startup: crate::session::Startup,
+        instance: SingleInstance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -73,6 +79,7 @@ impl Workspace {
             session_error: None,
         };
         this.init_session(startup, window, cx);
+        this.listen_for_launches(instance, window, cx);
         let workspace = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             workspace
@@ -81,7 +88,7 @@ impl Workspace {
         });
 
         if !paths.is_empty() {
-            this.open_paths(paths, false, window, cx);
+            this.open_paths(paths, file_actions::OpenMode::NORMAL, window, cx);
         }
         this
     }
@@ -160,6 +167,7 @@ impl Workspace {
             disk_status: disk_status::DiskStatus::Current,
             placeholder: false,
             restored_scroll: None,
+            log: None,
             _subscriptions: [change, cursor],
         });
         id
@@ -171,10 +179,43 @@ impl Workspace {
                 self.error = None;
                 self.active = id;
             }
-            let focus = doc.editor.read(cx).focus_handle(cx);
+            let focus = if let Some(log) = &doc.log {
+                self.search = None;
+                log.read(cx).focus_handle(cx)
+            } else {
+                doc.editor.read(cx).focus_handle(cx)
+            };
             window.focus(&focus, cx);
             cx.notify();
         }
+    }
+
+    fn insert_log(
+        &mut self,
+        target: FileTarget,
+        windows_1251: bool,
+        bookmark: LogBookmark,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let path = target.path.clone();
+        let format = TextFormat::for_encoding(if windows_1251 {
+            TextEncoding::Windows1251
+        } else {
+            TextEncoding::Utf8
+        });
+        let id = self.insert_document(Some(target), String::new(), format, window, cx);
+        let viewer = cx.new(|cx| LogViewer::new(path, windows_1251, bookmark, window, cx));
+        self.documents.last_mut().expect("log tab inserted").log = Some(viewer);
+        id
+    }
+
+    fn log_is_writing(&self, cx: &App) -> bool {
+        self.documents.iter().any(|doc| {
+            doc.log
+                .as_ref()
+                .is_some_and(|log| log.read(cx).writing_file())
+        })
     }
 
     fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -189,6 +230,13 @@ impl Workspace {
         let Some(doc) = self.documents.iter().find(|doc| doc.id == id) else {
             return;
         };
+        if doc
+            .log
+            .as_ref()
+            .is_some_and(|log| log.read(cx).writing_file())
+        {
+            return;
+        }
         if !doc.dirty {
             self.remove_tab(id, window, cx);
             return;
@@ -206,10 +254,9 @@ impl Workspace {
             if self.closed.len() == 16 {
                 self.closed.remove(0);
             }
-            self.closed.push((
-                file.path,
-                matches!(doc.format.encoding, TextEncoding::Windows1251),
-            ));
+            let mut recent = RecentFile::new(file.path, doc.format.encoding);
+            recent.view_as_log = doc.log.is_some();
+            self.closed.push(recent);
         }
 
         if self.documents.is_empty() {
@@ -224,14 +271,15 @@ impl Workspace {
 
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy.is_none()
-            && let Some((path, windows_1251)) = self.closed.pop()
+            && let Some(file) = self.closed.pop()
         {
-            self.open_paths(vec![path], windows_1251, window, cx);
+            let mode = file_actions::OpenMode::from_recent(&file);
+            self.open_paths(vec![file.path], mode, window, cx);
         }
     }
 
     fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.busy.is_some() {
+        if self.busy.is_some() || self.log_is_writing(cx) {
             return false;
         }
         if self.session.is_some() {
@@ -292,6 +340,11 @@ impl Workspace {
     }
 
     fn toggle_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(viewer) = self.active_document().log.clone() {
+            viewer.update(cx, |viewer, cx| viewer.toggle_wrap(window, cx));
+            cx.notify();
+            return;
+        }
         self.wrap = !self.wrap;
         for doc in &self.documents {
             doc.editor

@@ -151,7 +151,7 @@ impl SearchPanel {
                     ))
                     .child(option_button(
                         "scope-all",
-                        "Все вкладки",
+                        "Все текстовые вкладки",
                         OptionToggle::AllTabs,
                         self.options.all_tabs,
                         cx,
@@ -199,6 +199,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(log) = self.active_document().log.clone() {
+            log.update(cx, |viewer, cx| viewer.open_search(window, cx));
+            return;
+        }
         if self.search.is_none() {
             self.search = Some(SearchPanel::new(window, cx));
         }
@@ -250,7 +254,7 @@ impl Workspace {
             return;
         }
         let active = self.active_document();
-        if active.placeholder && command.replaces() {
+        if active.log.is_some() || (active.placeholder && command.replaces()) {
             return;
         }
         let origin = Hit {
@@ -272,7 +276,7 @@ impl Workspace {
         let documents = self
             .documents
             .iter()
-            .filter(|doc| query.all_tabs || doc.id == origin.tab)
+            .filter(|doc| doc.log.is_none() && (query.all_tabs || doc.id == origin.tab))
             .map(|doc| {
                 versions.push((doc.id, doc.revision));
                 Source {

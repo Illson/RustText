@@ -11,6 +11,7 @@ fn capture(text: &str) -> Capture {
                 reversed: true,
                 scroll: [0., -154.],
                 draft_revision: Some(1),
+                log: None,
             }],
             active: 0,
             window: WindowSize {
@@ -98,4 +99,42 @@ fn named_drafts_do_not_change_the_underlying_file() {
         document.canonicalize().unwrap()
     );
     assert_eq!(fs::read_to_string(document).unwrap(), "saved copy");
+}
+
+#[test]
+fn a_log_bookmark_round_trips_without_storing_file_contents() {
+    use crate::log_file::observe;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let log_path = temporary.path().join("view-only.log");
+    fs::write(&log_path, "first\nsecond\n").unwrap();
+    let (observation, _) = observe(&log_path, None).unwrap();
+    let bookmark = LogBookmark {
+        identity: Some(observation.stamp.identity),
+        size: observation.stamp.len,
+        offset: 6,
+        hidden: 6,
+        auto_refresh: false,
+        follow_end: true,
+    };
+    let mut state = capture("");
+    state.state.tabs[0].file = Some(FileTarget::from_picker(log_path).unwrap());
+    state.state.tabs[0].draft_revision = None;
+    state.state.tabs[0].log = Some(bookmark.clone());
+    state.drafts[0] = None;
+    let directory = temporary.path().join("journal");
+    let mut journal = Journal::open(directory).unwrap();
+
+    journal.commit(1, state).unwrap();
+
+    let record = fs::read_dir(journal.record_path(1))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(record, ["manifest.json"]);
+    let (restored, warning) = journal.restore();
+    assert!(warning.is_none());
+    let restored = restored.unwrap();
+    assert_eq!(restored.drafts, [None]);
+    assert_eq!(restored.state.tabs[0].log.as_ref(), Some(&bookmark));
 }

@@ -9,7 +9,7 @@ use std::{
 use gpui_kit::component::input::Rope;
 use serde::{Deserialize, Serialize};
 
-use crate::{files::FileTarget, text_format::TextFormat};
+use crate::{files::FileTarget, log_file::LogBookmark, text_format::TextFormat};
 
 const FORMAT_VERSION: u32 = 1;
 const RECORD_PREFIX: &str = "checkpoint-";
@@ -39,6 +39,8 @@ pub struct Tab {
     pub reversed: bool,
     pub scroll: [f32; 2],
     pub draft_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<LogBookmark>,
 }
 
 pub struct Capture {

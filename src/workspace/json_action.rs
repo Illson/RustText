@@ -9,7 +9,7 @@ impl Workspace {
             return;
         }
         let doc = self.active_document();
-        if doc.placeholder {
+        if doc.placeholder || doc.log.is_some() {
             return;
         }
         let newline = if doc.format.line_endings_label() == "CRLF" {

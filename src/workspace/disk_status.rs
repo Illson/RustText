@@ -62,6 +62,7 @@ impl Workspace {
                 let Ok(files) = this.update_in(cx, |this, _, _| {
                     this.documents
                         .iter()
+                        .filter(|doc| doc.log.is_none())
                         .filter_map(|doc| doc.file.clone().map(|file| (doc.id, file)))
                         .collect::<Vec<_>>()
                 }) else {

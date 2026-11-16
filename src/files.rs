@@ -10,7 +10,7 @@ use tempfile::NamedTempFile;
 
 use crate::text_format::TextFormat;
 
-const MAX_EDITOR_BYTES: u64 = 50 * 1024 * 1024;
+pub(crate) const MAX_EDITOR_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileVersion {

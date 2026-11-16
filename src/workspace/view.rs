@@ -10,7 +10,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use super::{Document, Workspace, file_name};
+use super::{Document, Workspace, file_actions::OpenMode, file_name};
 use crate::{go_to_line, search::Command};
 
 actions!(
@@ -73,13 +73,16 @@ impl Render for DraggedTab {
 
 impl Workspace {
     fn go_to_line(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_none() {
+        if self.busy.is_none() && self.active_document().log.is_none() {
             go_to_line::open(self.active_document().editor.clone(), window, cx);
         }
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.busy.is_some();
+        let log = self.active_document().log.as_ref();
+        let can_edit = !busy && log.is_none();
+        let wrap = log.map_or(self.wrap, |viewer| viewer.read(cx).wraps_lines());
         div()
             .h(px(46.0))
             .flex()
@@ -112,10 +115,11 @@ impl Workspace {
                             .disabled(busy)
                             .tooltip("Открыть файл · Ctrl+O")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_picker(false, window, cx)
+                                this.open_picker(OpenMode::NORMAL, window, cx)
                             })),
                     )
                     .child(self.recent_files_button(cx))
+                    .child(self.open_log_button(cx))
                     .child(
                         Button::new("open-1251")
                             .small()
@@ -124,7 +128,7 @@ impl Workspace {
                             .disabled(busy)
                             .tooltip("Открыть файл в кодировке Windows-1251")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_picker(true, window, cx)
+                                this.open_picker(OpenMode::WINDOWS_1251, window, cx)
                             })),
                     )
                     .child(
@@ -132,7 +136,7 @@ impl Workspace {
                             .small()
                             .ghost()
                             .label("Сохранить")
-                            .disabled(busy)
+                            .disabled(!can_edit)
                             .tooltip("Сохранить файл · Ctrl+S")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.save(false, window, cx)),
@@ -143,7 +147,7 @@ impl Workspace {
                             .small()
                             .ghost()
                             .label("Сохранить как…")
-                            .disabled(busy)
+                            .disabled(!can_edit)
                             .tooltip("Сохранить как · Ctrl+Shift+S")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.save(true, window, cx)),
@@ -171,7 +175,7 @@ impl Workspace {
                             .ghost()
                             .label("JSON")
                             .tooltip("Форматировать JSON · Ctrl+Shift+J")
-                            .disabled(busy)
+                            .disabled(!can_edit)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.format_json(window, cx)),
                             ),
@@ -181,7 +185,7 @@ impl Workspace {
                             .small()
                             .ghost()
                             .label("Перенос")
-                            .selected(self.wrap)
+                            .selected(wrap)
                             .tooltip("Перенос длинных строк")
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.toggle_wrap(window, cx)),
@@ -192,6 +196,7 @@ impl Workspace {
                             .small()
                             .ghost()
                             .label("−")
+                            .disabled(log.is_some())
                             .tooltip("Уменьшить шрифт")
                             .on_click(cx.listener(|this, _, _, cx| this.zoom(-1.0, cx))),
                     )
@@ -200,10 +205,37 @@ impl Workspace {
                             .small()
                             .ghost()
                             .label("+")
+                            .disabled(log.is_some())
                             .tooltip("Увеличить шрифт")
                             .on_click(cx.listener(|this, _, _, cx| this.zoom(1.0, cx))),
                     ),
             )
+    }
+
+    fn open_log_button(&self, cx: &Context<Self>) -> impl IntoElement {
+        let workspace = cx.entity().downgrade();
+        Button::new("open-as-log")
+            .small()
+            .ghost()
+            .label("Лог")
+            .disabled(self.busy.is_some())
+            .dropdown_menu(move |menu, _, _| {
+                let utf8 = workspace.clone();
+                let cp1251 = workspace.clone();
+                menu.item(
+                    PopupMenuItem::new("Открыть как лог").on_click(move |_, window, cx| {
+                        let _ =
+                            utf8.update(cx, |this, cx| this.open_picker(OpenMode::LOG, window, cx));
+                    }),
+                )
+                .item(PopupMenuItem::new("Открыть лог в Windows-1251").on_click(
+                    move |_, window, cx| {
+                        let _ = cp1251.update(cx, |this, cx| {
+                            this.open_picker(OpenMode::LOG_1251, window, cx)
+                        });
+                    },
+                ))
+            })
     }
 
     fn recent_files_button(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -230,7 +262,7 @@ impl Workspace {
                                 let _ = workspace.update(cx, |this, cx| {
                                     this.open_paths(
                                         vec![entry.path.clone()],
-                                        entry.windows_1251,
+                                        OpenMode::from_recent(&entry),
                                         window,
                                         cx,
                                     );
@@ -395,6 +427,18 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = self.active_document();
+        let body = if let Some(log) = &doc.log {
+            log.clone().into_any_element()
+        } else {
+            Editor::new(&doc.editor)
+                .readonly(doc.placeholder)
+                .bordered(false)
+                .h_full()
+                .w_full()
+                .font_family("Consolas")
+                .text_size(px(self.font_size))
+                .into_any_element()
+        };
         div()
             .id("rusttext")
             .key_context("RustText")
@@ -404,9 +448,9 @@ impl Render for Workspace {
             .bg(rgb(0x10161f))
             .text_color(rgb(0xe4eaf2))
             .on_action(cx.listener(|this, _: &NewFile, window, cx| this.new_file(window, cx)))
-            .on_action(
-                cx.listener(|this, _: &OpenFile, window, cx| this.open_picker(false, window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
+                this.open_picker(OpenMode::NORMAL, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(false, window, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save(true, window, cx)))
             .on_action(
@@ -432,23 +476,20 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.0, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(-1.0, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                this.open_paths(paths.paths().to_vec(), false, window, cx);
+                this.open_paths(paths.paths().to_vec(), OpenMode::NORMAL, window, cx);
             }))
             .child(self.toolbar(cx))
             .child(self.tabs(cx))
             .children(self.search_panel(cx))
             .child(
-                div().flex_1().min_h_0().w_full().overflow_hidden().child(
-                    Editor::new(&doc.editor)
-                        .readonly(doc.placeholder)
-                        .bordered(false)
-                        .h_full()
-                        .w_full()
-                        .font_family("Consolas")
-                        .text_size(px(self.font_size)),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(body),
             )
-            .child(self.status(doc, cx))
+            .children(doc.log.is_none().then(|| self.status(doc, cx)))
     }
 }
 

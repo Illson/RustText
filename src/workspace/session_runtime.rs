@@ -111,6 +111,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> u64 {
+        if let (Some(bookmark), Some(file)) = (tab.log.clone(), tab.file.clone()) {
+            return self.insert_log(
+                file,
+                matches!(tab.format.encoding, TextEncoding::Windows1251),
+                bookmark,
+                window,
+                cx,
+            );
+        }
         let dirty = draft.is_some();
         let fresh = tab.file.as_ref().map(|file| {
             files::open(
@@ -311,6 +320,7 @@ impl Workspace {
                     reversed: editor.is_selection_reversed(),
                     scroll,
                     draft_revision: doc.dirty.then_some(doc.revision),
+                    log: doc.log.as_ref().map(|log| log.read(cx).bookmark()),
                 }
             })
             .collect();

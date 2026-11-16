@@ -16,6 +16,8 @@ const MAX_FILES: usize = 16;
 pub(crate) struct RecentFile {
     pub path: PathBuf,
     pub windows_1251: bool,
+    #[serde(default)]
+    pub view_as_log: bool,
 }
 
 impl RecentFile {
@@ -23,6 +25,7 @@ impl RecentFile {
         Self {
             path,
             windows_1251: matches!(encoding, TextEncoding::Windows1251),
+            view_as_log: false,
         }
     }
 }

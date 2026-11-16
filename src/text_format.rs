@@ -66,6 +66,12 @@ impl LineEndings {
 }
 
 impl TextFormat {
+    pub(crate) fn for_encoding(encoding: TextEncoding) -> Self {
+        Self {
+            encoding,
+            ..Self::default()
+        }
+    }
     pub fn line_endings_label(self) -> &'static str {
         match self.endings {
             LineEndings::Lf => "LF",
