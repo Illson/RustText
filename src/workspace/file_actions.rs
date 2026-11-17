@@ -300,6 +300,9 @@ impl Workspace {
                 doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             }
             let recent = RecentFile::new(opened.target.path, doc.format.encoding);
+            if reopen.replace_text {
+                self.invalidate_document_search(id, cx);
+            }
             self.schedule_json_validation(id, cx);
             self.select(id, window, cx);
             return recent;

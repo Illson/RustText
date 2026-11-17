@@ -1,6 +1,7 @@
 use gpui_kit::component::{
     Disableable, Selectable, Sizable,
     button::{Button, ButtonVariants},
+    checkbox::Checkbox,
     input::{Input, InputEvent, InputState},
     label::Label,
 };
@@ -38,7 +39,9 @@ pub(super) struct SearchPanel {
     replacing: bool,
     visible_matches: Vec<SearchMatch>,
     match_revisions: Vec<(u64, u64)>,
-    match_highlight: Option<SearchHighlight>,
+    match_highlight: Option<(u64, SearchHighlight)>,
+    only_current: bool,
+    all_highlights: Vec<(u64, SearchHighlight)>,
     request_generation: u64,
     message: SharedString,
     task: Option<Task<()>>,
@@ -94,6 +97,8 @@ impl SearchPanel {
             visible_matches: Vec::new(),
             match_revisions: Vec::new(),
             match_highlight: None,
+            only_current: true,
+            all_highlights: Vec::new(),
             request_generation: 0,
             message: "Введите текст поиска".into(),
             task: None,
@@ -110,7 +115,10 @@ impl SearchPanel {
     }
 
     fn clear_match_highlight(&mut self, cx: &mut Context<Workspace>) {
-        if let Some(highlight) = self.match_highlight.take() {
+        for (_, highlight) in self.all_highlights.drain(..) {
+            highlight.clear(cx);
+        }
+        if let Some((_, highlight)) = self.match_highlight.take() {
             highlight.clear(cx);
         }
     }
@@ -284,6 +292,17 @@ impl SearchPanel {
                         self.options.whole_word,
                         cx,
                     ))
+                    .child(
+                        Checkbox::new("search-only-current")
+                            .label("Только текущее")
+                            .checked(self.only_current)
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                if let Some(panel) = &mut this.search {
+                                    panel.only_current = *checked;
+                                }
+                                this.refresh_all_search_highlights(cx);
+                            })),
+                    )
                     .child(option_button(
                         "scope-all",
                         "Вкладки",
@@ -339,21 +358,78 @@ impl SearchPanel {
 }
 
 impl Workspace {
+    pub(super) fn invalidate_document_search(&mut self, tab: u64, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.search else {
+            return;
+        };
+        invalidate_document_highlights(
+            tab,
+            &mut panel.all_highlights,
+            &mut panel.match_highlight,
+            |highlight| highlight.clear(cx),
+        );
+        panel.cancellation.store(true, Ordering::Relaxed);
+        panel.task = None;
+        panel.cancellation = Arc::new(AtomicBool::new(false));
+        panel.request_generation = panel.request_generation.wrapping_add(1);
+        panel.last_hit = None;
+        panel.resume = None;
+        panel.visible_matches.clear();
+        panel.match_revisions.clear();
+    }
+
+    pub(super) fn refresh_all_search_highlights(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.search else {
+            return;
+        };
+        if self.active == 0 {
+            panel.clear_match_highlight(cx);
+            return;
+        }
+        let query = panel.query(cx);
+        let visible = visible_highlight_tabs(
+            &self.layout,
+            self.active,
+            panel.only_current,
+            query.all_tabs,
+        );
+        sync_all_highlights(
+            &visible,
+            &mut panel.all_highlights,
+            cx,
+            |cx, highlight| highlight.clear(cx),
+            |cx, id| {
+                let document = self
+                    .documents
+                    .iter()
+                    .find(|document| document.log.is_none() && document.id == id)?;
+                SearchHighlight::visible_matches(
+                    &document.editor,
+                    &query,
+                    &document.search_viewport,
+                    cx,
+                )
+            },
+        );
+    }
+
     fn show_search_highlight(
         &mut self,
         tab: u64,
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(panel) = &mut self.search {
-            panel.clear_match_highlight(cx);
+        if let Some(panel) = &mut self.search
+            && let Some((_, highlight)) = panel.match_highlight.take()
+        {
+            highlight.clear(cx);
         }
         let Some(document) = self.documents.iter().find(|document| document.id == tab) else {
             return;
         };
         let highlight = SearchHighlight::new(&document.editor, range, cx);
         if let Some(panel) = &mut self.search {
-            panel.match_highlight = Some(highlight);
+            panel.match_highlight = Some((tab, highlight));
         }
     }
 
@@ -401,33 +477,38 @@ impl Workspace {
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_search(cx);
+        self.select(self.active, window, cx);
+    }
+
+    pub(super) fn clear_search(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = &mut self.search {
             panel.cancellation.store(true, Ordering::Relaxed);
             panel.clear_match_highlight(cx);
         }
-        if self.search.take().is_some() {
-            self.select(self.active, window, cx);
-        }
+        self.search = None;
     }
 
     fn reset_search(&mut self, cx: &mut Context<Self>) {
-        if let Some(panel) = &mut self.search {
-            panel.cancellation.store(true, Ordering::Relaxed);
-            panel.task = None;
-            panel.cancellation = Arc::new(AtomicBool::new(false));
-            panel.last_hit = None;
-            panel.clear_match_highlight(cx);
-            panel.request_generation = panel.request_generation.wrapping_add(1);
-            panel.visible_matches.clear();
-            panel.match_revisions.clear();
-            panel.resume = None;
-            panel.message = if panel.options.all_tabs {
-                "Поиск по всем вкладкам. Замена доступна в текущей вкладке.".into()
-            } else {
-                "Enter — показать совпадения".into()
-            };
-            cx.notify();
-        }
+        let Some(panel) = &mut self.search else {
+            return;
+        };
+        panel.cancellation.store(true, Ordering::Relaxed);
+        panel.task = None;
+        panel.cancellation = Arc::new(AtomicBool::new(false));
+        panel.last_hit = None;
+        panel.clear_match_highlight(cx);
+        panel.request_generation = panel.request_generation.wrapping_add(1);
+        panel.visible_matches.clear();
+        panel.match_revisions.clear();
+        panel.resume = None;
+        panel.message = if panel.options.all_tabs {
+            "Поиск по всем вкладкам. Замена доступна в текущей вкладке.".into()
+        } else {
+            "Enter — показать совпадения".into()
+        };
+        self.refresh_all_search_highlights(cx);
+        cx.notify();
     }
 
     pub(super) fn run_search(
@@ -451,12 +532,15 @@ impl Workspace {
             range: active.editor.read(cx).selected_range(),
         };
         let origin_revision = active.revision;
+        self.refresh_all_search_highlights(cx);
         let panel = self.search.as_mut().expect("search panel is present");
         let query = panel.query(cx);
         if panel.task.is_some() || (command.replaces() && query.all_tabs) {
             return;
         }
-        panel.clear_match_highlight(cx);
+        if let Some((_, highlight)) = panel.match_highlight.take() {
+            highlight.clear(cx);
+        }
         panel.request_generation = panel.request_generation.wrapping_add(1);
         let request_generation = panel.request_generation;
 
@@ -719,3 +803,72 @@ fn option_button(
         })
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_search_option(toggle, cx)))
 }
+
+fn visible_highlight_tabs(
+    layout: &crate::layout::Layout,
+    active: u64,
+    only_current: bool,
+    all_tabs: bool,
+) -> Vec<u64> {
+    if active == 0 || only_current {
+        return Vec::new();
+    }
+    layout
+        .groups()
+        .into_iter()
+        .filter_map(|(_, group)| group.active)
+        .filter(|id| all_tabs || *id == active)
+        .collect()
+}
+
+fn sync_all_highlights<T, C>(
+    visible: &[u64],
+    all: &mut Vec<(u64, T)>,
+    ctx: &mut C,
+    mut clear: impl FnMut(&mut C, T),
+    mut build: impl FnMut(&mut C, u64) -> Option<T>,
+) {
+    let mut retained = Vec::new();
+    for (id, highlight) in all.drain(..) {
+        if visible.contains(&id) {
+            retained.push((id, highlight));
+        } else {
+            clear(ctx, highlight);
+        }
+    }
+    *all = retained;
+    for &id in visible {
+        if all.iter().any(|(existing, _)| *existing == id) {
+            continue;
+        }
+        if let Some(highlight) = build(ctx, id) {
+            all.push((id, highlight));
+        }
+    }
+}
+
+fn invalidate_document_highlights<T>(
+    tab: u64,
+    all: &mut Vec<(u64, T)>,
+    current: &mut Option<(u64, T)>,
+    mut clear: impl FnMut(T),
+) {
+    let mut retained = Vec::new();
+    for (id, highlight) in all.drain(..) {
+        if id == tab {
+            clear(highlight);
+        } else {
+            retained.push((id, highlight));
+        }
+    }
+    *all = retained;
+    if current.as_ref().is_some_and(|(id, _)| *id == tab)
+        && let Some((_, highlight)) = current.take()
+    {
+        clear(highlight);
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/search_panel.rs"]
+mod tests;

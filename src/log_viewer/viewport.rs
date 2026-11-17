@@ -201,6 +201,7 @@ impl LogViewer {
         self.bookmark.offset = loaded.start;
         self.bookmark.hidden = loaded.hidden;
         self.observation = Some(loaded.observation);
+        let keep_steady = self.search_highlight.is_some();
         if let Some(highlight) = self.search_highlight.take() {
             highlight.clear(cx);
         }
@@ -217,12 +218,13 @@ impl LogViewer {
             (self.search_match.as_ref(), self.page.as_ref())
             && let Some(range) = local_match_range(page, *offset, match_range.as_ref())
         {
-            self.search_highlight = Some(crate::search_highlight::SearchHighlight::new(
-                &self.viewer,
-                range,
-                cx,
-            ));
+            self.search_highlight = Some(if keep_steady {
+                crate::search_highlight::SearchHighlight::steady(&self.viewer, range, cx)
+            } else {
+                crate::search_highlight::SearchHighlight::new(&self.viewer, range, cx)
+            });
         }
+        self.refresh_all_search_highlights(cx);
         self.start_index(window, cx);
         self.refresh_minimap(window, cx);
 

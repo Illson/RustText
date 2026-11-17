@@ -78,6 +78,7 @@ pub(crate) struct LogViewer {
     index_paused: bool,
     indexing: Option<Progress>,
     viewer: Entity<EditorState>,
+    search_viewport: crate::search_highlight::ViewportTracker,
     scroll_bottom: Rc<Cell<Pixels>>,
     wrap: bool,
     percentage: Entity<InputState>,
@@ -85,6 +86,7 @@ pub(crate) struct LogViewer {
     search: Option<LogSearch>,
     search_match: Option<(u64, Option<Range<usize>>)>,
     search_highlight: Option<crate::search_highlight::SearchHighlight>,
+    all_search_highlight: Option<crate::search_highlight::SearchHighlight>,
     notice: Option<SharedString>,
     reading: bool,
     pending_destination: Option<Destination>,
@@ -111,6 +113,8 @@ impl LogViewer {
         let scroll_bottom = Rc::new(Cell::new(px(0.)));
         let editor_scroll_bottom = scroll_bottom.clone();
         let editor_scrollbar_drag = Rc::new(global_scrollbar::DragState::default());
+        let search_viewport = crate::search_highlight::ViewportTracker::default();
+        let rendered_viewport = search_viewport.clone();
         let viewer = cx.new(|cx| {
             let mut editor = EditorState::new(window, cx)
                 .language("text")
@@ -119,6 +123,7 @@ impl LogViewer {
                 .scroll_beyond_last_line(Some(0))
                 .soft_wrap(true);
             editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, window, cx| {
+                rendered_viewport.record(&scroll, window);
                 global_scrollbar::render(
                     scroll,
                     log_viewer.clone(),
@@ -153,6 +158,7 @@ impl LogViewer {
             index_paused: false,
             indexing: None,
             viewer,
+            search_viewport,
             scroll_bottom,
             wrap: true,
             percentage,
@@ -160,6 +166,7 @@ impl LogViewer {
             search: None,
             search_match: None,
             search_highlight: None,
+            all_search_highlight: None,
             notice: None,
             reading: false,
             pending_destination: None,

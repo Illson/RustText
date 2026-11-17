@@ -18,11 +18,17 @@ pub(crate) const WIDTH: f32 = 88.0;
 const SAMPLES: usize = 160;
 const SAMPLE_BYTES: usize = 256;
 
-pub(crate) fn install(editor: &Entity<EditorState>, cx: &mut App) {
+pub(crate) fn install(
+    editor: &Entity<EditorState>,
+    cx: &mut App,
+) -> crate::search_highlight::ViewportTracker {
+    let viewport = crate::search_highlight::ViewportTracker::default();
+    let rendered_viewport = viewport.clone();
     let weak = editor.downgrade();
     let dragging = Rc::new(Cell::new(None));
     editor.update(cx, |editor, _| {
-        editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, _, cx| {
+        editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, window, cx| {
+            rendered_viewport.record(&scroll, window);
             let samples = weak
                 .upgrade()
                 .map(|editor| {
@@ -42,6 +48,7 @@ pub(crate) fn install(editor: &Entity<EditorState>, cx: &mut App) {
             render(scroll, &samples, weak.clone(), dragging.clone()).into_any_element()
         })));
     });
+    viewport
 }
 
 pub(crate) fn sample_file(

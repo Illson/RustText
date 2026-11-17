@@ -21,9 +21,11 @@ pub(crate) use view::bind_keys;
 
 use std::{
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
 };
 
+use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::input::{EditorState, InputEvent, Rope};
 use gpui_kit::*;
 
@@ -43,6 +45,7 @@ struct Document {
     file: Option<FileTarget>,
     format: TextFormat,
     editor: Entity<EditorState>,
+    search_viewport: crate::search_highlight::ViewportTracker,
     saved_text: Option<Rope>,
     dirty: bool,
     revision: u64,
@@ -183,21 +186,28 @@ impl Workspace {
         let language = file
             .as_ref()
             .map_or_else(|| "text".to_owned(), |file| syntax_for(&file.path));
-        let json_enabled = json_validation::should_validate(
-            file.as_ref().map(|file| file.path.as_path()),
-            text.chars(),
-        );
+        let json_enabled = file
+            .as_ref()
+            .is_some_and(|file| json_validation::is_json_file(&file.path));
 
         let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
+            let mut state = EditorState::new(window, cx)
                 .line_number(true)
                 .searchable(false)
                 .soft_wrap(self.wrap)
                 .language(language)
-                .default_value(text)
+                .default_value(text);
+            state.set_scrollbar_renderer(Some(Rc::new(|scroll, _, _| {
+                Scrollbar::new(&scroll)
+                    .axis(scroll.axis())
+                    .mode(ScrollbarMode::Always)
+                    .styles(|_| crate::appearance::scrollbar_styles())
+                    .into_any_element()
+            })));
+            state
         });
         let saved_text = editor.read(cx).text().clone();
-        crate::minimap::install(&editor, cx);
+        let search_viewport = crate::minimap::install(&editor, cx);
         let change =
             cx.subscribe_in(
                 &editor,
@@ -229,6 +239,7 @@ impl Workspace {
             file,
             format,
             editor,
+            search_viewport,
             saved_text: Some(saved_text),
             dirty: false,
             revision: 0,
@@ -241,14 +252,14 @@ impl Workspace {
             log: None,
             _subscriptions: [change, cursor],
         });
-        self.schedule_json_validation(id, cx);
         self.layout.attach(id);
+        self.schedule_json_validation(id, cx);
         id
     }
 
     fn select(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.documents.iter().position(|doc| doc.id == id) {
-            if self.active != 0 && self.active != id {
+            if self.active != id {
                 self.remember_position(self.active, window, cx);
             }
             self.layout.select(id);
@@ -261,12 +272,13 @@ impl Workspace {
             self.tab_scroll.scroll_to_item(index);
             let log = self.documents[index].log.clone();
             let focus = if let Some(log) = log {
-                self.search = None;
+                self.clear_search(cx);
                 log.read(cx).focus_handle(cx)
             } else {
                 self.documents[index].editor.read(cx).focus_handle(cx)
             };
             window.focus(&focus, cx);
+            self.refresh_all_search_highlights(cx);
             cx.notify();
         }
     }
@@ -323,6 +335,7 @@ impl Workspace {
         self.active = 0;
         self.versions = None;
         self.fallback_focus.focus(window, cx);
+        self.refresh_all_search_highlights(cx);
         cx.notify();
     }
 
@@ -378,7 +391,7 @@ impl Workspace {
         }
         self.closed.push(ClosedTab { tab, draft });
 
-        self.search = None;
+        self.clear_search(cx);
         if let Some(next) = self.layout.active() {
             self.select(next, window, cx);
         } else {
