@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, TitleBar,
     button::{Button, ButtonVariants},
@@ -9,7 +11,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use super::{Document, Workspace, display_path, file_actions::OpenMode};
+use super::{Document, Workspace, disk_status::DiskStatus, display_path, file_actions::OpenMode};
 use crate::{appearance, go_to_line, search::Command};
 
 actions!(
@@ -75,37 +77,130 @@ impl Render for DraggedTab {
     }
 }
 
-impl Workspace {
-    fn document_header(&self, doc: &Document) -> impl IntoElement {
-        div()
-            .h(px(34.))
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .bg(rgb(appearance::SURFACE))
-            .border_b_1()
-            .border_color(rgb(appearance::BORDER))
-            .child(div().max_w(px(280.)).truncate().child(doc.name.clone()))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(if doc.dirty {
-                        appearance::ACCENT
-                    } else {
-                        appearance::MUTED
-                    }))
-                    .child(if doc.placeholder {
-                        "ТОЛЬКО ЧТЕНИЕ"
-                    } else if doc.dirty {
-                        "НЕ СОХРАНЕНО"
-                    } else {
-                        "ТЕКСТ"
-                    }),
-            )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentSaveState {
+    ReadOnly,
+    Unsaved,
+    UntitledClean,
+    Saved,
+    DiskChanged,
+    DiskMissing,
+    DiskUnavailable,
+}
+
+impl DocumentSaveState {
+    fn from_document(
+        placeholder: bool,
+        dirty: bool,
+        has_file: bool,
+        disk_status: DiskStatus,
+    ) -> Self {
+        if placeholder {
+            Self::ReadOnly
+        } else if dirty {
+            Self::Unsaved
+        } else if !has_file {
+            Self::UntitledClean
+        } else {
+            match disk_status {
+                DiskStatus::Current => Self::Saved,
+                DiskStatus::Changed => Self::DiskChanged,
+                DiskStatus::Missing => Self::DiskMissing,
+                DiskStatus::Unavailable => Self::DiskUnavailable,
+            }
+        }
     }
 
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "Только чтение",
+            Self::Unsaved | Self::UntitledClean => "Не сохранён",
+            Self::Saved => "Сохранён",
+            Self::DiskChanged => "Изменён на диске",
+            Self::DiskMissing => "Отсутствует",
+            Self::DiskUnavailable => "Недоступен",
+        }
+    }
+
+    fn color(self) -> u32 {
+        match self {
+            Self::ReadOnly | Self::UntitledClean => appearance::MUTED,
+            Self::Unsaved => appearance::ACCENT,
+            Self::Saved => appearance::SUCCESS,
+            Self::DiskChanged | Self::DiskMissing | Self::DiskUnavailable => appearance::ERROR,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatusMessage {
+    text: SharedString,
+    is_error: bool,
+}
+
+impl StatusMessage {
+    fn color(&self) -> u32 {
+        if self.is_error {
+            appearance::ERROR
+        } else {
+            appearance::MUTED
+        }
+    }
+}
+
+fn status_message(
+    error: Option<&SharedString>,
+    busy: Option<&'static str>,
+    disk_status: DiskStatus,
+    placeholder: bool,
+    session_error: Option<&SharedString>,
+    session_notice: Option<&SharedString>,
+    file_path: Option<&Path>,
+) -> StatusMessage {
+    if let Some(error) = error {
+        StatusMessage {
+            text: error.clone(),
+            is_error: true,
+        }
+    } else if let Some(busy) = busy {
+        StatusMessage {
+            text: busy.into(),
+            is_error: false,
+        }
+    } else if let Some(notice) = disk_status.notice() {
+        StatusMessage {
+            text: notice.into(),
+            is_error: true,
+        }
+    } else if placeholder {
+        StatusMessage {
+            text: "Файл снова доступен. Откройте его заново.".into(),
+            is_error: false,
+        }
+    } else if let Some(error) = session_error {
+        StatusMessage {
+            text: error.clone(),
+            is_error: true,
+        }
+    } else if let Some(notice) = session_notice {
+        StatusMessage {
+            text: notice.clone(),
+            is_error: false,
+        }
+    } else if let Some(path) = file_path {
+        StatusMessage {
+            text: display_path(path).into(),
+            is_error: false,
+        }
+    } else {
+        StatusMessage {
+            text: "Новый документ".into(),
+            is_error: false,
+        }
+    }
+}
+
+impl Workspace {
     fn go_to_line(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy.is_none()
             && let Some(doc) = self.documents.iter().find(|doc| doc.id == self.active)
@@ -492,6 +587,8 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .bg(rgb(appearance::SURFACE))
+                    .border_b_1()
+                    .border_color(rgb(appearance::BORDER))
                     .child(self.tabs(id, group, window, cx))
                     .child(
                         Button::new(("split-horizontal", id))
@@ -540,10 +637,6 @@ impl Workspace {
                         },
                     ),
             )
-            .children(
-                doc.filter(|doc| doc.log.is_none())
-                    .map(|doc| self.document_header(doc)),
-            )
             .child(
                 div()
                     .flex_1()
@@ -561,46 +654,47 @@ impl Workspace {
 
     fn status(&self, doc: &Document, cx: &mut Context<Self>) -> impl IntoElement {
         let cursor = doc.editor.read(cx).cursor_position();
-        let message = if let Some(error) = &self.error {
-            error.clone()
-        } else if let Some(busy) = self.busy {
-            busy.into()
-        } else if let Some(notice) = doc.disk_status.notice() {
-            notice.into()
-        } else if doc.placeholder {
-            "Файл снова доступен. Откройте его заново.".into()
-        } else if let Some(notice) = self.session_error.as_ref().or(self.session_notice.as_ref()) {
-            notice.clone()
-        } else if let Some(file) = &doc.file {
-            display_path(&file.path).into()
-        } else {
-            "Новый документ".into()
-        };
+        let message = status_message(
+            self.error.as_ref(),
+            self.busy,
+            doc.disk_status,
+            doc.placeholder,
+            self.session_error.as_ref(),
+            self.session_notice.as_ref(),
+            doc.file.as_ref().map(|file| file.path.as_path()),
+        );
+        let message_color = message.color();
+        let save_state = DocumentSaveState::from_document(
+            doc.placeholder,
+            doc.dirty,
+            doc.file.is_some(),
+            doc.disk_status,
+        );
 
         div()
             .flex()
             .flex_shrink_0()
             .items_center()
+            .overflow_hidden()
             .h(px(31.0))
-            .gap_4()
-            .px_4()
+            .gap_2()
+            .px_3()
             .bg(rgb(appearance::SURFACE))
             .border_t_1()
             .border_color(rgb(appearance::BORDER))
             .text_sm()
             .text_color(rgb(appearance::MUTED))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .when(
-                        self.error.is_some()
-                            || doc.disk_status.notice().is_some()
-                            || self.session_error.is_some(),
-                        |el| el.text_color(rgb(appearance::ERROR)),
-                    )
-                    .child(Label::new(message)),
+                div().flex_1().min_w_0().truncate().child(
+                    Label::new(message.text)
+                        .truncate()
+                        .text_color(rgb(message_color)),
+                ),
+            )
+            .child(
+                Label::new(save_state.label())
+                    .flex_shrink_0()
+                    .text_color(rgb(save_state.color())),
             )
             .child(
                 Button::new("go-to-line")
@@ -615,8 +709,18 @@ impl Workspace {
                     .tooltip("Перейти к строке · Ctrl+G")
                     .on_click(cx.listener(|this, _, window, cx| this.go_to_line(window, cx))),
             )
-            .child(Label::new(doc.format.encoding.label()))
-            .child(Label::new(doc.format.line_endings_label()))
+            .child(
+                Label::new(doc.format.encoding.label())
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(appearance::MUTED)),
+            )
+            .child(
+                Label::new(doc.format.line_endings_label())
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(appearance::MUTED)),
+            )
     }
 
     fn jump_to_json_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -836,3 +940,7 @@ impl Render for Workspace {
             .children(self.settings_panel(cx))
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/workspace_view.rs"]
+mod tests;
