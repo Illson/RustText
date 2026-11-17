@@ -29,6 +29,7 @@ $entries = [ordered]@{
     'rusttext.exe' = [IO.Path]::GetFullPath($ExecutablePath)
     'README.md' = [IO.Path]::GetFullPath($ReadmePath)
     'docs/verification.md' = [IO.Path]::GetFullPath($VerificationPath)
+    'licenses/gpui-base-APACHE.txt' = Join-Path $repositoryRoot 'vendor/gpui-base/LICENSE-APACHE'
 }
 foreach ($file in $entries.Values) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
