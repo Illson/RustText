@@ -363,6 +363,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_document_opt().is_none() {
+            return;
+        }
         if let Some(log) = self.active_document().log.clone() {
             log.update(cx, |viewer, cx| viewer.open_search(window, cx));
             return;
@@ -389,7 +392,7 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let active = self.active_document();
+        let active = self.active_document_opt()?;
         let can_replace = active.log.is_none() && !active.placeholder;
         let busy = self.busy.is_some() || self.applying_update();
         self.search
@@ -433,6 +436,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_document_opt().is_none() {
+            return;
+        }
         if self.busy.is_some() || self.applying_update() || self.search.is_none() {
             return;
         }

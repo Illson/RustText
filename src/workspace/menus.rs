@@ -24,20 +24,16 @@ impl Workspace {
             .clone();
         let searching = self.search.is_some()
             || self
-                .active_document()
-                .log
-                .as_ref()
+                .active_document_opt()
+                .and_then(|doc| doc.log.as_ref())
                 .is_some_and(|log| log.read(cx).search_visible());
         div()
-            .h(px(36.))
+            .flex_1()
+            .min_w_0()
             .flex()
-            .flex_shrink_0()
             .items_center()
             .gap_1()
-            .px_3()
-            .bg(rgb(appearance::SURFACE))
-            .border_b_1()
-            .border_color(rgb(appearance::BORDER))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .flex()
@@ -65,17 +61,21 @@ impl Workspace {
     }
 
     fn menu_focus(&self, cx: &App) -> FocusHandle {
-        let doc = self.active_document();
-        doc.log.as_ref().map_or_else(
-            || doc.editor.read(cx).focus_handle(cx),
-            |log| log.read(cx).focus_handle(cx),
+        self.active_document_opt().map_or_else(
+            || self.fallback_focus.clone(),
+            |doc| {
+                doc.log.as_ref().map_or_else(
+                    || doc.editor.read(cx).focus_handle(cx),
+                    |log| log.read(cx).focus_handle(cx),
+                )
+            },
         )
     }
 
     fn file_menu_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let busy = self.busy.is_some() || self.applying_update();
-        let doc = self.active_document();
-        let can_save = !busy && doc.log.is_none() && !doc.placeholder;
+        let doc = self.active_document_opt();
+        let can_save = !busy && doc.is_some_and(|doc| doc.log.is_none() && !doc.placeholder);
         let closed_entries = self.closed_tab_entries();
         let can_reopen = !busy && !closed_entries.is_empty();
         let recent_entries = self.recent.entries().to_vec();
@@ -210,10 +210,11 @@ impl Workspace {
     }
 
     fn tools_menu_button(&self, cx: &Context<Self>) -> impl IntoElement {
-        let doc = self.active_document();
-        let log = doc.log.clone();
-        let can_edit =
-            self.busy.is_none() && !self.applying_update() && log.is_none() && !doc.placeholder;
+        let doc = self.active_document_opt();
+        let log = doc.and_then(|doc| doc.log.clone());
+        let can_edit = self.busy.is_none()
+            && !self.applying_update()
+            && doc.is_some_and(|doc| doc.log.is_none() && !doc.placeholder);
         let wrap = log
             .as_ref()
             .map_or(self.wrap, |log| log.read(cx).wraps_lines());

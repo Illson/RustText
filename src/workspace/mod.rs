@@ -58,6 +58,8 @@ struct ClosedTab {
 
 pub(crate) struct Workspace {
     documents: Vec<Document>,
+    layout: crate::layout::Layout,
+    fallback_focus: FocusHandle,
     active: u64,
     next_id: u64,
     tab_scroll: ScrollHandle,
@@ -86,6 +88,8 @@ impl Workspace {
         let (recent, recent_error) = RecentFiles::load();
         let mut this = Self {
             documents: Vec::new(),
+            layout: crate::layout::Layout::default(),
+            fallback_focus: cx.focus_handle(),
             active: 0,
             next_id: 1,
             tab_scroll: ScrollHandle::new(),
@@ -115,14 +119,18 @@ impl Workspace {
             this.open_paths(paths, file_actions::OpenMode::NORMAL, window, cx);
         }
         this.check_for_updates(window, cx);
+        if this.active_document_opt().is_none() {
+            this.fallback_focus.focus(window, cx);
+        }
         this
     }
 
     fn active_document(&self) -> &Document {
-        self.documents
-            .iter()
-            .find(|doc| doc.id == self.active)
-            .expect("active tab must exist")
+        self.active_document_opt().expect("active tab must exist")
+    }
+
+    fn active_document_opt(&self) -> Option<&Document> {
+        self.documents.iter().find(|doc| doc.id == self.active)
     }
 
     fn add_document(
@@ -176,16 +184,25 @@ impl Workspace {
             state
         });
         let saved_text = editor.read(cx).text().clone();
-        let change = cx.subscribe(&editor, move |this, editor, event, cx| {
-            if matches!(event, InputEvent::Change)
-                && let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id)
-            {
-                doc.dirty = doc.saved_text.as_ref() != Some(editor.read(cx).text());
-                doc.revision = doc.revision.wrapping_add(1);
-                cx.notify();
-                this.schedule_json_validation(id, cx);
-            }
-        });
+        let change =
+            cx.subscribe_in(
+                &editor,
+                window,
+                move |this, editor, event, window, cx| match event {
+                    InputEvent::Change => {
+                        if let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id) {
+                            doc.dirty = doc.saved_text.as_ref() != Some(editor.read(cx).text());
+                            doc.revision = doc.revision.wrapping_add(1);
+                            cx.notify();
+                            this.schedule_json_validation(id, cx);
+                        }
+                    }
+                    InputEvent::Focus if this.active != id || this.layout.active() != Some(id) => {
+                        this.select(id, window, cx);
+                    }
+                    _ => {}
+                },
+            );
         let cursor = cx.observe(&editor, move |this, _, cx| {
             if this.active == id {
                 cx.notify();
@@ -211,22 +228,25 @@ impl Workspace {
         if json_enabled {
             self.schedule_json_validation(id, cx);
         }
+        self.layout.attach(id);
         id
     }
 
     fn select(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.documents.iter().position(|doc| doc.id == id) {
+            self.layout.select(id);
             if self.active != id {
                 self.error = None;
+                self.session_notice = None;
                 self.active = id;
             }
             self.tab_scroll.scroll_to_item(index);
-            let doc = &self.documents[index];
-            let focus = if let Some(log) = &doc.log {
+            let log = self.documents[index].log.clone();
+            let focus = if let Some(log) = log {
                 self.search = None;
                 log.read(cx).focus_handle(cx)
             } else {
-                doc.editor.read(cx).focus_handle(cx)
+                self.documents[index].editor.read(cx).focus_handle(cx)
             };
             window.focus(&focus, cx);
             cx.notify();
@@ -266,7 +286,39 @@ impl Workspace {
             return;
         }
         self.error = None;
+        self.session_notice = None;
         self.add_document(None, window, cx);
+    }
+
+    pub(super) fn focus_empty_group(
+        &mut self,
+        group_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.layout.focus(group_id) {
+            return;
+        }
+        self.active = 0;
+        self.fallback_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn close_empty_group(
+        &mut self,
+        group_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy.is_some() || self.applying_update() || !self.layout.close_empty_group(group_id)
+        {
+            return;
+        }
+        if let Some(next) = self.layout.active() {
+            self.select(next, window, cx);
+        } else {
+            self.focus_empty_group(self.layout.focused, window, cx);
+        }
     }
 
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -296,18 +348,19 @@ impl Workspace {
             return;
         };
         let doc = self.documents.remove(index);
+        self.layout.remove(id);
         let (tab, draft) = doc.session_snapshot(doc.file.is_none(), cx);
         if self.closed.len() == MAX_CLOSED_TABS {
             self.closed.remove(0);
         }
         self.closed.push(ClosedTab { tab, draft });
 
-        if self.documents.is_empty() {
-            self.add_document(None, window, cx);
-        } else if id == self.active {
-            let next = self.documents[index.min(self.documents.len() - 1)].id;
+        self.search = None;
+        if let Some(next) = self.layout.active() {
             self.select(next, window, cx);
         } else {
+            self.active = 0;
+            self.fallback_focus.focus(window, cx);
             cx.notify();
         }
     }
@@ -415,23 +468,8 @@ impl Workspace {
         .detach();
     }
 
-    fn reorder_tabs(&mut self, dragged_id: u64, target_id: u64, cx: &mut Context<Self>) {
-        if self.applying_update() {
-            return;
-        }
-        let from = self.documents.iter().position(|doc| doc.id == dragged_id);
-        let to = self.documents.iter().position(|doc| doc.id == target_id);
-        if let (Some(from), Some(to)) = (from, to)
-            && from != to
-        {
-            let tab = self.documents.remove(from);
-            self.documents.insert(to, tab);
-            cx.notify();
-        }
-    }
-
     fn toggle_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(viewer) = self.active_document().log.clone() {
+        if let Some(viewer) = self.active_document_opt().and_then(|doc| doc.log.clone()) {
             viewer.update(cx, |viewer, cx| viewer.toggle_wrap(window, cx));
             cx.notify();
             return;

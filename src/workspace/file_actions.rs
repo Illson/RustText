@@ -135,6 +135,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.session_notice = None;
         self.load_paths(paths, mode, None, window, cx);
     }
 
@@ -163,6 +164,7 @@ impl Workspace {
 
         self.busy = Some("Открытие…");
         self.error = None;
+        self.session_notice = None;
         let executor = cx.background_executor().clone();
         let mut recent = self.recent.clone();
         cx.notify();
@@ -274,12 +276,7 @@ impl Workspace {
             return recent;
         }
 
-        if self.documents.len() == 1
-            && self.active_document().file.is_none()
-            && !self.active_document().dirty
-        {
-            self.documents.clear();
-        }
+        self.discard_empty_tab();
         let recent = RecentFile::new(opened.target.path.clone(), opened.format.encoding);
         self.add_document(Some(opened), window, cx);
         if let Some(tab) = restore {
@@ -319,12 +316,7 @@ impl Workspace {
             self.select(doc.id, window, cx);
             return recent;
         }
-        if self.documents.len() == 1
-            && self.active_document().file.is_none()
-            && !self.active_document().dirty
-        {
-            self.documents.clear();
-        }
+        self.discard_empty_tab();
         let id = self.insert_log(
             target,
             windows_1251,
@@ -336,12 +328,28 @@ impl Workspace {
         recent
     }
 
+    fn discard_empty_tab(&mut self) {
+        if self.documents.len() == 1
+            && let Some(doc) = self.active_document_opt()
+            && doc.file.is_none()
+            && !doc.dirty
+            && self.layout.groups().len() == 1
+        {
+            self.layout.remove(doc.id);
+            self.documents.clear();
+            self.active = 0;
+        }
+    }
+
     pub(super) fn save(&mut self, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy.is_some() {
             return;
         }
         self.error = None;
-        let doc = self.active_document();
+        self.session_notice = None;
+        let Some(doc) = self.active_document_opt() else {
+            return;
+        };
         if doc.log.is_some() {
             return;
         }

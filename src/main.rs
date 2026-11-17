@@ -4,6 +4,7 @@ mod appearance;
 mod files;
 mod go_to_line;
 mod json_format;
+mod layout;
 mod log_file;
 mod log_io;
 mod log_trim;
@@ -18,7 +19,7 @@ mod text_format;
 mod updater;
 mod workspace;
 
-use gpui_kit::component::{Theme, ThemeMode, set_locale};
+use gpui_kit::component::{Theme, ThemeMode, TitleBar, set_locale};
 use gpui_kit::*;
 
 use workspace::Workspace;
@@ -86,11 +87,7 @@ fn main() {
                 WindowBounds::Windowed(bounds)
             }),
             window_min_size: Some(min_size),
-            titlebar: Some(TitlebarOptions {
-                title: Some("RustText".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
+            ..TitleBar::window_options()
         };
         open_window(options, cx, |window, cx| {
             cx.new(|cx| Workspace::new(paths, startup, instance, window, cx))

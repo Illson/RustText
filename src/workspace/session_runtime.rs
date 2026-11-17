@@ -114,8 +114,6 @@ impl Workspace {
         self.session_notice = startup.warning.map(Into::into);
         if let Some(recovered) = startup.recovered {
             self.restore_session(recovered, window, cx);
-        } else {
-            self.add_document(None, window, cx);
         }
         if let Some(journal) = startup.journal {
             self.session = Some(SessionWriter {
@@ -162,14 +160,29 @@ impl Workspace {
             .collect();
 
         let mut active = None;
+        let mut remap = std::collections::HashMap::new();
         for (index, (tab, draft)) in state.tabs.into_iter().zip(drafts).enumerate() {
+            let saved_id = tab.id;
             let id = self.restore_tab(tab, draft, window, cx);
+            remap.insert(saved_id, id);
             if index == state.active {
                 active = Some(id);
             }
         }
+        let ids: Vec<_> = self.documents.iter().map(|doc| doc.id).collect();
+        self.layout = state.layout.map_or_else(
+            || crate::layout::Layout::new(ids.clone(), active),
+            |mut layout| {
+                layout.remap(&remap);
+                layout.normalize(&ids);
+                layout
+            },
+        );
+        active = self.layout.active();
         if let Some(active) = active {
             self.select(active, window, cx);
+        } else {
+            self.active = 0;
         }
     }
 
@@ -393,6 +406,7 @@ impl Workspace {
             .unzip();
         Capture {
             state: State {
+                layout: Some(self.layout.clone()),
                 tabs,
                 closed,
                 active: self

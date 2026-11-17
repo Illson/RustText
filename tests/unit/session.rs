@@ -4,6 +4,7 @@ use crate::text_format::TextEncoding;
 fn capture(text: &str) -> Capture {
     Capture {
         state: State {
+            layout: None,
             tabs: vec![Tab {
                 id: 1,
                 file: None,
@@ -27,6 +28,53 @@ fn capture(text: &str) -> Capture {
         drafts: vec![Some(Rope::from(text))],
         closed_drafts: Vec::new(),
     }
+}
+
+#[test]
+fn roundtrips_an_empty_workspace_and_closed_draft() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    let mut empty = capture("closed draft");
+    empty.state.closed = std::mem::take(&mut empty.state.tabs);
+    empty.closed_drafts = std::mem::take(&mut empty.drafts);
+    empty.state.layout = Some(crate::layout::Layout::default());
+    journal.commit(1, empty).unwrap();
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    let recovered = recovered.unwrap();
+    assert!(recovered.state.tabs.is_empty());
+    assert!(recovered.drafts.is_empty());
+    assert_eq!(recovered.closed_drafts, [Some("closed draft".into())]);
+    assert_eq!(recovered.state.layout.unwrap().active(), None);
+}
+
+#[test]
+fn legacy_sessions_default_to_one_group() {
+    let mut legacy = serde_json::to_value(capture("draft").state).unwrap();
+    legacy.as_object_mut().unwrap().remove("layout");
+    let state: State = serde_json::from_value(legacy).unwrap();
+    assert!(state.layout.is_none());
+}
+
+#[test]
+fn roundtrips_an_empty_focused_group() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    let mut snapshot = capture("draft");
+    let mut layout = crate::layout::Layout::new(vec![1], Some(1));
+    let empty_group = layout.split(1, crate::layout::Axis::Horizontal).unwrap();
+    layout.focus(empty_group);
+    snapshot.state.layout = Some(layout);
+    journal.commit(1, snapshot).unwrap();
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    let state = recovered.unwrap().state;
+    let mut layout = state.layout.unwrap();
+    layout.remap(&std::collections::HashMap::from([(1, 42)]));
+    layout.normalize(&[42]);
+    assert_eq!(layout.active(), None);
+    assert_eq!(layout.focused, empty_group);
+    assert_eq!(layout.groups().len(), 2);
 }
 
 #[test]
