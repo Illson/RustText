@@ -37,6 +37,8 @@ pub struct State {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tab {
+    #[serde(default)]
+    pub json_validation_disabled: bool,
     pub id: u64,
     pub file: Option<FileTarget>,
     pub format: TextFormat,

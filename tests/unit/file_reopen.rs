@@ -5,6 +5,7 @@ use crate::{files::FileTarget, session::Tab, text_format::TextEncoding};
 
 fn closed_view(file: FileTarget) -> Tab {
     Tab {
+        json_validation_disabled: false,
         id: 1,
         file: Some(file),
         format: crate::text_format::TextFormat::for_encoding(TextEncoding::Windows1251),

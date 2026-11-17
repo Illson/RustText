@@ -46,6 +46,8 @@ struct Document {
     disk_status: disk_status::DiskStatus,
     placeholder: bool,
     json_status: Option<json_validation::Status>,
+    json_validation_disabled: bool,
+    json_validation_generation: u64,
     restored_scroll: Option<[f32; 2]>,
     log: Option<Entity<LogViewer>>,
     _subscriptions: [Subscription; 2],
@@ -163,9 +165,10 @@ impl Workspace {
         let language = file
             .as_ref()
             .map_or_else(|| "text".to_owned(), |file| syntax_for(&file.path));
-        let json_enabled = file
-            .as_ref()
-            .is_some_and(|file| json_validation::is_json_file(&file.path));
+        let json_enabled = json_validation::should_validate(
+            file.as_ref().map(|file| file.path.as_path()),
+            text.chars(),
+        );
 
         let editor = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
@@ -221,13 +224,13 @@ impl Workspace {
             disk_status: disk_status::DiskStatus::Current,
             placeholder: false,
             json_status: json_enabled.then_some(json_validation::Status::Checking),
+            json_validation_disabled: false,
+            json_validation_generation: 0,
             restored_scroll: None,
             log: None,
             _subscriptions: [change, cursor],
         });
-        if json_enabled {
-            self.schedule_json_validation(id, cx);
-        }
+        self.schedule_json_validation(id, cx);
         self.layout.attach(id);
         id
     }

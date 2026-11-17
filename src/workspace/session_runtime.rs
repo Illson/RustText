@@ -49,6 +49,7 @@ impl Document {
         let include_draft = include_draft && self.dirty;
         (
             Tab {
+                json_validation_disabled: self.json_validation_disabled,
                 id: self.id,
                 file: self.file.clone(),
                 format: self.format,
@@ -194,6 +195,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> u64 {
         let selection = tab.selection.clone();
+        let json_validation_disabled = tab.json_validation_disabled;
         let reversed = tab.reversed;
         let scroll = tab.scroll;
         if let (Some(bookmark), Some(file)) = (tab.log.clone(), tab.file.clone()) {
@@ -248,6 +250,8 @@ impl Workspace {
 
         let id = self.insert_document(file, text, format, window, cx);
         let doc = self.documents.last_mut().expect("restored tab exists");
+        doc.json_validation_disabled = json_validation_disabled;
+        doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
         doc.disk_status = status;
         doc.placeholder = placeholder;
         if placeholder {
@@ -260,6 +264,7 @@ impl Workspace {
         }
 
         doc.restore_view(selection, reversed, scroll, cx);
+        self.schedule_json_validation(id, cx);
         id
     }
 

@@ -220,6 +220,8 @@ impl Workspace {
             .map_or(self.wrap, |log| log.read(cx).wraps_lines());
         let focus = self.menu_focus(cx);
         let generator_workspace = cx.entity().downgrade();
+        let json_workspace = cx.entity().downgrade();
+        let json_disabled = doc.is_some_and(|doc| doc.json_validation_disabled);
         let can_generate = self.busy.is_none() && !self.applying_update();
         Button::new("tools-menu")
             .small()
@@ -227,11 +229,24 @@ impl Workspace {
             .label("Инструменты")
             .dropdown_menu(move |menu, window, cx| {
                 let generator_workspace = generator_workspace.clone();
+                let json_workspace = json_workspace.clone();
                 let menu = menu
                     .action_context(focus.clone())
                     .min_w(px(280.))
                     .scrollable(true)
                     .label("Текст")
+                    .item(
+                        PopupMenuItem::new(if json_disabled {
+                            "Включить проверку JSON"
+                        } else {
+                            "Отключить проверку JSON"
+                        })
+                        .disabled(!can_edit)
+                        .on_click(move |_, _, cx| {
+                            let _ = json_workspace
+                                .update(cx, |this, cx| this.toggle_json_validation(cx));
+                        }),
+                    )
                     .item(
                         PopupMenuItem::new("Генератор строк…")
                             .disabled(!can_generate)

@@ -663,6 +663,13 @@ impl Workspace {
                 .border_color(rgb(appearance::ERROR))
                 .child(Label::new(message).text_sm())
                 .child(div().flex_1())
+                .child(
+                    Button::new("dismiss-json-validation")
+                        .small()
+                        .ghost()
+                        .label("Отключить проверку")
+                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_json_validation(cx))),
+                )
                 .when(invalid, |element| {
                     element.child(
                         Button::new("json-error-location")
