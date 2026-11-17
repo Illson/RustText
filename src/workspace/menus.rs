@@ -28,12 +28,17 @@ impl Workspace {
                 .and_then(|doc| doc.log.as_ref())
                 .is_some_and(|log| log.read(cx).search_visible());
         div()
+            .h(px(34.))
             .flex_1()
             .min_w_0()
             .flex()
+            .flex_shrink_0()
             .items_center()
             .gap_1()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .px_3()
+            .bg(rgb(appearance::SURFACE))
+            .border_b_1()
+            .border_color(rgb(appearance::BORDER))
             .child(
                 div()
                     .flex()
@@ -61,14 +66,12 @@ impl Workspace {
     }
 
     fn menu_focus(&self, cx: &App) -> FocusHandle {
-        self.active_document_opt().map_or_else(
-            || self.fallback_focus.clone(),
-            |doc| {
-                doc.log.as_ref().map_or_else(
-                    || doc.editor.read(cx).focus_handle(cx),
-                    |log| log.read(cx).focus_handle(cx),
-                )
-            },
+        let Some(doc) = self.active_document_opt() else {
+            return self.fallback_focus.clone();
+        };
+        doc.log.as_ref().map_or_else(
+            || doc.editor.read(cx).focus_handle(cx),
+            |log| log.read(cx).focus_handle(cx),
         )
     }
 
@@ -222,8 +225,10 @@ impl Workspace {
         let focus = self.menu_focus(cx);
         let generator_workspace = cx.entity().downgrade();
         let comparison_workspace = cx.entity().downgrade();
+        let versions_workspace = cx.entity().downgrade();
         let json_workspace = cx.entity().downgrade();
         let json_disabled = doc.is_some_and(|doc| doc.json_validation_disabled);
+        let can_show_versions = can_edit && doc.is_some_and(|doc| doc.file.is_some());
         let can_generate = self.busy.is_none() && !self.applying_update();
         Button::new("tools-menu")
             .small()
@@ -232,12 +237,21 @@ impl Workspace {
             .dropdown_menu(move |menu, window, cx| {
                 let generator_workspace = generator_workspace.clone();
                 let comparison_workspace = comparison_workspace.clone();
+                let versions_workspace = versions_workspace.clone();
                 let json_workspace = json_workspace.clone();
                 let menu = menu
                     .action_context(focus.clone())
                     .min_w(px(280.))
                     .scrollable(true)
                     .label("Текст")
+                    .item(
+                        PopupMenuItem::new("Версии файла…")
+                            .disabled(!can_show_versions)
+                            .on_click(move |_, window, cx| {
+                                let _ = versions_workspace
+                                    .update(cx, |this, cx| this.open_versions(window, cx));
+                            }),
+                    )
                     .item(
                         PopupMenuItem::new(if json_disabled {
                             "Включить проверку JSON"

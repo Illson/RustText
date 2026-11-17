@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod appearance;
+mod file_versions;
 mod files;
 mod go_to_line;
 mod json_format;

@@ -12,6 +12,8 @@ mod search_panel;
 mod session_runtime;
 mod template_generator;
 mod updates;
+mod version_actions;
+mod versions_panel;
 mod view;
 
 pub(crate) use associations::register_for_current_user;
@@ -20,6 +22,7 @@ pub(crate) use view::bind_keys;
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
 };
 
 use gpui_kit::base::{Scrollbar, ScrollbarMode};
@@ -65,6 +68,8 @@ pub(crate) struct Workspace {
     layout: crate::layout::Layout,
     fallback_focus: FocusHandle,
     home: home::Home,
+    version_store: Option<Arc<crate::file_versions::VersionStore>>,
+    versions: Option<versions_panel::VersionsPanel>,
     active: u64,
     next_id: u64,
     tab_scroll: ScrollHandle,
@@ -92,18 +97,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let (recent, recent_error) = RecentFiles::load();
+        let (version_store, version_error) = match crate::file_versions::VersionStore::load() {
+            Ok(store) => (Some(Arc::new(store)), None),
+            Err(error) => (
+                None,
+                Some(format!("История версий недоступна. {error}").into()),
+            ),
+        };
         let mut this = Self {
             documents: Vec::new(),
             layout: crate::layout::Layout::default(),
             fallback_focus: cx.focus_handle(),
             home: home::Home::new(window, cx),
+            version_store,
+            versions: None,
             active: 0,
             next_id: 1,
             tab_scroll: ScrollHandle::new(),
             closed: Vec::new(),
             recent,
             busy: None,
-            error: recent_error.map(recent_warning),
+            error: recent_error.map(recent_warning).or(version_error),
             wrap: false,
             font_size: 15.0,
             search: None,
@@ -248,6 +262,7 @@ impl Workspace {
             }
             self.layout.select(id);
             if self.active != id {
+                self.versions = None;
                 self.error = None;
                 self.session_notice = None;
                 self.active = id;
@@ -315,6 +330,7 @@ impl Workspace {
             self.remember_position(self.active, window, cx);
         }
         self.active = 0;
+        self.versions = None;
         self.fallback_focus.focus(window, cx);
         cx.notify();
     }
@@ -376,6 +392,7 @@ impl Workspace {
             self.select(next, window, cx);
         } else {
             self.active = 0;
+            self.versions = None;
             self.fallback_focus.focus(window, cx);
             cx.notify();
         }

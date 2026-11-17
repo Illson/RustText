@@ -469,9 +469,22 @@ impl Workspace {
         let format = doc.format;
         let mut recent = self.recent.detached();
         self.busy = Some("Сохранение…");
+        let version_store = self.version_store.clone();
         cx.notify();
         let task = cx.background_spawn(async move {
+            if target.version.is_some()
+                && let Some(store) = version_store.as_ref()
+                && crate::files::FileVersion::at(&target.path).ok().flatten() == target.version
+            {
+                let _ = store.capture(&target.path, format.encoding);
+            }
             let result = files::save(target, format, &snapshot.to_string());
+            let version_error = result.as_ref().ok().and_then(|file| {
+                version_store
+                    .as_ref()?
+                    .capture(&file.path, format.encoding)
+                    .err()
+            });
             let recorded = result
                 .as_ref()
                 .ok()
@@ -479,17 +492,28 @@ impl Workspace {
             let history_error = recorded
                 .as_ref()
                 .and_then(|entry| recent.record([entry.clone()]).err());
-            (snapshot, result, recent, recorded, history_error)
+            (
+                snapshot,
+                result,
+                recent,
+                recorded,
+                history_error,
+                version_error,
+            )
         });
         cx.spawn_in(window, async move |this, cx| {
-            let (snapshot, result, recent, recorded, history_error) = task.await;
+            let (snapshot, result, recent, recorded, history_error, version_error) = task.await;
             this.update_in(cx, |this, _, cx| {
                 this.busy = None;
                 if let Some(recorded) = recorded {
                     this.recent.record_in_memory(&[recorded]);
                     this.recent.merge_loaded(recent);
                 }
-                this.error = history_error.map(recent_warning);
+                this.error = history_error.map(recent_warning).or_else(|| {
+                    version_error.map(|error| {
+                        format!("Файл сохранён, но версия не записана. {error}").into()
+                    })
+                });
                 let save_succeeded = result.is_ok();
                 match result {
                     Ok(file) => {

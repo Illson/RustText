@@ -770,5 +770,6 @@ impl Render for Workspace {
             .child(workspace)
             .children(self.template_generator_panel(cx))
             .children(self.list_comparison_panel(cx))
+            .children(self.versions_panel(cx))
     }
 }
