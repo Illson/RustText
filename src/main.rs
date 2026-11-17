@@ -5,6 +5,7 @@ mod files;
 mod go_to_line;
 mod json_format;
 mod layout;
+mod list_compare;
 mod log_file;
 mod log_io;
 mod log_trim;
