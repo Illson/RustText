@@ -21,11 +21,9 @@ pub(crate) use view::bind_keys;
 
 use std::{
     path::{Path, PathBuf},
-    rc::Rc,
     sync::Arc,
 };
 
-use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::input::{EditorState, InputEvent, Rope};
 use gpui_kit::*;
 
@@ -191,22 +189,15 @@ impl Workspace {
         );
 
         let editor = cx.new(|cx| {
-            let mut state = EditorState::new(window, cx)
+            EditorState::new(window, cx)
                 .line_number(true)
                 .searchable(false)
                 .soft_wrap(self.wrap)
                 .language(language)
-                .default_value(text);
-            state.set_scrollbar_renderer(Some(Rc::new(|scroll, _, _| {
-                Scrollbar::new(&scroll)
-                    .axis(scroll.axis())
-                    .mode(ScrollbarMode::Always)
-                    .styles(|_| crate::appearance::scrollbar_styles())
-                    .into_any_element()
-            })));
-            state
+                .default_value(text)
         });
         let saved_text = editor.read(cx).text().clone();
+        crate::minimap::install(&editor, cx);
         let change =
             cx.subscribe_in(
                 &editor,

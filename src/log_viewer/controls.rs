@@ -545,6 +545,7 @@ impl Render for LogViewer {
                     .child(
                         div().flex_1().min_w_0().h_full().child(
                             Editor::new(&self.viewer)
+                                .pr(px(crate::minimap::WIDTH))
                                 .readonly(true)
                                 .bordered(false)
                                 .h_full()

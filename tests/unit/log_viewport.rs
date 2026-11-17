@@ -450,3 +450,58 @@ fn refreshing_an_in_place_rewrite_clears_the_hidden_boundary() {
     assert_eq!((refreshed.start, refreshed.hidden), (0, 0));
     assert_eq!(refreshed.page.rows[0].text, "new");
 }
+
+#[test]
+fn drag_requests_keep_only_the_latest_target_while_a_page_is_reading() {
+    let mut pending = None;
+    assert!(!super::coalesce_destination(
+        false,
+        &mut pending,
+        Destination::Start
+    ));
+    assert!(pending.is_none());
+    assert!(super::coalesce_destination(
+        true,
+        &mut pending,
+        Destination::Percentage(20.0)
+    ));
+    assert!(super::coalesce_destination(
+        true,
+        &mut pending,
+        Destination::Percentage(80.0)
+    ));
+    assert!(matches!(
+        pending.take(),
+        Some(Destination::Percentage(80.0))
+    ));
+    assert!(pending.is_none());
+}
+
+#[test]
+fn saved_match_returns_after_visiting_a_different_page() {
+    let row = |start, text: &str| Page {
+        rows: vec![LogRow {
+            start,
+            end: start + text.len() as u64,
+            text: text.into(),
+            continues: false,
+            terminated: false,
+        }],
+        next_offset: start + text.len() as u64,
+        file_size: 500,
+        eof: false,
+    };
+    let saved = (100, 2..5);
+    assert_eq!(
+        local_match_range(&row(100, "a match"), saved.0, Some(&saved.1)),
+        Some(2..5)
+    );
+    assert_eq!(
+        local_match_range(&row(200, "other"), saved.0, Some(&saved.1)),
+        None
+    );
+    assert_eq!(
+        local_match_range(&row(100, "a match"), saved.0, Some(&saved.1)),
+        Some(2..5)
+    );
+}

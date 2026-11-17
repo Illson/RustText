@@ -429,7 +429,7 @@ impl Workspace {
                     .bordered(false)
                     .h_full()
                     .w_full()
-                    .pr(px(16.0))
+                    .pr(px(crate::minimap::WIDTH))
                     .font_family("Consolas")
                     .text_size(px(self.font_size))
                     .into_any_element()

@@ -11,6 +11,7 @@ mod log_file;
 mod log_io;
 mod log_trim;
 mod log_viewer;
+mod minimap;
 mod recent_files;
 mod search;
 mod search_highlight;

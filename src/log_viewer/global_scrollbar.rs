@@ -7,7 +7,7 @@ use gpui_kit::{
 
 use super::{LogViewer, viewport::Destination};
 
-const TRACK_WIDTH: f32 = 16.0;
+const TRACK_WIDTH: f32 = 88.0;
 const THUMB_WIDTH: f32 = 10.0;
 const MIN_THUMB_HEIGHT: f32 = 24.0;
 
@@ -86,6 +86,18 @@ pub(super) fn render(
     let thumb_height = thumb_height.max(MIN_THUMB_HEIGHT.min(track_height));
     let thumb_travel = (track_height - thumb_height).max(0.0);
     let thumb_top = global_fraction * thumb_travel;
+    let target = if seek_within_page {
+        ScrollTarget::Page(local_scroll_range)
+    } else {
+        ScrollTarget::File {
+            start: hidden,
+            travel: scrollable_span,
+        }
+    };
+    let samples = viewer
+        .upgrade()
+        .map(|viewer| viewer.read(cx).minimap_samples.clone())
+        .unwrap_or_default();
     let handle_viewer = viewer.clone();
     let handle = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -116,13 +128,14 @@ pub(super) fn render(
                 state.active.set(true);
                 let fraction = (pointer - state.offset.get()) / thumb_travel.max(1.0);
                 state.preview_fraction.set(Some(fraction.clamp(0.0, 1.0)));
+                seek(&down_viewer, fraction, target, window, cx);
                 notify(&down_viewer, cx);
                 cx.stop_propagation();
             });
 
             let state = drag_state.clone();
             let move_viewer = handle_viewer.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                 if phase.capture() && state.active.get() {
                     if !event.dragging() {
                         state.active.set(false);
@@ -133,6 +146,7 @@ pub(super) fn render(
                     let pointer = f32::from(event.position.y - track_origin);
                     let fraction = (pointer - state.offset.get()) / thumb_travel.max(1.0);
                     state.preview_fraction.set(Some(fraction.clamp(0.0, 1.0)));
+                    seek(&move_viewer, fraction, target, window, cx);
                     notify(&move_viewer, cx);
                 }
             });
@@ -218,6 +232,7 @@ pub(super) fn render(
                 .bg(rgb(crate::appearance::SURFACE))
                 .border_l_1()
                 .border_color(rgb(crate::appearance::BORDER))
+                .child(crate::minimap::preview(&samples, track_height))
                 .child(
                     div()
                         .absolute()
