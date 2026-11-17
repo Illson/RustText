@@ -118,7 +118,7 @@ fn visible_byte_ranges(editor: &EditorState, captured: Bounds<Pixels>) -> Vec<Ra
         return Vec::new();
     };
     let left = captured.left().max(input.left());
-    let right = (captured.right() - px(crate::minimap::WIDTH)).min(input.right());
+    let right = captured.right().min(input.right());
     if right <= left {
         return Vec::new();
     }

@@ -545,7 +545,6 @@ impl Render for LogViewer {
                     .child(
                         div().flex_1().min_w_0().h_full().child(
                             Editor::new(&self.viewer)
-                                .pr(px(crate::minimap::WIDTH))
                                 .readonly(true)
                                 .bordered(false)
                                 .h_full()
@@ -553,7 +552,12 @@ impl Render for LogViewer {
                                 .font_family("Consolas")
                                 .text_size(px(15.)),
                         ),
-                    ),
+                    )
+                    .child(super::global_scrollbar::strip(
+                        cx.entity().downgrade(),
+                        self.scrollbar_metrics.clone(),
+                        self.scrollbar_drag.clone(),
+                    )),
             )
             .children(self.search_panel(window, cx))
             .child(self.toolbar(cx))

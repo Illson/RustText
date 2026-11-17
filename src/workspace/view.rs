@@ -424,14 +424,21 @@ impl Workspace {
                 if let Some(log) = &doc.log {
                     return log.clone().into_any_element();
                 }
-                Editor::new(&doc.editor)
-                    .readonly(doc.placeholder || self.applying_update())
-                    .bordered(false)
-                    .h_full()
-                    .w_full()
-                    .pr(px(crate::minimap::WIDTH))
-                    .font_family("Consolas")
-                    .text_size(px(self.font_size))
+                div()
+                    .size_full()
+                    .flex()
+                    .child(
+                        div().flex_1().min_w_0().h_full().child(
+                            Editor::new(&doc.editor)
+                                .readonly(doc.placeholder || self.applying_update())
+                                .bordered(false)
+                                .h_full()
+                                .w_full()
+                                .font_family("Consolas")
+                                .text_size(px(self.font_size)),
+                        ),
+                    )
+                    .child(crate::minimap::strip(&doc.minimap))
                     .into_any_element()
             })
             .unwrap_or_else(|| {

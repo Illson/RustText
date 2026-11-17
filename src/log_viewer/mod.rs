@@ -80,6 +80,8 @@ pub(crate) struct LogViewer {
     viewer: Entity<EditorState>,
     search_viewport: crate::search_highlight::ViewportTracker,
     scroll_bottom: Rc<Cell<Pixels>>,
+    scrollbar_metrics: Rc<Cell<Option<crate::minimap::ScrollbarMetrics>>>,
+    scrollbar_drag: Rc<global_scrollbar::DragState>,
     wrap: bool,
     percentage: Entity<InputState>,
     trim_percentage: Entity<InputState>,
@@ -112,7 +114,9 @@ impl LogViewer {
         let log_viewer = cx.entity().downgrade();
         let scroll_bottom = Rc::new(Cell::new(px(0.)));
         let editor_scroll_bottom = scroll_bottom.clone();
-        let editor_scrollbar_drag = Rc::new(global_scrollbar::DragState::default());
+        let scrollbar_metrics = Rc::new(Cell::new(None));
+        let editor_scrollbar_metrics = scrollbar_metrics.clone();
+        let scrollbar_drag = Rc::new(global_scrollbar::DragState::default());
         let search_viewport = crate::search_highlight::ViewportTracker::default();
         let rendered_viewport = search_viewport.clone();
         let viewer = cx.new(|cx| {
@@ -128,7 +132,7 @@ impl LogViewer {
                     scroll,
                     log_viewer.clone(),
                     &editor_scroll_bottom,
-                    editor_scrollbar_drag.clone(),
+                    &editor_scrollbar_metrics,
                     window,
                     cx,
                 )
@@ -160,6 +164,8 @@ impl LogViewer {
             viewer,
             search_viewport,
             scroll_bottom,
+            scrollbar_metrics,
+            scrollbar_drag,
             wrap: true,
             percentage,
             trim_percentage,

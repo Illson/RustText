@@ -46,6 +46,7 @@ struct Document {
     format: TextFormat,
     editor: Entity<EditorState>,
     search_viewport: crate::search_highlight::ViewportTracker,
+    minimap: crate::minimap::MinimapState,
     saved_text: Option<Rope>,
     dirty: bool,
     revision: u64,
@@ -207,7 +208,7 @@ impl Workspace {
             state
         });
         let saved_text = editor.read(cx).text().clone();
-        let search_viewport = crate::minimap::install(&editor, cx);
+        let (search_viewport, minimap) = crate::minimap::install(&editor, cx);
         let change =
             cx.subscribe_in(
                 &editor,
@@ -240,6 +241,7 @@ impl Workspace {
             format,
             editor,
             search_viewport,
+            minimap,
             saved_text: Some(saved_text),
             dirty: false,
             revision: 0,
