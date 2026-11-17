@@ -194,6 +194,13 @@ impl LogViewer {
         self.bookmark.clone()
     }
 
+    pub(crate) fn total_line_count(&self) -> Option<u64> {
+        let observation = self.observation.as_ref()?;
+        let size = crate::log_io::align_offset(observation.stamp.len, self.encoding);
+        (self.index.scanned_to() >= size)
+            .then(|| self.index.physical_line_count(self.encoding.bom_len()))
+    }
+
     pub(crate) fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.viewer.read(cx).focus_handle(cx)
     }

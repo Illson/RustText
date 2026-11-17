@@ -186,6 +186,7 @@ impl Workspace {
             return;
         }
 
+        self.home.open = false;
         self.busy = Some("Открытие…");
         self.error = None;
         self.session_notice = None;
@@ -299,7 +300,8 @@ impl Workspace {
                 doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
                 doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             }
-            let recent = RecentFile::new(opened.target.path, doc.format.encoding);
+            let mut recent = RecentFile::new(opened.target.path, doc.format.encoding);
+            recent.line_count = Some(super::home::text_line_count(doc.editor.read(cx).text()));
             if reopen.replace_text {
                 self.invalidate_document_search(id, cx);
             }
@@ -309,8 +311,11 @@ impl Workspace {
         }
 
         self.discard_empty_tab();
-        let recent = RecentFile::new(opened.target.path.clone(), opened.format.encoding);
+        let mut recent = RecentFile::new(opened.target.path.clone(), opened.format.encoding);
         self.add_document(Some(opened), window, cx);
+        if let Some(doc) = self.documents.last() {
+            recent.line_count = Some(super::home::text_line_count(doc.editor.read(cx).text()));
+        }
         if let Some(tab) = restore {
             let doc = self.documents.last_mut().expect("opened document exists");
             let id = doc.id;
@@ -347,6 +352,10 @@ impl Workspace {
                     .is_some_and(|file| file.path == target.path)
                 && matches!(doc.format.encoding, TextEncoding::Windows1251) == windows_1251
         }) {
+            recent.line_count = doc
+                .log
+                .as_ref()
+                .and_then(|log| log.read(cx).total_line_count());
             self.select(doc.id, window, cx);
             return recent;
         }
@@ -488,10 +497,11 @@ impl Workspace {
                     .capture(&file.path, format.encoding)
                     .err()
             });
-            let recorded = result
-                .as_ref()
-                .ok()
-                .map(|file| RecentFile::new(file.path.clone(), format.encoding));
+            let recorded = result.as_ref().ok().map(|file| {
+                let mut recent = RecentFile::new(file.path.clone(), format.encoding);
+                recent.line_count = Some(super::home::text_line_count(&snapshot));
+                recent
+            });
             let history_error = recorded
                 .as_ref()
                 .and_then(|entry| recent.record([entry.clone()]).err());

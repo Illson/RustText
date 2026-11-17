@@ -696,12 +696,15 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = self.layout.root.clone();
-        let body = if self.documents.is_empty() {
+        let showing_home = self.showing_home();
+        let body = if showing_home {
             self.home_page(window, cx)
         } else {
             self.group_tree(&root, window.viewport_size(), window, cx)
         };
-        let json_banner = self.json_validation_banner(cx);
+        let json_banner = (!showing_home)
+            .then(|| self.json_validation_banner(cx))
+            .flatten();
         let workspace = div()
             .id("rusttext")
             .key_context("RustText")
@@ -711,6 +714,19 @@ impl Render for Workspace {
             .flex_col()
             .bg(rgb(appearance::BACKGROUND))
             .text_color(rgb(appearance::FOREGROUND))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape"
+                    && this.home.open
+                    && !this.documents.is_empty()
+                    && this.settings_panel.is_none()
+                    && this.versions.is_none()
+                    && this.template_generator.is_none()
+                    && this.list_comparison.is_none()
+                {
+                    this.close_home(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewFile, window, cx| this.new_file(window, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.open_picker(OpenMode::NORMAL, window, cx)
@@ -729,9 +745,20 @@ impl Render for Workspace {
                     this.register_file_associations(window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &Save, window, cx| this.save(false, window, cx)))
-            .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save(true, window, cx)))
+            .on_action(cx.listener(|this, _: &Save, window, cx| {
+                if !this.showing_home() {
+                    this.save(false, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SaveAs, window, cx| {
+                if !this.showing_home() {
+                    this.save(true, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if this.showing_home() {
+                    return;
+                }
                 if this.active == 0 && this.layout.groups().len() > 1 {
                     this.close_empty_group(this.layout.focused, window, cx);
                 } else {
@@ -739,8 +766,16 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &ReopenTab, window, cx| this.reopen(window, cx)))
-            .on_action(cx.listener(|this, _: &GoToLine, window, cx| this.go_to_line(window, cx)))
-            .on_action(cx.listener(|this, _: &FormatJson, window, cx| this.format_json(window, cx)))
+            .on_action(cx.listener(|this, _: &GoToLine, window, cx| {
+                if !this.showing_home() {
+                    this.go_to_line(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FormatJson, window, cx| {
+                if !this.showing_home() {
+                    this.format_json(window, cx);
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &FindText, window, cx| this.open_search(false, window, cx)),
             )
@@ -748,14 +783,30 @@ impl Render for Workspace {
                 cx.listener(|this, _: &ReplaceText, window, cx| this.open_search(true, window, cx)),
             )
             .on_action(cx.listener(|this, _: &NextMatch, window, cx| {
-                this.run_search(Command::Next, window, cx)
+                if !this.showing_home() {
+                    this.run_search(Command::Next, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &PreviousMatch, window, cx| {
-                this.run_search(Command::Previous, window, cx)
+                if !this.showing_home() {
+                    this.run_search(Command::Previous, window, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.0, cx)))
-            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(-1.0, cx)))
-            .on_action(cx.listener(|this, _: &ToggleWrap, window, cx| this.toggle_wrap(window, cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                if !this.showing_home() {
+                    this.zoom(1.0, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                if !this.showing_home() {
+                    this.zoom(-1.0, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWrap, window, cx| {
+                if !this.showing_home() {
+                    this.toggle_wrap(window, cx);
+                }
+            }))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.open_paths(paths.paths().to_vec(), OpenMode::NORMAL, window, cx);
             }))
@@ -769,7 +820,7 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(body),
             )
-            .children(self.search_panel(window, cx))
+            .children((!showing_home).then(|| self.search_panel(window, cx)).flatten())
             .children(self.update_panel(cx));
         div()
             .relative()

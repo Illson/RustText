@@ -376,3 +376,32 @@ fn concurrent_detached_record_and_position_flush_do_not_clobber_each_other() {
         12..18
     );
 }
+
+#[test]
+fn persists_line_count_and_last_worked_timestamp_with_legacy_compatibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recent-files.json");
+    let file = dir.path().join("notes.txt");
+    fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!([{"path": file, "windows_1251": false}])).unwrap(),
+    )
+    .unwrap();
+
+    let mut recent = RecentFiles {
+        path: Some(path),
+        ..RecentFiles::default()
+    };
+    recent.reload().unwrap();
+    assert_eq!(recent.entries()[0].line_count, None);
+    assert_eq!(recent.entries()[0].last_worked_ms, None);
+
+    let mut updated = RecentFile::new(file.clone(), TextEncoding::Utf8);
+    updated.position = Some(RecentPosition::default());
+    updated.line_count = Some(345);
+    updated.last_worked_ms = Some(1_700_000_000_000);
+    recent.record_positions(vec![updated]).unwrap();
+    recent.reload().unwrap();
+    assert_eq!(recent.entries()[0].line_count, Some(345));
+    assert_eq!(recent.entries()[0].last_worked_ms, Some(1_700_000_000_000));
+}

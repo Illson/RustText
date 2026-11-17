@@ -439,6 +439,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.showing_home() {
+            if !replace {
+                self.focus_home_query(window, cx);
+            }
+            return;
+        }
         if self.active_document_opt().is_none() {
             return;
         }

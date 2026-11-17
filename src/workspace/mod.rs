@@ -261,6 +261,7 @@ impl Workspace {
 
     fn select(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.documents.iter().position(|doc| doc.id == id) {
+            self.home.open = false;
             if self.active != id {
                 self.remember_position(self.active, window, cx);
             }
@@ -285,6 +286,29 @@ impl Workspace {
         }
     }
 
+    pub(super) fn showing_home(&self) -> bool {
+        self.documents.is_empty() || self.home.open
+    }
+
+    pub(super) fn focus_active_document(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(doc) = self.active_document_opt() {
+            let focus = doc.log.as_ref().map_or_else(
+                || doc.editor.read(cx).focus_handle(cx),
+                |log| log.read(cx).focus_handle(cx),
+            );
+            window.focus(&focus, cx);
+        } else {
+            self.fallback_focus.focus(window, cx);
+        }
+    }
+
+    pub(super) fn restore_workspace_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.showing_home() {
+            self.focus_home_query(window, cx);
+        } else {
+            self.focus_active_document(window, cx);
+        }
+    }
     fn insert_log(
         &mut self,
         target: FileTarget,
@@ -317,6 +341,7 @@ impl Workspace {
         if self.busy.is_some() || self.applying_update() {
             return;
         }
+        self.home.open = false;
         self.error = None;
         self.session_notice = None;
         self.add_document(None, window, cx);
@@ -331,6 +356,7 @@ impl Workspace {
         if !self.layout.focus(group_id) {
             return;
         }
+        self.home.open = false;
         if self.active != 0 {
             self.remember_position(self.active, window, cx);
         }
@@ -384,7 +410,7 @@ impl Workspace {
         let Some(index) = self.documents.iter().position(|doc| doc.id == id) else {
             return;
         };
-        self.remember_position(id, window, cx);
+        self.remember_activity(id, window, cx);
         let doc = self.documents.remove(index);
         self.layout.remove(id);
         let (tab, draft) = doc.session_snapshot(doc.file.is_none(), cx);
@@ -462,13 +488,22 @@ impl Workspace {
         if self.busy.is_some() || self.log_is_writing(cx) {
             return false;
         }
-        for id in self.documents.iter().map(|doc| doc.id).collect::<Vec<_>>() {
-            self.remember_position(id, window, cx);
+        if !self.home.close_recorded {
+            self.home.close_recorded = true;
+            let active = self.active;
+            for id in self.documents.iter().map(|doc| doc.id).collect::<Vec<_>>() {
+                if id == active {
+                    self.remember_activity(id, window, cx);
+                } else {
+                    self.remember_position(id, window, cx);
+                }
+            }
         }
         if self.history_is_writing() {
             self.home.close_pending = true;
             return false;
         }
+        self.home.close_recorded = false;
         if self.session.is_some() {
             return self.begin_session_shutdown(session_runtime::AfterShutdown::Close, window, cx);
         }

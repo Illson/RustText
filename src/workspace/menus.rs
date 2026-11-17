@@ -1,6 +1,6 @@
 use gpui_kit::{
     component::{
-        Selectable, Sizable,
+        Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
         label::Label,
         menu::{DropdownMenu, PopupMenuItem},
@@ -22,11 +22,13 @@ impl Workspace {
                 ))
             })
             .clone();
-        let searching = self.search.is_some()
-            || self
-                .active_document_opt()
-                .and_then(|doc| doc.log.as_ref())
-                .is_some_and(|log| log.read(cx).search_visible());
+        let showing_home = self.showing_home();
+        let searching = !showing_home
+            && (self.search.is_some()
+                || self
+                    .active_document_opt()
+                    .and_then(|doc| doc.log.as_ref())
+                    .is_some_and(|log| log.read(cx).search_visible()));
         div()
             .h(px(34.))
             .flex_1()
@@ -40,14 +42,21 @@ impl Workspace {
             .border_b_1()
             .border_color(rgb(appearance::BORDER))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pr_3()
-                    .text_color(rgb(appearance::ACCENT))
-                    .child(img(logo).w(px(22.)).h(px(22.)).flex_shrink_0())
-                    .child(Label::new("RustText")),
+                Button::new("open-home")
+                    .small()
+                    .ghost()
+                    .selected(showing_home)
+                    .tooltip("История файлов")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_color(rgb(appearance::ACCENT))
+                            .child(img(logo).w(px(22.)).h(px(22.)).flex_shrink_0())
+                            .child(Label::new("RustText")),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_home(window, cx))),
             )
             .child(self.file_menu_button(cx))
             .child(self.tools_menu_button(cx))
@@ -55,6 +64,7 @@ impl Workspace {
                 Button::new("find-text")
                     .small()
                     .ghost()
+                    .disabled(showing_home)
                     .label("Поиск")
                     .selected(searching)
                     .tooltip("Найти · Ctrl+F")
@@ -66,6 +76,9 @@ impl Workspace {
     }
 
     fn menu_focus(&self, cx: &App) -> FocusHandle {
+        if self.showing_home() {
+            return self.fallback_focus.clone();
+        }
         let Some(doc) = self.active_document_opt() else {
             return self.fallback_focus.clone();
         };
@@ -77,7 +90,10 @@ impl Workspace {
 
     fn file_menu_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let busy = self.busy.is_some() || self.applying_update();
-        let doc = self.active_document_opt();
+        let showing_home = self.showing_home();
+        let doc = (!showing_home)
+            .then(|| self.active_document_opt())
+            .flatten();
         let can_save = !busy && doc.is_some_and(|doc| doc.log.is_none() && !doc.placeholder);
         let closed_entries = self.closed_tab_entries();
         let can_reopen = !busy && !closed_entries.is_empty();
@@ -197,7 +213,7 @@ impl Workspace {
                     .item(
                         PopupMenuItem::new("Закрыть вкладку")
                             .action(Box::new(CloseTab))
-                            .disabled(busy),
+                            .disabled(busy || showing_home),
                     )
                     .item(
                         PopupMenuItem::new("Восстановить вкладку")
@@ -214,10 +230,14 @@ impl Workspace {
     }
 
     fn tools_menu_button(&self, cx: &Context<Self>) -> impl IntoElement {
-        let doc = self.active_document_opt();
+        let showing_home = self.showing_home();
+        let doc = (!showing_home)
+            .then(|| self.active_document_opt())
+            .flatten();
         let log = doc.and_then(|doc| doc.log.clone());
         let can_edit = self.busy.is_none()
             && !self.applying_update()
+            && !showing_home
             && doc.is_some_and(|doc| doc.log.is_none() && !doc.placeholder);
         let wrap = log
             .as_ref()
@@ -301,17 +321,18 @@ impl Workspace {
                     .item(
                         PopupMenuItem::new("Перенос строк")
                             .action(Box::new(ToggleWrap))
+                            .disabled(showing_home)
                             .checked(wrap),
                     )
                     .item(
                         PopupMenuItem::new("Увеличить текст")
                             .action(Box::new(ZoomIn))
-                            .disabled(log.is_some()),
+                            .disabled(showing_home || log.is_some()),
                     )
                     .item(
                         PopupMenuItem::new("Уменьшить текст")
                             .action(Box::new(ZoomOut))
-                            .disabled(log.is_some()),
+                            .disabled(showing_home || log.is_some()),
                     );
                 if let Some(log) = &log {
                     log.update(cx, |viewer, cx| viewer.tools_menu(menu, window, cx))

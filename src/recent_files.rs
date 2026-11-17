@@ -5,6 +5,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,13 @@ use tempfile::NamedTempFile;
 use crate::{log_file::LogBookmark, text_format::TextEncoding};
 
 static DISK_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 #[derive(Clone, Default, PartialEq, Deserialize, Serialize)]
 pub(crate) struct RecentPosition {
@@ -32,6 +40,10 @@ pub(crate) struct RecentFile {
     pub view_as_log: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<RecentPosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_worked_ms: Option<u64>,
 }
 
 impl RecentFile {
@@ -41,6 +53,8 @@ impl RecentFile {
             windows_1251: matches!(encoding, TextEncoding::Windows1251),
             view_as_log: false,
             position: None,
+            line_count: None,
+            last_worked_ms: Some(now_millis()),
         }
     }
 }
@@ -51,6 +65,7 @@ pub(crate) struct RecentFiles {
     entries: Vec<RecentFile>,
     pending: Vec<RecentFile>,
     positions: Vec<(PathBuf, RecentPosition)>,
+    metadata: Vec<(PathBuf, Option<u64>, Option<u64>)>,
     persisted_gen: Option<u64>,
 }
 
@@ -79,6 +94,10 @@ impl RecentFiles {
         &self.entries
     }
 
+    pub(crate) fn entry(&self, path: &Path) -> Option<&RecentFile> {
+        self.entries.iter().find(|entry| entry.path == path)
+    }
+
     pub(crate) fn detached(&self) -> Self {
         Self {
             path: self.path.clone(),
@@ -89,6 +108,22 @@ impl RecentFiles {
     pub(crate) fn record_in_memory(&mut self, files: &[RecentFile]) {
         for file in files {
             move_to_front(&mut self.entries, file.clone());
+        }
+    }
+
+    pub(crate) fn update_entry_in_memory(&mut self, file: &RecentFile) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.path == file.path)
+        {
+            if let Some(position) = &file.position {
+                entry.position = Some(position.clone());
+            }
+            if let Some(line_count) = file.line_count {
+                entry.line_count = Some(line_count);
+            }
+            entry.last_worked_ms = max_time(entry.last_worked_ms, file.last_worked_ms);
         }
     }
 
@@ -105,21 +140,42 @@ impl RecentFiles {
 
     pub(crate) fn record_positions(&mut self, files: Vec<RecentFile>) -> io::Result<()> {
         for file in files {
-            let Some(position) = file.position.clone() else {
+            let has_metadata = file.line_count.is_some() || file.last_worked_ms.is_some();
+            if file.position.is_none() && !has_metadata {
                 continue;
-            };
+            }
             if let Some(entry) = self
                 .entries
                 .iter_mut()
                 .find(|entry| entry.path == file.path)
             {
-                entry.position = Some(position.clone());
+                if let Some(position) = &file.position {
+                    entry.position = Some(position.clone());
+                }
+                if let Some(line_count) = file.line_count {
+                    entry.line_count = Some(line_count);
+                }
+                entry.last_worked_ms = max_time(entry.last_worked_ms, file.last_worked_ms);
             } else {
                 self.entries.push(file.clone());
                 self.pending.push(file.clone());
             }
-            self.positions.retain(|(path, _)| path != &file.path);
-            self.positions.push((file.path, position));
+            if let Some(position) = file.position {
+                self.positions.retain(|(path, _)| path != &file.path);
+                self.positions.push((file.path.clone(), position));
+            }
+            if has_metadata {
+                let previous = self
+                    .metadata
+                    .iter()
+                    .find(|(path, _, _)| path == &file.path)
+                    .map(|(_, lines, time)| (*lines, *time));
+                self.metadata.retain(|(path, _, _)| path != &file.path);
+                let line_count = file.line_count.or(previous.and_then(|(lines, _)| lines));
+                let last_worked_ms =
+                    max_time(previous.and_then(|(_, time)| time), file.last_worked_ms);
+                self.metadata.push((file.path, line_count, last_worked_ms));
+            }
         }
         self.persist()
     }
@@ -140,15 +196,34 @@ impl RecentFiles {
             self.pending.iter().map(|entry| &entry.path).collect();
         let pending_positions: std::collections::HashSet<_> =
             self.positions.iter().map(|(path, _)| path).collect();
+        let pending_metadata: std::collections::HashSet<_> =
+            self.metadata.iter().map(|(path, _, _)| path).collect();
         for entry in other.entries {
             if let Some(&index) = indices.get(&entry.path) {
                 if !pending_entries.contains(&entry.path) {
+                    let current = &self.entries[index];
                     let position = if pending_positions.contains(&entry.path) {
-                        self.entries[index].position.clone()
+                        current.position.clone()
                     } else {
                         entry.position
                     };
-                    self.entries[index] = RecentFile { position, ..entry };
+                    let (line_count, last_worked_ms) = if pending_metadata.contains(&entry.path) {
+                        (
+                            current.line_count.or(entry.line_count),
+                            max_time(current.last_worked_ms, entry.last_worked_ms),
+                        )
+                    } else {
+                        (
+                            entry.line_count.or(current.line_count),
+                            max_time(entry.last_worked_ms, current.last_worked_ms),
+                        )
+                    };
+                    self.entries[index] = RecentFile {
+                        position,
+                        line_count,
+                        last_worked_ms,
+                        ..entry
+                    };
                 }
             } else {
                 indices.insert(entry.path.clone(), self.entries.len());
@@ -161,7 +236,7 @@ impl RecentFiles {
     }
 
     fn persist(&mut self) -> io::Result<()> {
-        if self.pending.is_empty() && self.positions.is_empty() {
+        if self.pending.is_empty() && self.positions.is_empty() && self.metadata.is_empty() {
             return Ok(());
         }
 
@@ -198,6 +273,15 @@ impl RecentFiles {
             }
         }
 
+        for (path, line_count, last_worked_ms) in &self.metadata {
+            if let Some(entry) = entries.iter_mut().find(|entry| &entry.path == path) {
+                if let Some(line_count) = line_count {
+                    entry.line_count = Some(*line_count);
+                }
+                entry.last_worked_ms = max_time(entry.last_worked_ms, *last_worked_ms);
+            }
+        }
+
         let mut pending_file = NamedTempFile::new_in(directory)?;
         serde_json::to_writer(pending_file.as_file_mut(), &entries)?;
         pending_file.as_file().sync_all()?;
@@ -206,17 +290,28 @@ impl RecentFiles {
         self.entries = entries;
         self.pending.clear();
         self.positions.clear();
+        self.metadata.clear();
         self.persisted_gen = Some(DISK_GENERATION.fetch_add(1, Ordering::SeqCst) + 1);
         Ok(())
     }
 }
 
+fn max_time(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
+}
+
 fn move_to_front(entries: &mut Vec<RecentFile>, mut file: RecentFile) {
-    if file.position.is_none() {
-        file.position = entries
-            .iter()
-            .find(|entry| entry.path == file.path)
-            .and_then(|entry| entry.position.clone());
+    if let Some(existing) = entries.iter().find(|entry| entry.path == file.path) {
+        if file.position.is_none() {
+            file.position = existing.position.clone();
+        }
+        if file.line_count.is_none() {
+            file.line_count = existing.line_count;
+        }
+        file.last_worked_ms = max_time(existing.last_worked_ms, file.last_worked_ms);
     }
     entries.retain(|entry| entry.path != file.path);
     entries.insert(0, file);
