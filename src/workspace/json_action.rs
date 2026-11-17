@@ -8,7 +8,9 @@ impl Workspace {
         if self.busy.is_some() {
             return;
         }
-        let doc = self.active_document();
+        let Some(doc) = self.active_document_opt() else {
+            return;
+        };
         if doc.placeholder || doc.log.is_some() {
             return;
         }
@@ -44,8 +46,10 @@ impl Workspace {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
-                let active = this.active_document();
-                if active.id != id || active.revision != revision {
+                if !this
+                    .active_document_opt()
+                    .is_some_and(|active| active.id == id && active.revision == revision)
+                {
                     this.error =
                         Some("Вкладка или текст изменились во время форматирования".into());
                 } else {

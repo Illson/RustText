@@ -135,6 +135,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.session_notice = None;
         self.load_paths(paths, mode, None, window, cx);
     }
 
@@ -149,6 +150,30 @@ impl Workspace {
         self.load_paths(vec![recent.path], mode, Some(tab), window, cx);
     }
 
+    pub(super) fn open_recent(
+        &mut self,
+        mut recent: RecentFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(position) = self.home.positions.get(&recent.path) {
+            recent.position = Some(position.clone());
+        }
+        let mode = OpenMode::from_recent(&recent);
+        let restore = recent.position.map(|position| Tab {
+            id: 0,
+            file: None,
+            format: crate::text_format::TextFormat::default(),
+            selection: position.selection,
+            reversed: position.reversed,
+            scroll: position.scroll,
+            draft_revision: None,
+            log: position.log,
+            json_validation_disabled: position.json_validation_disabled,
+        });
+        self.load_paths(vec![recent.path], mode, restore, window, cx);
+    }
+
     fn load_paths(
         &mut self,
         paths: Vec<PathBuf>,
@@ -161,10 +186,12 @@ impl Workspace {
             return;
         }
 
+        self.home.open = false;
         self.busy = Some("Открытие…");
         self.error = None;
+        self.session_notice = None;
         let executor = cx.background_executor().clone();
-        let mut recent = self.recent.clone();
+        let mut recent = self.recent.detached();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let mut opened_files = Vec::new();
@@ -200,10 +227,10 @@ impl Workspace {
             }
 
             let opened_any = !opened_files.is_empty();
-            let (recent, history_error) = executor
+            let (recent, opened_files, history_error) = executor
                 .spawn(async move {
-                    let error = recent.record(opened_files).err();
-                    (recent, error)
+                    let error = recent.record(opened_files.clone()).err();
+                    (recent, opened_files, error)
                 })
                 .await;
             this.update_in(cx, |this, _, cx| {
@@ -213,7 +240,10 @@ impl Workspace {
                     this.closed.retain(|entry| entry.tab.id != tab.id);
                 }
                 this.busy = None;
-                this.recent = recent;
+                if opened_any {
+                    this.recent.record_in_memory(&opened_files);
+                    this.recent.merge_loaded(recent);
+                }
                 this.error = first_error
                     .map(|error| {
                         if failures == 1 {
@@ -266,27 +296,33 @@ impl Workspace {
                 doc.revision = doc.revision.wrapping_add(1);
             }
             if let Some(tab) = reopen.restore {
+                doc.json_validation_disabled = tab.json_validation_disabled;
+                doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
                 doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             }
-            let recent = RecentFile::new(opened.target.path, doc.format.encoding);
+            let mut recent = RecentFile::new(opened.target.path, doc.format.encoding);
+            recent.line_count = Some(super::home::text_line_count(doc.editor.read(cx).text()));
+            if reopen.replace_text {
+                self.invalidate_document_search(id, cx);
+            }
             self.schedule_json_validation(id, cx);
             self.select(id, window, cx);
             return recent;
         }
 
-        if self.documents.len() == 1
-            && self.active_document().file.is_none()
-            && !self.active_document().dirty
-        {
-            self.documents.clear();
-        }
-        let recent = RecentFile::new(opened.target.path.clone(), opened.format.encoding);
+        self.discard_empty_tab();
+        let mut recent = RecentFile::new(opened.target.path.clone(), opened.format.encoding);
         self.add_document(Some(opened), window, cx);
+        if let Some(doc) = self.documents.last() {
+            recent.line_count = Some(super::home::text_line_count(doc.editor.read(cx).text()));
+        }
         if let Some(tab) = restore {
-            self.documents
-                .last_mut()
-                .expect("opened document exists")
-                .restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
+            let doc = self.documents.last_mut().expect("opened document exists");
+            let id = doc.id;
+            doc.json_validation_disabled = tab.json_validation_disabled;
+            doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
+            doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
+            self.schedule_json_validation(id, cx);
         }
         recent
     }
@@ -316,15 +352,14 @@ impl Workspace {
                     .is_some_and(|file| file.path == target.path)
                 && matches!(doc.format.encoding, TextEncoding::Windows1251) == windows_1251
         }) {
+            recent.line_count = doc
+                .log
+                .as_ref()
+                .and_then(|log| log.read(cx).total_line_count());
             self.select(doc.id, window, cx);
             return recent;
         }
-        if self.documents.len() == 1
-            && self.active_document().file.is_none()
-            && !self.active_document().dirty
-        {
-            self.documents.clear();
-        }
+        self.discard_empty_tab();
         let id = self.insert_log(
             target,
             windows_1251,
@@ -336,12 +371,28 @@ impl Workspace {
         recent
     }
 
+    fn discard_empty_tab(&mut self) {
+        if self.documents.len() == 1
+            && let Some(doc) = self.active_document_opt()
+            && doc.file.is_none()
+            && !doc.dirty
+            && self.layout.groups().len() == 1
+        {
+            self.layout.remove(doc.id);
+            self.documents.clear();
+            self.active = 0;
+        }
+    }
+
     pub(super) fn save(&mut self, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy.is_some() {
             return;
         }
         self.error = None;
-        let doc = self.active_document();
+        self.session_notice = None;
+        let Some(doc) = self.active_document_opt() else {
+            return;
+        };
         if doc.log.is_some() {
             return;
         }
@@ -428,24 +479,54 @@ impl Workspace {
 
         let snapshot = doc.editor.read(cx).text().clone();
         let format = doc.format;
-        let mut recent = self.recent.clone();
+        let mut recent = self.recent.detached();
         self.busy = Some("Сохранение…");
+        let version_store = self.version_store.clone();
         cx.notify();
         let task = cx.background_spawn(async move {
+            if target.version.is_some()
+                && let Some(store) = version_store.as_ref()
+                && crate::files::FileVersion::at(&target.path).ok().flatten() == target.version
+            {
+                let _ = store.capture(&target.path, format.encoding);
+            }
             let result = files::save(target, format, &snapshot.to_string());
-            let history_error = result.as_ref().ok().and_then(|file| {
-                recent
-                    .record([RecentFile::new(file.path.clone(), format.encoding)])
+            let version_error = result.as_ref().ok().and_then(|file| {
+                version_store
+                    .as_ref()?
+                    .capture(&file.path, format.encoding)
                     .err()
             });
-            (snapshot, result, recent, history_error)
+            let recorded = result.as_ref().ok().map(|file| {
+                let mut recent = RecentFile::new(file.path.clone(), format.encoding);
+                recent.line_count = Some(super::home::text_line_count(&snapshot));
+                recent
+            });
+            let history_error = recorded
+                .as_ref()
+                .and_then(|entry| recent.record([entry.clone()]).err());
+            (
+                snapshot,
+                result,
+                recent,
+                recorded,
+                history_error,
+                version_error,
+            )
         });
         cx.spawn_in(window, async move |this, cx| {
-            let (snapshot, result, recent, history_error) = task.await;
+            let (snapshot, result, recent, recorded, history_error, version_error) = task.await;
             this.update_in(cx, |this, _, cx| {
                 this.busy = None;
-                this.recent = recent;
-                this.error = history_error.map(recent_warning);
+                if let Some(recorded) = recorded {
+                    this.recent.record_in_memory(&[recorded]);
+                    this.recent.merge_loaded(recent);
+                }
+                this.error = history_error.map(recent_warning).or_else(|| {
+                    version_error.map(|error| {
+                        format!("Файл сохранён, но версия не записана. {error}").into()
+                    })
+                });
                 let save_succeeded = result.is_ok();
                 match result {
                     Ok(file) => {
@@ -465,6 +546,7 @@ impl Workspace {
                     }
                 }
                 if save_succeeded {
+                    this.session_notice = None;
                     this.schedule_json_validation(id, cx);
                 }
                 cx.notify();

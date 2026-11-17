@@ -316,7 +316,7 @@ fn excerpt(line: &str, range: Range<usize>) -> String {
     format!("{prefix}{}{suffix}", &line[start..end])
 }
 
-fn compile(query: &Query) -> Result<Regex, String> {
+pub(crate) fn compile(query: &Query) -> Result<Regex, String> {
     if query.text.is_empty() {
         return Err("Введите текст или регулярное выражение.".into());
     }
@@ -532,7 +532,7 @@ fn next_char_boundary(text: &str, offset: usize) -> usize {
     }
 }
 
-const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_QUERY_BYTES: usize = 4 * 1024;
 const MAX_PREVIOUS_MATCHES: usize = 10_000;
 pub const MAX_SEARCH_TIME: std::time::Duration = std::time::Duration::from_millis(400);

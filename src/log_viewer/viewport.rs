@@ -124,6 +124,10 @@ impl LogViewer {
         if self.writing_file() {
             return;
         }
+        if coalesce_destination(self.reading, &mut self.pending_destination, destination) {
+            return;
+        }
+        self.pending_destination = None;
         let path = self.path.clone();
         let bookmark = self.bookmark.clone();
         let encoding = self.encoding_override;
@@ -167,6 +171,10 @@ impl LogViewer {
                     Err(error) => {
                         viewer.notice = Some(format!("Не удалось прочитать лог. {error}").into());
                     }
+                }
+                if let Some(destination) = viewer.pending_destination.take() {
+                    viewer.load_page(destination, window, cx);
+                    return;
                 }
                 cx.notify();
             });
@@ -216,7 +224,9 @@ impl LogViewer {
                 crate::search_highlight::SearchHighlight::new(&self.viewer, range, cx)
             });
         }
+        self.refresh_all_search_highlights(cx);
         self.start_index(window, cx);
+        self.refresh_minimap(window, cx);
 
         if first && let Some(start) = crate::log_viewer::measurement_start() {
             window.on_next_frame(move |_, _| {
@@ -226,6 +236,45 @@ impl LogViewer {
                 );
             });
         }
+    }
+
+    fn refresh_minimap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(observation) = &self.observation else {
+            return;
+        };
+        let stamp = (observation.stamp.clone(), self.bookmark.hidden);
+        if self.minimap_reading || self.minimap_stamp.as_ref() == Some(&stamp) {
+            return;
+        }
+        self.minimap_samples.clear();
+        self.minimap_reading = true;
+        let path = self.path.clone();
+        let encoding = self.encoding;
+        let hidden = self.bookmark.hidden;
+        let size = self.bookmark.size;
+        let job = cx.background_spawn(async move {
+            crate::minimap::sample_file(&path, encoding, hidden, size)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await;
+            let _ = this.update_in(cx, |viewer, window, cx| {
+                viewer.minimap_reading = false;
+                let current = viewer
+                    .observation
+                    .as_ref()
+                    .map(|observation| (observation.stamp.clone(), viewer.bookmark.hidden));
+                if current.as_ref() == Some(&stamp) {
+                    if let Ok(samples) = result {
+                        viewer.minimap_samples = samples;
+                    }
+                    viewer.minimap_stamp = Some(stamp);
+                    cx.notify();
+                } else {
+                    viewer.refresh_minimap(window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn apply_observation(
@@ -320,7 +369,6 @@ impl LogViewer {
         if !self.available() {
             return;
         }
-        self.clear_search_highlight(cx);
         self.notice = None;
         self.load_page(destination, window, cx);
     }
@@ -379,6 +427,17 @@ impl LogViewer {
         self.navigate(destination, window, cx);
         true
     }
+}
+
+fn coalesce_destination(
+    reading: bool,
+    pending: &mut Option<Destination>,
+    destination: Destination,
+) -> bool {
+    if reading {
+        *pending = Some(destination);
+    }
+    reading
 }
 
 fn local_match_range(

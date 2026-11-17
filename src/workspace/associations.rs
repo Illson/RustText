@@ -19,6 +19,7 @@ struct RegistrationPlan {
     executable_name: String,
     executable_path: String,
     open_command: String,
+    context_menu: Vec<(String, String)>,
 }
 
 #[cfg(any(windows, test))]
@@ -29,10 +30,24 @@ impl RegistrationPlan {
             .next()
             .unwrap_or("rusttext.exe")
             .to_owned();
+        let open_command = format!("{} \"%1\"", quote_windows_argument(executable_path));
+        let context_menu = ASSOCIATIONS
+            .iter()
+            .flat_map(|(extension, _)| {
+                let verb = format!(
+                    "Software\\Classes\\SystemFileAssociations\\{extension}\\shell\\RustText"
+                );
+                [
+                    (verb.clone(), "Открыть в RustText".to_owned()),
+                    (format!("{verb}\\command"), open_command.clone()),
+                ]
+            })
+            .collect();
         Self {
             executable_name,
             executable_path: executable_path.to_owned(),
-            open_command: format!("{} \"%1\"", quote_windows_argument(executable_path)),
+            open_command,
+            context_menu,
         }
     }
 }
@@ -220,6 +235,10 @@ fn register_application(plan: &RegistrationPlan) -> std::io::Result<()> {
         if status.0 != 0 {
             return Err(std::io::Error::from_raw_os_error(status.0 as i32));
         }
+    }
+
+    for (path, value) in &plan.context_menu {
+        set_default_string(&key(path)?, value)?;
     }
 
     let capabilities = key(CAPABILITIES_PATH)?;

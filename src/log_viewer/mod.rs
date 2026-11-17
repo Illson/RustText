@@ -78,15 +78,23 @@ pub(crate) struct LogViewer {
     index_paused: bool,
     indexing: Option<Progress>,
     viewer: Entity<EditorState>,
+    search_viewport: crate::search_highlight::ViewportTracker,
     scroll_bottom: Rc<Cell<Pixels>>,
+    scrollbar_metrics: Rc<Cell<Option<crate::minimap::ScrollbarMetrics>>>,
+    scrollbar_drag: Rc<global_scrollbar::DragState>,
     wrap: bool,
     percentage: Entity<InputState>,
     trim_percentage: Entity<InputState>,
     search: Option<LogSearch>,
     search_match: Option<(u64, Option<Range<usize>>)>,
     search_highlight: Option<crate::search_highlight::SearchHighlight>,
+    all_search_highlight: Option<crate::search_highlight::SearchHighlight>,
     notice: Option<SharedString>,
     reading: bool,
+    pending_destination: Option<Destination>,
+    minimap_samples: Vec<String>,
+    minimap_stamp: Option<(crate::log_file::FileStamp, u64)>,
+    minimap_reading: bool,
     generation: u64,
     preparing_trim: bool,
     preparation: Option<Progress>,
@@ -106,7 +114,11 @@ impl LogViewer {
         let log_viewer = cx.entity().downgrade();
         let scroll_bottom = Rc::new(Cell::new(px(0.)));
         let editor_scroll_bottom = scroll_bottom.clone();
-        let editor_scrollbar_drag = Rc::new(global_scrollbar::DragState::default());
+        let scrollbar_metrics = Rc::new(Cell::new(None));
+        let editor_scrollbar_metrics = scrollbar_metrics.clone();
+        let scrollbar_drag = Rc::new(global_scrollbar::DragState::default());
+        let search_viewport = crate::search_highlight::ViewportTracker::default();
+        let rendered_viewport = search_viewport.clone();
         let viewer = cx.new(|cx| {
             let mut editor = EditorState::new(window, cx)
                 .language("text")
@@ -115,11 +127,12 @@ impl LogViewer {
                 .scroll_beyond_last_line(Some(0))
                 .soft_wrap(true);
             editor.set_scrollbar_renderer(Some(Rc::new(move |scroll, window, cx| {
+                rendered_viewport.record(&scroll, window);
                 global_scrollbar::render(
                     scroll,
                     log_viewer.clone(),
                     &editor_scroll_bottom,
-                    editor_scrollbar_drag.clone(),
+                    &editor_scrollbar_metrics,
                     window,
                     cx,
                 )
@@ -149,15 +162,23 @@ impl LogViewer {
             index_paused: false,
             indexing: None,
             viewer,
+            search_viewport,
             scroll_bottom,
+            scrollbar_metrics,
+            scrollbar_drag,
             wrap: true,
             percentage,
             trim_percentage,
             search: None,
             search_match: None,
             search_highlight: None,
+            all_search_highlight: None,
             notice: None,
             reading: false,
+            pending_destination: None,
+            minimap_samples: Vec::new(),
+            minimap_stamp: None,
+            minimap_reading: false,
             generation: 0,
             preparing_trim: false,
             preparation: None,
@@ -171,6 +192,13 @@ impl LogViewer {
 
     pub(crate) fn bookmark(&self) -> LogBookmark {
         self.bookmark.clone()
+    }
+
+    pub(crate) fn total_line_count(&self) -> Option<u64> {
+        let observation = self.observation.as_ref()?;
+        let size = crate::log_io::align_offset(observation.stamp.len, self.encoding);
+        (self.index.scanned_to() >= size)
+            .then(|| self.index.physical_line_count(self.encoding.bom_len()))
     }
 
     pub(crate) fn focus_handle(&self, cx: &App) -> FocusHandle {

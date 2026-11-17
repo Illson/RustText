@@ -24,6 +24,8 @@ pub struct WindowSize {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<crate::layout::Layout>,
     pub tabs: Vec<Tab>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub closed: Vec<Tab>,
@@ -35,6 +37,8 @@ pub struct State {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tab {
+    #[serde(default)]
+    pub json_validation_disabled: bool,
     pub id: u64,
     pub file: Option<FileTarget>,
     pub format: TextFormat,
@@ -293,7 +297,7 @@ fn read_record(directory: &Path) -> io::Result<Recovered> {
         closed_drafts,
     } = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
     if version != FORMAT_VERSION
-        || state.active >= state.tabs.len()
+        || state.active >= state.tabs.len().max(1)
         || state.tabs.len() != drafts.len()
         || state.closed.len() != closed_drafts.len()
     {

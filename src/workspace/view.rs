@@ -1,9 +1,10 @@
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Sizable,
+    ActiveTheme, Disableable, Sizable, TitleBar,
     button::{Button, ButtonVariants},
     input::Editor,
     label::Label,
     menu::{ContextMenuExt, PopupMenuItem},
+    resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -106,14 +107,38 @@ impl Workspace {
     }
 
     fn go_to_line(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_none() && self.active_document().log.is_none() {
-            go_to_line::open(self.active_document().editor.clone(), window, cx);
+        if self.busy.is_none()
+            && let Some(doc) = self.documents.iter().find(|doc| doc.id == self.active)
+            && doc.log.is_none()
+        {
+            go_to_line::open(doc.editor.clone(), window, cx);
         }
     }
 
-    fn tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn tabs(
+        &self,
+        group_id: u64,
+        group: &crate::layout::Group,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let scroll = window.use_keyed_state(("group-tab-scroll", group_id), cx, |_, _| {
+            (ScrollHandle::new(), None)
+        });
+        let scroll = scroll.update(cx, |(scroll, active), _| {
+            if *active != group.active {
+                if let Some(index) = group
+                    .active
+                    .and_then(|id| group.documents.iter().position(|doc| *doc == id))
+                {
+                    scroll.scroll_to_item(index);
+                }
+                *active = group.active;
+            }
+            scroll.clone()
+        });
         div()
-            .id("tabs")
+            .id(("tabs", group_id))
             .h_full()
             .flex()
             .flex_1()
@@ -122,174 +147,416 @@ impl Workspace {
             .px_3()
             .child(
                 div()
-                    .id("tab-list")
+                    .id(("tab-list", group_id))
                     .flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .items_center()
                     .overflow_x_scroll()
-                    .track_scroll(&self.tab_scroll)
+                    .track_scroll(&scroll)
                     .gap_1()
-                    .children(self.documents.iter().map(|doc| {
-                        let id = doc.id;
-                        let active = id == self.active;
-                        let suffix = doc
-                            .disk_status
-                            .tab_suffix()
-                            .or(doc.placeholder.then_some("откройте заново"));
-                        let name = suffix.map_or_else(
-                            || doc.name.clone(),
-                            |status| format!("{} ({status})", doc.name).into(),
-                        );
-                        let tab = div()
-                            .id(("tab", id))
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(if active {
-                                rgb(appearance::ACCENT)
-                            } else {
-                                rgb(appearance::BORDER)
-                            })
-                            .bg(if active {
-                                rgb(appearance::ACTIVE)
-                            } else {
-                                rgb(appearance::SURFACE)
-                            })
-                            .on_drag(
-                                DraggedTab {
-                                    id,
-                                    name: name.clone(),
-                                },
-                                |drag, _, _, cx| {
-                                    cx.new(|_| DraggedTab {
-                                        id: drag.id,
-                                        name: drag.name.clone(),
-                                    })
-                                },
-                            )
-                            .on_drop(cx.listener(move |this, drag: &DraggedTab, _, cx| {
-                                this.reorder_tabs(drag.id, id, cx);
-                            }))
-                            .child(
-                                Button::new(("select-tab", id))
-                                    .small()
-                                    .ghost()
-                                    .label(if doc.dirty {
-                                        format!("●  {name}").into()
+                    .children(
+                        group
+                            .documents
+                            .iter()
+                            .filter_map(|id| self.documents.iter().find(|doc| doc.id == *id))
+                            .map(|doc| {
+                                let id = doc.id;
+                                let active = group.active == Some(id);
+                                let suffix = doc
+                                    .disk_status
+                                    .tab_suffix()
+                                    .or(doc.placeholder.then_some("откройте заново"));
+                                let name = suffix.map_or_else(
+                                    || doc.name.clone(),
+                                    |status| format!("{} ({status})", doc.name).into(),
+                                );
+                                let tab = div()
+                                    .id(("tab", id))
+                                    .flex()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .gap_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(if active {
+                                        rgb(appearance::ACCENT)
                                     } else {
-                                        name
+                                        rgb(appearance::BORDER)
                                     })
-                                    .max_w(px(230.0))
-                                    .tooltip(doc.file.as_ref().map_or_else(
-                                        || "Без имени".to_owned(),
-                                        |file| display_path(&file.path),
-                                    ))
-                                    .on_click(cx.listener(
-                                        move |this, event: &ClickEvent, window, cx| {
-                                            if event.click_count() == 2 {
-                                                this.close_tab(id, window, cx);
-                                            } else {
-                                                this.select(id, window, cx);
+                                    .bg(if active {
+                                        rgb(appearance::ACTIVE)
+                                    } else {
+                                        rgb(appearance::SURFACE)
+                                    })
+                                    .on_drag(
+                                        DraggedTab {
+                                            id,
+                                            name: name.clone(),
+                                        },
+                                        |drag, _, _, cx| {
+                                            cx.new(|_| DraggedTab {
+                                                id: drag.id,
+                                                name: drag.name.clone(),
+                                            })
+                                        },
+                                    )
+                                    .on_drop(cx.listener(
+                                        move |this, drag: &DraggedTab, window, cx| {
+                                            cx.stop_propagation();
+                                            if !this.applying_update()
+                                                && this.layout.move_document(
+                                                    drag.id,
+                                                    group_id,
+                                                    Some(id),
+                                                )
+                                            {
+                                                this.select(drag.id, window, cx);
                                             }
                                         },
-                                    )),
-                            )
-                            .child(
-                                Button::new(("close-tab", id))
-                                    .small()
-                                    .ghost()
-                                    .label("×")
-                                    .tooltip("Закрыть вкладку · Ctrl+W")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.close_tab(id, window, cx)
-                                    })),
-                            );
-                        let Some(path) = doc.file.as_ref().map(|file| file.path.clone()) else {
-                            return tab.into_any_element();
-                        };
-                        let workspace = cx.entity().downgrade();
-                        tab.context_menu(move |menu, _, _| {
-                            if !path.is_file() {
-                                return menu;
-                            }
-                            let reveal_path = path.clone();
-                            let copy_path = display_path(&path);
-                            let workspace = workspace.clone();
-                            menu.item(PopupMenuItem::new("Показать в Проводнике").on_click(
-                                move |_, window, cx| {
-                                    let reveal_path = reveal_path.clone();
-                                    let task = cx.background_spawn(async move {
-                                        super::reveal::select_in_explorer(&reveal_path)
-                                    });
-                                    window
-                                        .spawn(cx, async move |cx| {
-                                            if let Err(error) = task.await {
-                                                let detail = error.to_string();
-                                                let _ = cx.update(|window, cx| {
-                                                    drop(window.prompt(
+                                    ))
+                                    .child(
+                                        Button::new(("select-tab", id))
+                                            .small()
+                                            .ghost()
+                                            .label(if doc.dirty {
+                                                format!("●  {name}").into()
+                                            } else {
+                                                name
+                                            })
+                                            .max_w(px(230.0))
+                                            .tooltip(doc.file.as_ref().map_or_else(
+                                                || "Без имени".to_owned(),
+                                                |file| display_path(&file.path),
+                                            ))
+                                            .on_click(cx.listener(
+                                                move |this, event: &ClickEvent, window, cx| {
+                                                    if event.click_count() == 2 {
+                                                        this.close_tab(id, window, cx);
+                                                    } else {
+                                                        this.select(id, window, cx);
+                                                    }
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new(("close-tab", id))
+                                            .small()
+                                            .ghost()
+                                            .label("×")
+                                            .tooltip("Закрыть вкладку · Ctrl+W")
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.close_tab(id, window, cx)
+                                            })),
+                                    );
+                                let Some(path) = doc.file.as_ref().map(|file| file.path.clone())
+                                else {
+                                    return tab.into_any_element();
+                                };
+                                let workspace = cx.entity().downgrade();
+                                tab.context_menu(move |menu, _, _| {
+                                    if !path.is_file() {
+                                        return menu;
+                                    }
+                                    let reveal_path = path.clone();
+                                    let copy_path = display_path(&path);
+                                    let workspace = workspace.clone();
+                                    menu.item(PopupMenuItem::new("Показать в Проводнике").on_click(
+                                        move |_, window, cx| {
+                                            let reveal_path = reveal_path.clone();
+                                            let task = cx.background_spawn(async move {
+                                                super::reveal::select_in_explorer(&reveal_path)
+                                            });
+                                            window
+                                                .spawn(cx, async move |cx| {
+                                                    if let Err(error) = task.await {
+                                                        let detail = error.to_string();
+                                                        let _ = cx.update(|window, cx| {
+                                                            drop(window.prompt(
                                                         PromptLevel::Critical,
                                                         "Не удалось показать файл в Проводнике.",
                                                         Some(&detail),
                                                         &[PromptButton::ok("Закрыть")],
                                                         cx,
                                                     ));
+                                                        });
+                                                    }
+                                                })
+                                                .detach();
+                                        },
+                                    ))
+                                    .item(PopupMenuItem::new("Копировать путь").on_click(
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_path.clone(),
+                                            ));
+                                        },
+                                    ))
+                                    .separator()
+                                    .item(
+                                        PopupMenuItem::new("Закрыть вкладку").on_click(
+                                            move |_, window, cx| {
+                                                let _ = workspace.update(cx, |this, cx| {
+                                                    this.close_tab(id, window, cx)
                                                 });
-                                            }
-                                        })
-                                        .detach();
-                                },
-                            ))
-                            .item(PopupMenuItem::new("Копировать путь").on_click(
-                                move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        copy_path.clone(),
-                                    ));
-                                },
-                            ))
-                            .separator()
-                            .item(
-                                PopupMenuItem::new("Закрыть вкладку").on_click(
-                                    move |_, window, cx| {
-                                        let _ = workspace
-                                            .update(cx, |this, cx| this.close_tab(id, window, cx));
-                                    },
-                                ),
-                            )
-                        })
-                        .into_any_element()
-                    }))
-                    .child(div().id("new-tab-space").flex_1().h_full().on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            if event.click_count == 2 {
-                                this.new_file(window, cx);
-                            }
-                        }),
-                    )),
+                                            },
+                                        ),
+                                    )
+                                })
+                                .into_any_element()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id(("new-tab-space", group_id))
+                            .flex_1()
+                            .h_full()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    if event.click_count == 2 {
+                                        this.layout.focus(group_id);
+                                        this.new_file(window, cx);
+                                    }
+                                }),
+                            ),
+                    ),
             )
             .child(
-                Button::new("new-tab")
+                Button::new(("new-tab", group_id))
                     .small()
                     .ghost()
                     .label("+")
                     .disabled(self.busy.is_some() || self.applying_update())
                     .tooltip("Создать вкладку · Ctrl+N")
-                    .on_click(cx.listener(|this, _, window, cx| this.new_file(window, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.layout.focus(group_id);
+                        this.new_file(window, cx)
+                    })),
             )
             .child(
-                Button::new("reopen")
+                Button::new(("reopen", group_id))
                     .small()
                     .ghost()
                     .label("↶")
                     .disabled(self.busy.is_some() || self.closed.is_empty())
                     .tooltip("Открыть закрытую вкладку · Ctrl+Shift+T")
-                    .on_click(cx.listener(|this, _, window, cx| this.reopen(window, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.layout.focus(group_id);
+                        this.reopen(window, cx)
+                    })),
             )
+    }
+
+    fn group_tree(
+        &self,
+        node: &crate::layout::Node,
+        available: Size<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let Some(split) = &node.split {
+            let horizontal = split.axis == crate::layout::Axis::Horizontal;
+            let extent = if horizontal {
+                available.width
+            } else {
+                available.height
+            };
+            let first_size = extent * split.ratio;
+            let second_size = extent * (1.0 - split.ratio);
+            let first_available = if horizontal {
+                size(first_size, available.height)
+            } else {
+                size(available.width, first_size)
+            };
+            let second_available = if horizontal {
+                size(second_size, available.height)
+            } else {
+                size(available.width, second_size)
+            };
+            let first = self.group_tree(&split.first, first_available, window, cx);
+            let second = self.group_tree(&split.second, second_available, window, cx);
+            let id = node.id;
+            let weak = cx.entity().downgrade();
+            let panels = if horizontal {
+                h_resizable(("editor-split", id))
+            } else {
+                v_resizable(("editor-split", id))
+            };
+            return panels
+                .child(
+                    resizable_panel()
+                        .size(first_size)
+                        .size_range(px(60.)..Pixels::MAX)
+                        .child(first),
+                )
+                .child(
+                    resizable_panel()
+                        .size(second_size)
+                        .size_range(px(60.)..Pixels::MAX)
+                        .child(second),
+                )
+                .on_resize(move |state, _, cx| {
+                    let sizes = state.read(cx).sizes();
+                    if sizes.len() == 2 {
+                        let total = f32::from(sizes[0] + sizes[1]);
+                        if total > 0. {
+                            let ratio = f32::from(sizes[0]) / total;
+                            let _ = weak.update(cx, |this, cx| {
+                                this.layout.set_ratio(id, ratio);
+                                cx.notify();
+                            });
+                        }
+                    }
+                })
+                .into_any_element();
+        }
+        let Some(group) = &node.group else {
+            return div().into_any_element();
+        };
+        let id = node.id;
+        let doc = group
+            .active
+            .and_then(|active| self.documents.iter().find(|doc| doc.id == active));
+        let body = doc
+            .map(|doc| {
+                if let Some(log) = &doc.log {
+                    return log.clone().into_any_element();
+                }
+                div()
+                    .size_full()
+                    .flex()
+                    .child(
+                        div().flex_1().min_w_0().h_full().child(
+                            Editor::new(&doc.editor)
+                                .readonly(doc.placeholder || self.applying_update())
+                                .bordered(false)
+                                .h_full()
+                                .w_full()
+                                .font_family("Consolas")
+                                .text_size(px(self.font_size)),
+                        ),
+                    )
+                    .child(crate::minimap::strip(&doc.minimap))
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(appearance::MUTED))
+                    .child("Перетащите вкладку или создайте документ")
+                    .into_any_element()
+            });
+        div()
+            .id(("editor-group", id))
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_1()
+            .border_color(rgb(if self.layout.focused == id {
+                appearance::ACCENT
+            } else {
+                appearance::BORDER
+            }))
+            .capture_any_mouse_down(cx.listener(move |this, _, window, cx| {
+                let active = this
+                    .layout
+                    .groups()
+                    .into_iter()
+                    .find(|(group, _)| *group == id)
+                    .and_then(|(_, group)| group.active);
+                if this.layout.focused != id || active.unwrap_or(0) != this.active {
+                    if let Some(active) = active {
+                        this.select(active, window, cx);
+                    } else {
+                        this.focus_empty_group(id, window, cx);
+                    }
+                }
+            }))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
+                cx.stop_propagation();
+                if !this.applying_update() && this.layout.move_document(dragged.id, id, None) {
+                    this.select(dragged.id, window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .bg(rgb(appearance::SURFACE))
+                    .child(self.tabs(id, group, window, cx))
+                    .child(
+                        Button::new(("split-horizontal", id))
+                            .small()
+                            .ghost()
+                            .label("◫")
+                            .tooltip("Разделить по горизонтали")
+                            .disabled(self.applying_update())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(empty) =
+                                    this.layout.split(id, crate::layout::Axis::Horizontal)
+                                {
+                                    this.focus_empty_group(empty, window, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(("split-vertical", id))
+                            .small()
+                            .ghost()
+                            .label("⬒")
+                            .tooltip("Разделить по вертикали")
+                            .disabled(self.applying_update())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(empty) =
+                                    this.layout.split(id, crate::layout::Axis::Vertical)
+                                {
+                                    this.focus_empty_group(empty, window, cx);
+                                }
+                            })),
+                    )
+                    .when(
+                        group.documents.is_empty() && self.layout.groups().len() > 1,
+                        |header| {
+                            header.child(
+                                Button::new(("close-empty-group", id))
+                                    .small()
+                                    .ghost()
+                                    .label("×")
+                                    .tooltip("Закрыть пустую панель · Ctrl+W")
+                                    .disabled(self.busy.is_some() || self.applying_update())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.close_empty_group(id, window, cx);
+                                    })),
+                            )
+                        },
+                    ),
+            )
+            .children(
+                doc.filter(|doc| doc.log.is_none())
+                    .map(|doc| self.document_header(doc)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(body),
+            )
+            .children(
+                doc.filter(|doc| doc.log.is_none())
+                    .map(|doc| self.status(doc, cx)),
+            )
+            .into_any_element()
     }
 
     fn status(&self, doc: &Document, cx: &mut Context<Self>) -> impl IntoElement {
@@ -353,8 +620,9 @@ impl Workspace {
     }
 
     fn jump_to_json_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(super::json_validation::Status::Invalid(problem)) =
-            self.active_document().json_status.as_ref()
+        let Some(super::json_validation::Status::Invalid(problem)) = self
+            .active_document_opt()
+            .and_then(|doc| doc.json_status.as_ref())
         else {
             return;
         };
@@ -365,8 +633,13 @@ impl Workspace {
         });
     }
 
-    fn json_validation_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let status = self.active_document().json_status.clone()?;
+    pub(super) fn json_validation_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = self
+            .documents
+            .iter()
+            .find(|doc| doc.id == self.active)?
+            .json_status
+            .clone()?;
         let (message, invalid) = match status {
             super::json_validation::Status::Invalid(problem) => (
                 format!(
@@ -396,6 +669,14 @@ impl Workspace {
                 .border_b_1()
                 .border_color(rgb(appearance::ERROR))
                 .child(Label::new(message).text_sm())
+                .child(div().flex_1())
+                .child(
+                    Button::new("dismiss-json-validation")
+                        .small()
+                        .ghost()
+                        .label("Отключить проверку")
+                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_json_validation(cx))),
+                )
                 .when(invalid, |element| {
                     element.child(
                         Button::new("json-error-location")
@@ -414,28 +695,38 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let doc = self.active_document();
-        let json_banner = self.json_validation_banner(cx);
-        let body = if let Some(log) = &doc.log {
-            log.clone().into_any_element()
+        let root = self.layout.root.clone();
+        let showing_home = self.showing_home();
+        let body = if showing_home {
+            self.home_page(window, cx)
         } else {
-            Editor::new(&doc.editor)
-                .readonly(doc.placeholder || self.applying_update())
-                .bordered(false)
-                .h_full()
-                .w_full()
-                .font_family("Consolas")
-                .text_size(px(self.font_size))
-                .into_any_element()
+            self.group_tree(&root, window.viewport_size(), window, cx)
         };
+        let json_banner = (!showing_home)
+            .then(|| self.json_validation_banner(cx))
+            .flatten();
         let workspace = div()
             .id("rusttext")
             .key_context("RustText")
+            .track_focus(&self.fallback_focus)
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(appearance::BACKGROUND))
             .text_color(rgb(appearance::FOREGROUND))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape"
+                    && this.home.open
+                    && !this.documents.is_empty()
+                    && this.settings_panel.is_none()
+                    && this.versions.is_none()
+                    && this.template_generator.is_none()
+                    && this.list_comparison.is_none()
+                {
+                    this.close_home(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewFile, window, cx| this.new_file(window, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.open_picker(OpenMode::NORMAL, window, cx)
@@ -454,16 +745,37 @@ impl Render for Workspace {
                     this.register_file_associations(window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &Save, window, cx| this.save(false, window, cx)))
-            .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save(true, window, cx)))
-            .on_action(
-                cx.listener(|this, _: &CloseTab, window, cx| {
-                    this.close_tab(this.active, window, cx)
-                }),
-            )
+            .on_action(cx.listener(|this, _: &Save, window, cx| {
+                if !this.showing_home() {
+                    this.save(false, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SaveAs, window, cx| {
+                if !this.showing_home() {
+                    this.save(true, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if this.showing_home() {
+                    return;
+                }
+                if this.active == 0 && this.layout.groups().len() > 1 {
+                    this.close_empty_group(this.layout.focused, window, cx);
+                } else {
+                    this.close_tab(this.active, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ReopenTab, window, cx| this.reopen(window, cx)))
-            .on_action(cx.listener(|this, _: &GoToLine, window, cx| this.go_to_line(window, cx)))
-            .on_action(cx.listener(|this, _: &FormatJson, window, cx| this.format_json(window, cx)))
+            .on_action(cx.listener(|this, _: &GoToLine, window, cx| {
+                if !this.showing_home() {
+                    this.go_to_line(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FormatJson, window, cx| {
+                if !this.showing_home() {
+                    this.format_json(window, cx);
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &FindText, window, cx| this.open_search(false, window, cx)),
             )
@@ -471,30 +783,34 @@ impl Render for Workspace {
                 cx.listener(|this, _: &ReplaceText, window, cx| this.open_search(true, window, cx)),
             )
             .on_action(cx.listener(|this, _: &NextMatch, window, cx| {
-                this.run_search(Command::Next, window, cx)
+                if !this.showing_home() {
+                    this.run_search(Command::Next, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &PreviousMatch, window, cx| {
-                this.run_search(Command::Previous, window, cx)
+                if !this.showing_home() {
+                    this.run_search(Command::Previous, window, cx);
+                }
             }))
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(1.0, cx)))
-            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(-1.0, cx)))
-            .on_action(cx.listener(|this, _: &ToggleWrap, window, cx| this.toggle_wrap(window, cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                if !this.showing_home() {
+                    this.zoom(1.0, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                if !this.showing_home() {
+                    this.zoom(-1.0, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWrap, window, cx| {
+                if !this.showing_home() {
+                    this.toggle_wrap(window, cx);
+                }
+            }))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.open_paths(paths.paths().to_vec(), OpenMode::NORMAL, window, cx);
             }))
-            .child(self.menubar(cx))
-            .child(
-                div()
-                    .h(px(38.0))
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .bg(rgb(appearance::SURFACE))
-                    .border_b_1()
-                    .border_color(rgb(appearance::BORDER))
-                    .child(self.tabs(cx)),
-            )
-            .children(doc.log.is_none().then(|| self.document_header(doc)))
+            .child(TitleBar::new().child(self.menubar(cx)))
             .children(json_banner)
             .child(
                 div()
@@ -504,13 +820,19 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(body),
             )
-            .children(self.search_panel(window, cx))
-            .children(doc.log.is_none().then(|| self.status(doc, cx)))
+            .children(
+                (!showing_home)
+                    .then(|| self.search_panel(window, cx))
+                    .flatten(),
+            )
             .children(self.update_panel(cx));
         div()
             .relative()
             .size_full()
             .child(workspace)
             .children(self.template_generator_panel(cx))
+            .children(self.list_comparison_panel(cx))
+            .children(self.versions_panel(cx))
+            .children(self.settings_panel(cx))
     }
 }

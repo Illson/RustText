@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 fn capture(width: f32) -> Capture {
     Capture {
         state: State {
+            layout: None,
             tabs: vec![],
             closed: vec![],
             active: 0,

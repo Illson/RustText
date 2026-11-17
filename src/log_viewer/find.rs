@@ -11,6 +11,7 @@ use gpui_kit::{
     component::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
+        checkbox::Checkbox,
         input::{Input, InputEvent, InputState},
         label::Label,
     },
@@ -30,6 +31,7 @@ pub(super) struct LogSearch {
     regex: bool,
     case_sensitive: bool,
     whole_word: bool,
+    only_current: bool,
     results: Option<SearchPage>,
     message: SharedString,
     pub(super) progress: Option<Progress>,
@@ -44,6 +46,7 @@ impl LogSearch {
             InputEvent::PressEnter { .. } => viewer.start_search(false, window, cx),
             InputEvent::Change => {
                 viewer.reset_search(cx);
+                viewer.refresh_all_search_highlights(cx);
                 cx.notify();
             }
             _ => {}
@@ -53,6 +56,7 @@ impl LogSearch {
             regex: false,
             case_sensitive: false,
             whole_word: false,
+            only_current: true,
             results: None,
             progress: None,
             message: "Введите текст или время.".into(),
@@ -214,6 +218,14 @@ impl LogSearch {
                         |search| &mut search.whole_word,
                         cx,
                     ))
+                    .child(Checkbox::new("log-only-current")
+                        .label("Только текущее")
+                        .checked(self.only_current)
+                        .on_click(cx.listener(|this, checked, _, cx| {
+                            if let Some(search) = &mut this.search { search.only_current = *checked; }
+                            this.refresh_all_search_highlights(cx);
+                            cx.notify();
+                        })))
                     .child(Label::new(message).text_sm().truncate()),
             )
             .children(
@@ -262,7 +274,35 @@ impl LogViewer {
         })
     }
 
+    pub(super) fn refresh_all_search_highlights(&mut self, cx: &mut Context<LogViewer>) {
+        if let Some(highlight) = self.all_search_highlight.take() {
+            highlight.clear(cx);
+        }
+        let Some(search) = &self.search else {
+            return;
+        };
+        if search.only_current {
+            return;
+        }
+        let query = crate::search::Query {
+            text: search.input.read(cx).value().to_string(),
+            regex: search.regex,
+            case_sensitive: search.case_sensitive,
+            whole_word: search.whole_word,
+            all_tabs: false,
+        };
+        self.all_search_highlight = crate::search_highlight::SearchHighlight::visible_log_matches(
+            &self.viewer,
+            &query,
+            &self.search_viewport,
+            cx,
+        );
+    }
+
     pub(super) fn reset_search(&mut self, cx: &mut Context<LogViewer>) {
+        if let Some(highlight) = self.all_search_highlight.take() {
+            highlight.clear(cx);
+        }
         self.clear_search_highlight(cx);
         if let Some(search) = &mut self.search {
             if let Some(progress) = search.progress.take() {
@@ -366,6 +406,7 @@ impl LogViewer {
     }
 
     fn start_search(&mut self, more: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_all_search_highlights(cx);
         if !self.available() {
             return;
         }
@@ -569,6 +610,7 @@ fn option_button(
             };
             if changed {
                 this.reset_search(cx);
+                this.refresh_all_search_highlights(cx);
                 cx.notify();
             }
         }))

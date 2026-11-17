@@ -1,3 +1,12 @@
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
 use gpui_kit::{
     component::{
         Disableable, Sizable,
@@ -9,13 +18,15 @@ use gpui_kit::{
 };
 
 use super::Workspace;
-use crate::{appearance, template};
+use crate::{appearance, files::FileTarget, template};
 
 pub(super) struct TemplateGenerator {
     template: Entity<InputState>,
     rows: Entity<InputState>,
     error: Option<SharedString>,
     generating: bool,
+    progress: Arc<GeneratorProgress>,
+    status: Option<SharedString>,
     _submit: [Subscription; 2],
 }
 
@@ -39,6 +50,8 @@ impl TemplateGenerator {
             rows,
             error: None,
             generating: false,
+            progress: Arc::default(),
+            status: None,
             _submit: [submit_template, submit_rows],
         }
     }
@@ -73,8 +86,7 @@ impl TemplateGenerator {
                             .small()
                             .ghost()
                             .label("×")
-                            .tooltip("Закрыть генератор")
-                            .disabled(generating)
+                            .tooltip(if generating { "Отменить генерацию" } else { "Закрыть генератор" })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.close_template_generator(window, cx)
                             })),
@@ -93,7 +105,7 @@ impl TemplateGenerator {
                         "{int_from_5} увеличивает число на каждой строке. {guid} создаёт UUID.",
                     ))
                     .child(Label::new(
-                        "{rand_string} создаёт 12 случайных букв и цифр, {rand_string_16} — строку из 16 символов.",
+                        "{rand_string} создаёт 12 случайных букв и цифр, {rand_string_16} – строку из 16 символов.",
                     ))
                     .child(Label::new(
                         "В одном шаблоне можно сочетать несколько правил.",
@@ -115,6 +127,15 @@ impl TemplateGenerator {
                     )
                     .child(div().flex_1())
                     .child(
+                        Button::new("template-generator-file")
+                            .small()
+                            .label("В файл…")
+                            .disabled(generating)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.generate_template_output(true, window, cx)
+                            })),
+                    )
+                    .child(
                         Button::new("template-generator-run")
                             .small()
                             .primary()
@@ -125,6 +146,14 @@ impl TemplateGenerator {
                             })),
                     ),
             )
+            .children(generating.then(|| {
+                Label::new(format!(
+                    "Создано строк: {}, байт: {}. Нажмите × или Esc для отмены.",
+                    self.progress.rows.load(Ordering::Relaxed),
+                    self.progress.bytes.load(Ordering::Relaxed),
+                )).text_sm()
+            }))
+            .children(self.status.as_ref().map(|status| Label::new(status.clone()).text_sm()))
             .children(self.error.as_ref().map(|error| {
                 Label::new(error.clone())
                     .text_sm()
@@ -151,11 +180,10 @@ impl Workspace {
     }
 
     fn close_template_generator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .template_generator
-            .as_ref()
-            .is_some_and(|generator| generator.generating)
+        if let Some(generator) = &self.template_generator
+            && generator.generating
         {
+            generator.progress.cancelled.store(true, Ordering::Relaxed);
             return;
         }
         self.template_generator = None;
@@ -186,6 +214,15 @@ impl Workspace {
     }
 
     fn generate_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.generate_template_output(false, window, cx);
+    }
+
+    fn generate_template_output(
+        &mut self,
+        file_output: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(generator) = &mut self.template_generator else {
             return;
         };
@@ -202,36 +239,174 @@ impl Workspace {
                 return;
             }
         };
-
+        let upper_bound = match template::output_upper_bound(&template_text, rows) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                generator.error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
         generator.generating = true;
         generator.error = None;
-        let operation =
-            cx.background_spawn(async move { template::generate(&template_text, rows) });
+        generator.status = None;
+        generator.progress = Arc::default();
+        let progress = generator.progress.clone();
         cx.notify();
+        if file_output || upper_bound > template::NEW_TAB_BYTES {
+            let picker = cx.prompt_for_new_path(Path::new(""), Some("Генерация.txt"));
+            let executor = cx.background_executor().clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let target = match picker.await {
+                    Ok(Ok(Some(path))) => executor
+                        .spawn(async move { FileTarget::from_picker(path) })
+                        .await
+                        .map(Some)
+                        .map_err(|error| error.to_string()),
+                    Ok(Ok(None)) => Ok(None),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Err("Диалог сохранения прерван".to_string()),
+                };
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if progress.cancelled.load(Ordering::Relaxed) {
+                        this.finish_template_generation(
+                            Err(template::TemplateError::Cancelled),
+                            window,
+                            cx,
+                        );
+                        return;
+                    }
+                    match target {
+                        Ok(Some(target)) => {
+                            if this.documents.iter().any(|document| {
+                                document
+                                    .file
+                                    .as_ref()
+                                    .is_some_and(|file| file.path == target.path)
+                            }) {
+                                if let Some(generator) = &mut this.template_generator {
+                                    generator.generating = false;
+                                    generator.error = Some(
+                                        "Файл уже открыт во вкладке. Выберите другой путь.".into(),
+                                    );
+                                }
+                                cx.notify();
+                                return;
+                            }
+                            this.start_template_generation(
+                                template_text,
+                                rows,
+                                Some(target),
+                                window,
+                                cx,
+                            );
+                        }
+                        Ok(None) => {
+                            if let Some(generator) = &mut this.template_generator {
+                                generator.generating = false;
+                            }
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            if let Some(generator) = &mut this.template_generator {
+                                generator.generating = false;
+                                generator.error = Some(error.into());
+                            }
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .detach();
+        } else {
+            self.start_template_generation(template_text, rows, None, window, cx);
+        }
+    }
 
+    fn start_template_generation(
+        &mut self,
+        template_text: String,
+        rows: usize,
+        target: Option<FileTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(generator) = &self.template_generator else {
+            return;
+        };
+        let progress = generator.progress.clone();
+        let monitor = progress.clone();
+        let operation = cx.background_spawn(async move {
+            let report = |state: template::GenerationProgress| {
+                progress.rows.store(state.rows, Ordering::Relaxed);
+                progress.bytes.store(state.bytes, Ordering::Relaxed);
+                !progress.cancelled.load(Ordering::Relaxed)
+            };
+            let result = if let Some(target) = target {
+                let path = target.path.clone();
+                template::generate_file(&template_text, rows, target, report)
+                    .map(|_| (None, Some(path)))
+            } else {
+                template::generate_text(&template_text, rows, report).map(|text| (Some(text), None))
+            };
+            progress.finished.store(true, Ordering::Relaxed);
+            result
+        });
+        let executor = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            while !monitor.finished.load(Ordering::Relaxed) {
+                executor.timer(Duration::from_millis(100)).await;
+                if this.update_in(cx, |_, _, cx| cx.notify()).is_err() {
+                    monitor.cancelled.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn_in(window, async move |this, cx| {
             let result = operation.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let Some(generator) = &mut this.template_generator else {
-                    return;
-                };
-                match result {
-                    Ok(text) => {
-                        this.template_generator = None;
-                        this.open_generated_document(text, window, cx);
-                    }
-                    Err(error) => {
-                        generator.generating = false;
-                        generator.error = Some(error.to_string().into());
-                    }
-                }
-                cx.notify();
+                this.finish_template_generation(result, window, cx);
             });
         })
         .detach();
     }
 
-    fn open_generated_document(
+    fn finish_template_generation(
+        &mut self,
+        result: Result<(Option<String>, Option<std::path::PathBuf>), template::TemplateError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(generator) = &mut self.template_generator else {
+            return;
+        };
+        generator.generating = false;
+        let result = match result {
+            Ok((Some(text), path)) => {
+                template::completed_text(text, generator.progress.cancelled.load(Ordering::Relaxed))
+                    .map(|text| (Some(text), path))
+            }
+            result => result,
+        };
+        match result {
+            Ok((Some(text), _)) => {
+                self.template_generator = None;
+                self.open_generated_document(text, window, cx);
+            }
+            Ok((_, Some(path))) => {
+                generator.status = Some(format!("Результат сохранён: {}", path.display()).into());
+            }
+            Ok(_) => {}
+            Err(template::TemplateError::Cancelled) => {
+                generator.status = Some("Генерация отменена. Файл назначения не изменён.".into());
+            }
+            Err(error) => generator.error = Some(error.to_string().into()),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_generated_document(
         &mut self,
         text: String,
         window: &mut Window,
@@ -250,5 +425,19 @@ impl Workspace {
             document.dirty = dirty;
         }
         self.select(id, window, cx);
+    }
+}
+
+#[derive(Default)]
+struct GeneratorProgress {
+    cancelled: AtomicBool,
+    finished: AtomicBool,
+    rows: AtomicUsize,
+    bytes: AtomicU64,
+}
+
+impl Drop for TemplateGenerator {
+    fn drop(&mut self) {
+        self.progress.cancelled.store(true, Ordering::Relaxed);
     }
 }

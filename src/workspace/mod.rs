@@ -1,15 +1,20 @@
 mod associations;
 mod disk_status;
 mod file_actions;
+mod home;
 mod json_action;
 mod json_validation;
 mod launches;
+mod list_comparison;
 mod menus;
 mod reveal;
 mod search_panel;
 mod session_runtime;
+mod settings_panel;
 mod template_generator;
 mod updates;
+mod version_actions;
+mod versions_panel;
 mod view;
 
 pub(crate) use associations::register_for_current_user;
@@ -18,6 +23,7 @@ pub(crate) use view::bind_keys;
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
 };
 
 use gpui_kit::base::{Scrollbar, ScrollbarMode};
@@ -30,6 +36,7 @@ use crate::{
     log_viewer::LogViewer,
     recent_files::{RecentFile, RecentFiles},
     session::{MAX_CLOSED_TABS, Tab},
+    settings::{Settings, untitled_tab_name_rope},
     single_instance::SingleInstance,
     text_format::{TextEncoding, TextFormat},
 };
@@ -40,12 +47,16 @@ struct Document {
     file: Option<FileTarget>,
     format: TextFormat,
     editor: Entity<EditorState>,
+    search_viewport: crate::search_highlight::ViewportTracker,
+    minimap: crate::minimap::MinimapState,
     saved_text: Option<Rope>,
     dirty: bool,
     revision: u64,
     disk_status: disk_status::DiskStatus,
     placeholder: bool,
     json_status: Option<json_validation::Status>,
+    json_validation_disabled: bool,
+    json_validation_generation: u64,
     restored_scroll: Option<[f32; 2]>,
     log: Option<Entity<LogViewer>>,
     _subscriptions: [Subscription; 2],
@@ -58,17 +69,27 @@ struct ClosedTab {
 
 pub(crate) struct Workspace {
     documents: Vec<Document>,
+    layout: crate::layout::Layout,
+    fallback_focus: FocusHandle,
+    home: home::Home,
+    version_store: Option<Arc<crate::file_versions::VersionStore>>,
+    versions: Option<versions_panel::VersionsPanel>,
     active: u64,
     next_id: u64,
     tab_scroll: ScrollHandle,
     closed: Vec<ClosedTab>,
     recent: RecentFiles,
+    settings: Settings,
+    settings_panel: Option<settings_panel::SettingsPanel>,
+    settings_pending: Option<Settings>,
+    settings_writing: bool,
     busy: Option<&'static str>,
     error: Option<SharedString>,
     wrap: bool,
     font_size: f32,
     search: Option<search_panel::SearchPanel>,
     template_generator: Option<template_generator::TemplateGenerator>,
+    list_comparison: Option<list_comparison::ListComparison>,
     session: Option<session_runtime::SessionWriter>,
     session_notice: Option<SharedString>,
     session_error: Option<SharedString>,
@@ -84,19 +105,40 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let (recent, recent_error) = RecentFiles::load();
+        let (settings, settings_error) = Settings::load();
+        let (version_store, version_error) = match crate::file_versions::VersionStore::load() {
+            Ok(store) => (Some(Arc::new(store)), None),
+            Err(error) => (
+                None,
+                Some(format!("История версий недоступна. {error}").into()),
+            ),
+        };
         let mut this = Self {
             documents: Vec::new(),
+            layout: crate::layout::Layout::default(),
+            fallback_focus: cx.focus_handle(),
+            home: home::Home::new(window, cx),
+            version_store,
+            versions: None,
             active: 0,
             next_id: 1,
             tab_scroll: ScrollHandle::new(),
             closed: Vec::new(),
             recent,
+            settings,
+            settings_panel: None,
+            settings_pending: None,
+            settings_writing: false,
             busy: None,
-            error: recent_error.map(recent_warning),
+            error: recent_error
+                .map(recent_warning)
+                .or_else(|| settings_error.map(settings_warning))
+                .or(version_error),
             wrap: false,
             font_size: 15.0,
             search: None,
             template_generator: None,
+            list_comparison: None,
             session: None,
             session_notice: None,
             session_error: None,
@@ -115,14 +157,18 @@ impl Workspace {
             this.open_paths(paths, file_actions::OpenMode::NORMAL, window, cx);
         }
         this.check_for_updates(window, cx);
+        if this.active_document_opt().is_none() {
+            this.fallback_focus.focus(window, cx);
+        }
         this
     }
 
     fn active_document(&self) -> &Document {
-        self.documents
-            .iter()
-            .find(|doc| doc.id == self.active)
-            .expect("active tab must exist")
+        self.active_document_opt().expect("active tab must exist")
+    }
+
+    fn active_document_opt(&self) -> Option<&Document> {
+        self.documents.iter().find(|doc| doc.id == self.active)
     }
 
     fn add_document(
@@ -149,9 +195,6 @@ impl Workspace {
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let name = file
-            .as_ref()
-            .map_or_else(|| "Без имени".into(), |file| file_name(&file.path));
         let language = file
             .as_ref()
             .map_or_else(|| "text".to_owned(), |file| syntax_for(&file.path));
@@ -176,16 +219,35 @@ impl Workspace {
             state
         });
         let saved_text = editor.read(cx).text().clone();
-        let change = cx.subscribe(&editor, move |this, editor, event, cx| {
-            if matches!(event, InputEvent::Change)
-                && let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id)
-            {
-                doc.dirty = doc.saved_text.as_ref() != Some(editor.read(cx).text());
-                doc.revision = doc.revision.wrapping_add(1);
-                cx.notify();
-                this.schedule_json_validation(id, cx);
-            }
-        });
+        let name = file.as_ref().map_or_else(
+            || untitled_tab_name_rope(&saved_text, self.settings.untitled_tab_limit).into(),
+            |file| file_name(&file.path),
+        );
+        let (search_viewport, minimap) = crate::minimap::install(&editor, cx);
+        let change =
+            cx.subscribe_in(
+                &editor,
+                window,
+                move |this, editor, event, window, cx| match event {
+                    InputEvent::Change => {
+                        let untitled_limit = this.settings.untitled_tab_limit;
+                        if let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id) {
+                            let text = editor.read(cx).text();
+                            doc.dirty = doc.saved_text.as_ref() != Some(text);
+                            if doc.file.is_none() {
+                                doc.name = untitled_tab_name_rope(text, untitled_limit).into();
+                            }
+                            doc.revision = doc.revision.wrapping_add(1);
+                            cx.notify();
+                            this.schedule_json_validation(id, cx);
+                        }
+                    }
+                    InputEvent::Focus if this.active != id || this.layout.active() != Some(id) => {
+                        this.select(id, window, cx);
+                    }
+                    _ => {}
+                },
+            );
         let cursor = cx.observe(&editor, move |this, _, cx| {
             if this.active == id {
                 cx.notify();
@@ -198,41 +260,84 @@ impl Workspace {
             file,
             format,
             editor,
+            search_viewport,
+            minimap,
             saved_text: Some(saved_text),
             dirty: false,
             revision: 0,
             disk_status: disk_status::DiskStatus::Current,
             placeholder: false,
             json_status: json_enabled.then_some(json_validation::Status::Checking),
+            json_validation_disabled: false,
+            json_validation_generation: 0,
             restored_scroll: None,
             log: None,
             _subscriptions: [change, cursor],
         });
-        if json_enabled {
-            self.schedule_json_validation(id, cx);
-        }
+        self.layout.attach(id);
+        self.schedule_json_validation(id, cx);
         id
     }
 
     fn select(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.documents.iter().position(|doc| doc.id == id) {
+            self.home.open = false;
             if self.active != id {
+                self.remember_position(self.active, window, cx);
+            }
+            self.layout.select(id);
+            if self.active != id {
+                self.versions = None;
                 self.error = None;
+                self.session_notice = None;
                 self.active = id;
             }
             self.tab_scroll.scroll_to_item(index);
-            let doc = &self.documents[index];
-            let focus = if let Some(log) = &doc.log {
-                self.search = None;
+            let log = self.documents[index].log.clone();
+            let focus = if let Some(log) = log {
+                self.clear_search(cx);
                 log.read(cx).focus_handle(cx)
             } else {
-                doc.editor.read(cx).focus_handle(cx)
+                self.documents[index].editor.read(cx).focus_handle(cx)
             };
             window.focus(&focus, cx);
+            self.refresh_all_search_highlights(cx);
             cx.notify();
         }
     }
 
+    pub(super) fn showing_home(&self) -> bool {
+        self.documents.is_empty() || self.home.open
+    }
+
+    pub(super) fn focus_active_document(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(doc) = self.active_document_opt() {
+            let focus = doc.log.as_ref().map_or_else(
+                || doc.editor.read(cx).focus_handle(cx),
+                |log| log.read(cx).focus_handle(cx),
+            );
+            window.focus(&focus, cx);
+        } else {
+            self.fallback_focus.focus(window, cx);
+        }
+    }
+
+    pub(super) fn restore_workspace_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.showing_home() {
+            self.focus_home_query(window, cx);
+        } else {
+            self.focus_active_document(window, cx);
+        }
+    }
+
+    pub(super) fn refresh_untitled_tab_names(&mut self, cx: &App) {
+        let limit = self.settings.untitled_tab_limit;
+        for doc in &mut self.documents {
+            if doc.file.is_none() {
+                doc.name = untitled_tab_name_rope(doc.editor.read(cx).text(), limit).into();
+            }
+        }
+    }
     fn insert_log(
         &mut self,
         target: FileTarget,
@@ -265,8 +370,47 @@ impl Workspace {
         if self.busy.is_some() || self.applying_update() {
             return;
         }
+        self.home.open = false;
         self.error = None;
+        self.session_notice = None;
         self.add_document(None, window, cx);
+    }
+
+    pub(super) fn focus_empty_group(
+        &mut self,
+        group_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.layout.focus(group_id) {
+            return;
+        }
+        self.home.open = false;
+        if self.active != 0 {
+            self.remember_position(self.active, window, cx);
+        }
+        self.active = 0;
+        self.versions = None;
+        self.fallback_focus.focus(window, cx);
+        self.refresh_all_search_highlights(cx);
+        cx.notify();
+    }
+
+    pub(super) fn close_empty_group(
+        &mut self,
+        group_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy.is_some() || self.applying_update() || !self.layout.close_empty_group(group_id)
+        {
+            return;
+        }
+        if let Some(next) = self.layout.active() {
+            self.select(next, window, cx);
+        } else {
+            self.focus_empty_group(self.layout.focused, window, cx);
+        }
     }
 
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -295,19 +439,22 @@ impl Workspace {
         let Some(index) = self.documents.iter().position(|doc| doc.id == id) else {
             return;
         };
+        self.remember_activity(id, window, cx);
         let doc = self.documents.remove(index);
+        self.layout.remove(id);
         let (tab, draft) = doc.session_snapshot(doc.file.is_none(), cx);
         if self.closed.len() == MAX_CLOSED_TABS {
             self.closed.remove(0);
         }
         self.closed.push(ClosedTab { tab, draft });
 
-        if self.documents.is_empty() {
-            self.add_document(None, window, cx);
-        } else if id == self.active {
-            let next = self.documents[index.min(self.documents.len() - 1)].id;
+        self.clear_search(cx);
+        if let Some(next) = self.layout.active() {
             self.select(next, window, cx);
         } else {
+            self.active = 0;
+            self.versions = None;
+            self.fallback_focus.focus(window, cx);
             cx.notify();
         }
     }
@@ -326,20 +473,10 @@ impl Workspace {
                 let label = if let Some(file) = &entry.tab.file {
                     display_path(&file.path)
                 } else {
-                    let preview: String = entry
-                        .draft
-                        .iter()
-                        .flat_map(|draft| draft.chunks())
-                        .flat_map(str::chars)
-                        .take(60)
-                        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
-                        .collect();
-                    let preview = preview.trim();
-                    if preview.is_empty() {
-                        "Без имени".to_owned()
-                    } else {
-                        format!("Без имени — {preview}")
-                    }
+                    entry.draft.as_ref().map_or_else(
+                        || "Без имени".to_owned(),
+                        |draft| untitled_tab_name_rope(draft, self.settings.untitled_tab_limit),
+                    )
                 };
                 (entry.tab.id, label)
             })
@@ -370,6 +507,22 @@ impl Workspace {
         if self.busy.is_some() || self.log_is_writing(cx) {
             return false;
         }
+        if !self.home.close_recorded {
+            self.home.close_recorded = true;
+            let active = self.active;
+            for id in self.documents.iter().map(|doc| doc.id).collect::<Vec<_>>() {
+                if id == active {
+                    self.remember_activity(id, window, cx);
+                } else {
+                    self.remember_position(id, window, cx);
+                }
+            }
+        }
+        if self.history_is_writing() {
+            self.home.close_pending = true;
+            return false;
+        }
+        self.home.close_recorded = false;
         if self.session.is_some() {
             return self.begin_session_shutdown(session_runtime::AfterShutdown::Close, window, cx);
         }
@@ -415,23 +568,8 @@ impl Workspace {
         .detach();
     }
 
-    fn reorder_tabs(&mut self, dragged_id: u64, target_id: u64, cx: &mut Context<Self>) {
-        if self.applying_update() {
-            return;
-        }
-        let from = self.documents.iter().position(|doc| doc.id == dragged_id);
-        let to = self.documents.iter().position(|doc| doc.id == target_id);
-        if let (Some(from), Some(to)) = (from, to)
-            && from != to
-        {
-            let tab = self.documents.remove(from);
-            self.documents.insert(to, tab);
-            cx.notify();
-        }
-    }
-
     fn toggle_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(viewer) = self.active_document().log.clone() {
+        if let Some(viewer) = self.active_document_opt().and_then(|doc| doc.log.clone()) {
             viewer.update(cx, |viewer, cx| viewer.toggle_wrap(window, cx));
             cx.notify();
             return;
@@ -475,4 +613,8 @@ fn syntax_for(path: &Path) -> String {
 
 fn recent_warning(error: std::io::Error) -> SharedString {
     format!("Список недавних файлов недоступен. {error}").into()
+}
+
+fn settings_warning(error: std::io::Error) -> SharedString {
+    format!("Настройки недоступны. {error}").into()
 }

@@ -1,3 +1,5 @@
+use std::fs;
+
 use super::*;
 
 #[test]
@@ -136,4 +138,261 @@ fn failed_replacement_leaves_the_original_and_removes_staging_files() {
     drop(reader);
     assert_eq!(fs::read_to_string(&path).unwrap(), "original");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn unguarded_native_replace_can_overwrite_an_edit_after_metadata_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    fs::write(&path, b"original").unwrap();
+    let target = FileTarget::from_picker(path.clone()).unwrap();
+    let mut pending = windows_save::private_temporary_file(directory.path()).unwrap();
+    pending.write_all(b"editor snapshot").unwrap();
+    pending.as_file().sync_all().unwrap();
+    assert!(FileVersion::at(&path).unwrap() == target.version);
+    fs::write(&path, b"external edit after check").unwrap();
+    let guard = windows_save::replacement_guard(&path).unwrap();
+    windows_save::replace(&path, guard, pending, directory.path()).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"editor snapshot");
+}
+
+#[cfg(windows)]
+#[test]
+fn shared_publication_blocks_an_in_place_writer_after_version_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    fs::write(&path, b"original").unwrap();
+    let target = FileTarget::from_picker(path.clone()).unwrap();
+    let mut pending = windows_save::private_temporary_file(directory.path()).unwrap();
+    pending.write_all(b"editor snapshot").unwrap();
+    pending.as_file().sync_all().unwrap();
+    publish_pending(&target, pending, || {
+        let error = fs::write(&path, b"external edit after check").unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(32));
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"editor snapshot");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn boundary_failure_preserves_original_and_removes_pending_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    fs::write(&path, b"original").unwrap();
+    let target = FileTarget::from_picker(path.clone()).unwrap();
+    let mut pending = windows_save::private_temporary_file(directory.path()).unwrap();
+    pending.write_all(b"editor snapshot").unwrap();
+    let error = publish_pending(&target, pending, || {
+        fs::write(&path, b"external edit after check")
+    })
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(32));
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn save_fails_safely_when_an_external_writer_is_already_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    fs::write(&path, b"original").unwrap();
+    let target = FileTarget::from_picker(path.clone()).unwrap();
+    let writer = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let error = save(target, TextFormat::default(), "editor snapshot")
+        .err()
+        .unwrap();
+    assert_eq!(error.raw_os_error(), Some(32));
+    drop(writer);
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn replacement_guard_blocks_external_rename_and_replace() {
+    use windows::{Win32::Storage::FileSystem::ReplaceFileW, core::PCWSTR};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    let renamed = directory.path().join("renamed.txt");
+    let replacement = directory.path().join("replacement.txt");
+    fs::write(&path, b"original").unwrap();
+    fs::write(&replacement, b"replacement").unwrap();
+
+    let guard = windows_save::replacement_guard(&path).unwrap();
+
+    let rename_error = fs::rename(&path, &renamed).unwrap_err();
+    assert_eq!(rename_error.raw_os_error(), Some(32));
+
+    let original_wide = windows_save::wide_path(&path);
+    let replacement_wide = windows_save::wide_path(&replacement);
+    let replace_error = unsafe {
+        ReplaceFileW(
+            PCWSTR(original_wide.as_ptr()),
+            PCWSTR(replacement_wide.as_ptr()),
+            PCWSTR::null(),
+            Default::default(),
+            None,
+            None,
+        )
+    }
+    .unwrap_err();
+    assert_eq!(replace_error.code().0 as u32, 0x8007_0020);
+
+    drop(guard);
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    assert!(!renamed.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn save_catches_same_size_and_timestamp_inode_swap_via_file_id() {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx,
+            SetFileInformationByHandle,
+        },
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    let moved = directory.path().join("moved.txt");
+    fs::write(&path, b"original").unwrap();
+    let target = FileTarget::from_picker(path.clone()).unwrap();
+
+    let mut original_basic = FILE_BASIC_INFO::default();
+    let original_file = File::open(&path).unwrap();
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(original_file.as_raw_handle()),
+            FileBasicInfo,
+            (&raw mut original_basic).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }
+    .unwrap();
+    drop(original_file);
+
+    fs::rename(&path, &moved).unwrap();
+    let swapped = fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    (&swapped).write_all(b"swapped!").unwrap();
+    swapped.sync_all().unwrap();
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(swapped.as_raw_handle()),
+            FileBasicInfo,
+            (&raw const original_basic).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }
+    .unwrap();
+    drop(swapped);
+
+    assert!(save(target, TextFormat::default(), "editor").is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"swapped!");
+    assert_eq!(fs::read(&moved).unwrap(), b"original");
+}
+
+#[cfg(windows)]
+#[test]
+fn deserialized_file_version_without_file_id_stays_compatible() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session_target.txt");
+    fs::write(&path, "original").unwrap();
+    let target = FileTarget::from_picker(path.clone()).unwrap();
+    let json = serde_json::to_string(&target).unwrap();
+    let restored: FileTarget = serde_json::from_str(&json).unwrap();
+
+    assert!(FileVersion::at(&path).unwrap() == restored.version);
+    let saved = save(restored, TextFormat::default(), "updated").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "updated");
+    assert!(FileVersion::at(&path).unwrap() == saved.version);
+}
+
+#[cfg(windows)]
+#[test]
+fn before_replace_external_rename_is_blocked_and_preserves_original() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    let renamed = directory.path().join("renamed.txt");
+    fs::write(&path, b"original").unwrap();
+    let target = FileTarget::from_picker(path.clone()).unwrap();
+    let mut pending = windows_save::private_temporary_file(directory.path()).unwrap();
+    pending.write_all(b"editor snapshot").unwrap();
+
+    let error = publish_pending(&target, pending, || fs::rename(&path, &renamed)).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(32));
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    assert!(!renamed.exists());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn replace_preserves_external_file_and_backup_on_already_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    fs::write(&path, b"original").unwrap();
+    let guard = windows_save::replacement_guard(&path).unwrap();
+    let mut pending = windows_save::private_temporary_file(directory.path()).unwrap();
+    pending.write_all(b"editor snapshot").unwrap();
+    pending.as_file().sync_all().unwrap();
+
+    let error = windows_save::replace_with(
+        &path,
+        guard,
+        pending,
+        directory.path(),
+        |pending, target_path| {
+            fs::write(target_path, b"external winner").unwrap();
+            pending.persist_noclobber(target_path)
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    let message = error.to_string();
+    let marker = "Исходный файл сохранён в ";
+    let backup_path = Path::new(message.split(marker).nth(1).unwrap());
+    assert!(backup_path.exists());
+    assert_eq!(fs::read(backup_path).unwrap(), b"original");
+    assert_eq!(fs::read(&path).unwrap(), b"external winner");
+}
+
+#[cfg(windows)]
+#[test]
+fn replace_restores_original_when_persist_fails_without_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.txt");
+    fs::write(&path, b"original").unwrap();
+    let guard = windows_save::replacement_guard(&path).unwrap();
+    let mut pending = windows_save::private_temporary_file(directory.path()).unwrap();
+    pending.write_all(b"editor snapshot").unwrap();
+    pending.as_file().sync_all().unwrap();
+
+    let error =
+        windows_save::replace_with(&path, guard, pending, directory.path(), |pending, _| {
+            Err(tempfile::PersistError {
+                error: io::Error::other("simulated persist failure"),
+                file: pending,
+            })
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("simulated persist failure"));
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }

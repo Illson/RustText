@@ -33,6 +33,17 @@ pub(super) fn is_json_file(path: &Path) -> bool {
         .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("json"))
 }
 
+pub(super) fn should_validate(path: Option<&Path>, mut source: impl Iterator<Item = char>) -> bool {
+    path.is_some_and(is_json_file)
+        || source
+            .find(|character| !character.is_whitespace() && *character != '\u{feff}')
+            .is_some_and(|character| matches!(character, '{' | '['))
+}
+
+fn validation_is_current(disabled: bool, generation: u64, expected_generation: u64) -> bool {
+    !disabled && generation == expected_generation
+}
+
 pub(super) fn validate(source: &str) -> Status {
     if source.len() > MAX_JSON_BYTES {
         return Status::TooLarge;
@@ -99,37 +110,58 @@ fn diagnostic_range(
 }
 
 impl Workspace {
+    pub(super) fn dismiss_json_validation(&mut self, cx: &mut Context<Self>) {
+        let id = self.active;
+        if let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) {
+            doc.json_validation_disabled = true;
+        }
+        self.schedule_json_validation(id, cx);
+        cx.notify();
+    }
+
+    pub(super) fn enable_json_validation(&mut self, cx: &mut Context<Self>) {
+        let id = self.active;
+        if let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) {
+            doc.json_validation_disabled = false;
+        }
+        self.schedule_json_validation(id, cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_json_validation(&mut self, cx: &mut Context<Self>) {
+        if self.active_document().json_validation_disabled {
+            self.enable_json_validation(cx);
+        } else {
+            self.dismiss_json_validation(cx);
+        }
+    }
+
     pub(super) fn schedule_json_validation(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(doc) = self.documents.iter().find(|doc| doc.id == id) else {
+        let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) else {
             return;
         };
-        if !doc
-            .file
-            .as_ref()
-            .is_some_and(|file| is_json_file(&file.path))
+        doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
+        let generation = doc.json_validation_generation;
+        let editor = doc.editor.clone();
+        if doc.json_validation_disabled
+            || doc.placeholder
+            || !should_validate(
+                doc.file.as_ref().map(|file| file.path.as_path()),
+                editor.read(cx).text().chars(),
+            )
         {
-            let editor = self
-                .documents
-                .iter_mut()
-                .find(|doc| doc.id == id)
-                .and_then(|doc| doc.json_status.take().map(|_| doc.editor.clone()));
-            if let Some(editor) = editor {
-                editor.update(cx, |state, cx| {
-                    let text = state.text().clone();
-                    if let Some(diagnostics) = state.diagnostics_mut() {
-                        diagnostics.reset(&text);
-                    }
-                    cx.notify();
-                });
-            }
-            return;
-        }
-        if doc.placeholder {
+            doc.json_status = None;
+            editor.update(cx, |state, cx| {
+                let text = state.text().clone();
+                if let Some(diagnostics) = state.diagnostics_mut() {
+                    diagnostics.reset(&text);
+                }
+                cx.notify();
+            });
             return;
         }
 
         let revision = doc.revision;
-        let editor = doc.editor.clone();
         let executor = cx.background_executor().clone();
         let validation_executor = executor.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -139,7 +171,15 @@ impl Workspace {
                     workspace
                         .documents
                         .iter()
-                        .find(|doc| doc.id == id && doc.revision == revision)
+                        .find(|doc| {
+                            doc.id == id
+                                && doc.revision == revision
+                                && validation_is_current(
+                                    doc.json_validation_disabled,
+                                    doc.json_validation_generation,
+                                    generation,
+                                )
+                        })
                         .map(|doc| doc.editor.read(cx).text().clone())
                 })
                 .ok()
@@ -151,20 +191,17 @@ impl Workspace {
                 .spawn(async move { validate(&snapshot.to_string()) })
                 .await;
             let _ = this.update(cx, |workspace, cx| {
-                let Some(doc) = workspace
-                    .documents
-                    .iter_mut()
-                    .find(|doc| doc.id == id && doc.revision == revision)
-                else {
+                let Some(doc) = workspace.documents.iter_mut().find(|doc| {
+                    doc.id == id
+                        && doc.revision == revision
+                        && validation_is_current(
+                            doc.json_validation_disabled,
+                            doc.json_validation_generation,
+                            generation,
+                        )
+                }) else {
                     return;
                 };
-                if !doc
-                    .file
-                    .as_ref()
-                    .is_some_and(|file| is_json_file(&file.path))
-                {
-                    return;
-                }
                 doc.json_status = match &result {
                     Status::Valid => None,
                     Status::Checking => Some(Status::Checking),

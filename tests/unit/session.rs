@@ -4,7 +4,9 @@ use crate::text_format::TextEncoding;
 fn capture(text: &str) -> Capture {
     Capture {
         state: State {
+            layout: None,
             tabs: vec![Tab {
+                json_validation_disabled: false,
                 id: 1,
                 file: None,
                 format: TextFormat::default(),
@@ -27,6 +29,60 @@ fn capture(text: &str) -> Capture {
         drafts: vec![Some(Rope::from(text))],
         closed_drafts: Vec::new(),
     }
+}
+
+#[test]
+fn roundtrips_an_empty_workspace_and_closed_draft() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    let mut empty = capture("closed draft");
+    empty.state.closed = std::mem::take(&mut empty.state.tabs);
+    empty.closed_drafts = std::mem::take(&mut empty.drafts);
+    empty.state.layout = Some(crate::layout::Layout::default());
+    journal.commit(1, empty).unwrap();
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    let recovered = recovered.unwrap();
+    assert!(recovered.state.tabs.is_empty());
+    assert!(recovered.drafts.is_empty());
+    assert_eq!(recovered.closed_drafts, [Some("closed draft".into())]);
+    assert_eq!(recovered.state.layout.unwrap().active(), None);
+}
+
+#[test]
+fn legacy_sessions_default_to_one_group_and_enabled_json_validation() {
+    let mut legacy = serde_json::to_value(capture("draft").state).unwrap();
+    legacy.as_object_mut().unwrap().remove("layout");
+    legacy["tabs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("json_validation_disabled");
+    let state: State = serde_json::from_value(legacy).unwrap();
+    assert!(state.layout.is_none());
+    assert!(!state.tabs[0].json_validation_disabled);
+}
+
+#[test]
+fn roundtrips_disabled_validation_and_an_empty_focused_group() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    let mut snapshot = capture("draft");
+    snapshot.state.tabs[0].json_validation_disabled = true;
+    let mut layout = crate::layout::Layout::new(vec![1], Some(1));
+    let empty_group = layout.split(1, crate::layout::Axis::Horizontal).unwrap();
+    layout.focus(empty_group);
+    snapshot.state.layout = Some(layout);
+    journal.commit(1, snapshot).unwrap();
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    let state = recovered.unwrap().state;
+    assert!(state.tabs[0].json_validation_disabled);
+    let mut layout = state.layout.unwrap();
+    layout.remap(&std::collections::HashMap::from([(1, 42)]));
+    layout.normalize(&[42]);
+    assert_eq!(layout.active(), None);
+    assert_eq!(layout.focused, empty_group);
+    assert_eq!(layout.groups().len(), 2);
 }
 
 #[test]
@@ -226,6 +282,7 @@ fn closed_scratch_tabs_keep_unicode_text_across_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let mut state = capture("open");
     state.state.closed.push(Tab {
+        json_validation_disabled: false,
         id: 2,
         file: None,
         format: TextFormat::default(),
@@ -273,6 +330,7 @@ fn closed_log_tabs_keep_view_state_and_bookmark_across_restart() {
     bookmark.record_observation(&observation);
     let mut state = capture("");
     state.state.closed.push(Tab {
+        json_validation_disabled: false,
         id: 2,
         file: Some(FileTarget::from_picker(log_path).unwrap()),
         format: TextFormat::for_encoding(TextEncoding::Windows1251),
@@ -324,6 +382,7 @@ fn commits_keep_only_the_newest_hundred_closed_tabs() {
     let mut state = capture("open");
     state.state.closed = (0..MAX_CLOSED_TABS + 1)
         .map(|id| Tab {
+            json_validation_disabled: false,
             id: id as u64,
             file: None,
             format: TextFormat::default(),
