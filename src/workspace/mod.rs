@@ -1,6 +1,7 @@
 mod associations;
 mod disk_status;
 mod file_actions;
+mod home;
 mod json_action;
 mod json_validation;
 mod launches;
@@ -62,6 +63,7 @@ pub(crate) struct Workspace {
     documents: Vec<Document>,
     layout: crate::layout::Layout,
     fallback_focus: FocusHandle,
+    home: home::Home,
     active: u64,
     next_id: u64,
     tab_scroll: ScrollHandle,
@@ -92,6 +94,7 @@ impl Workspace {
             documents: Vec::new(),
             layout: crate::layout::Layout::default(),
             fallback_focus: cx.focus_handle(),
+            home: home::Home::new(window, cx),
             active: 0,
             next_id: 1,
             tab_scroll: ScrollHandle::new(),
@@ -237,6 +240,9 @@ impl Workspace {
 
     fn select(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.documents.iter().position(|doc| doc.id == id) {
+            if self.active != 0 && self.active != id {
+                self.remember_position(self.active, window, cx);
+            }
             self.layout.select(id);
             if self.active != id {
                 self.error = None;
@@ -302,6 +308,9 @@ impl Workspace {
         if !self.layout.focus(group_id) {
             return;
         }
+        if self.active != 0 {
+            self.remember_position(self.active, window, cx);
+        }
         self.active = 0;
         self.fallback_focus.focus(window, cx);
         cx.notify();
@@ -350,6 +359,7 @@ impl Workspace {
         let Some(index) = self.documents.iter().position(|doc| doc.id == id) else {
             return;
         };
+        self.remember_position(id, window, cx);
         let doc = self.documents.remove(index);
         self.layout.remove(id);
         let (tab, draft) = doc.session_snapshot(doc.file.is_none(), cx);
@@ -424,6 +434,13 @@ impl Workspace {
 
     fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.busy.is_some() || self.log_is_writing(cx) {
+            return false;
+        }
+        for id in self.documents.iter().map(|doc| doc.id).collect::<Vec<_>>() {
+            self.remember_position(id, window, cx);
+        }
+        if self.history_is_writing() {
+            self.home.close_pending = true;
             return false;
         }
         if self.session.is_some() {

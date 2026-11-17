@@ -8,7 +8,7 @@ use gpui_kit::{
     *,
 };
 
-use super::{Workspace, display_path, file_actions::OpenMode, file_name, view::*};
+use super::{Workspace, display_path, file_name, view::*};
 use crate::appearance;
 
 impl Workspace {
@@ -78,7 +78,13 @@ impl Workspace {
         let can_save = !busy && doc.is_some_and(|doc| doc.log.is_none() && !doc.placeholder);
         let closed_entries = self.closed_tab_entries();
         let can_reopen = !busy && !closed_entries.is_empty();
-        let recent_entries = self.recent.entries().to_vec();
+        let recent_entries = self
+            .recent
+            .entries()
+            .iter()
+            .take(16)
+            .cloned()
+            .collect::<Vec<_>>();
         let workspace = cx.entity().downgrade();
         let focus = self.menu_focus(cx);
         Button::new("file-menu")
@@ -140,12 +146,7 @@ impl Workspace {
                                             .disabled(busy)
                                             .on_click(move |_, window, cx| {
                                                 let _ = workspace.update(cx, |this, cx| {
-                                                    this.open_paths(
-                                                        vec![entry.path.clone()],
-                                                        OpenMode::from_recent(&entry),
-                                                        window,
-                                                        cx,
-                                                    );
+                                                    this.open_recent(entry.clone(), window, cx);
                                                 });
                                             }),
                                     )

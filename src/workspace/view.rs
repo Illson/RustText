@@ -690,7 +690,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = self.layout.root.clone();
         let body = if self.documents.is_empty() {
-            div().size_full().into_any_element()
+            self.home_page(window, cx)
         } else {
             self.group_tree(&root, window.viewport_size(), window, cx)
         };

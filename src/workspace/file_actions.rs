@@ -150,6 +150,30 @@ impl Workspace {
         self.load_paths(vec![recent.path], mode, Some(tab), window, cx);
     }
 
+    pub(super) fn open_recent(
+        &mut self,
+        mut recent: RecentFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(position) = self.home.positions.get(&recent.path) {
+            recent.position = Some(position.clone());
+        }
+        let mode = OpenMode::from_recent(&recent);
+        let restore = recent.position.map(|position| Tab {
+            id: 0,
+            file: None,
+            format: crate::text_format::TextFormat::default(),
+            selection: position.selection,
+            reversed: position.reversed,
+            scroll: position.scroll,
+            draft_revision: None,
+            log: position.log,
+            json_validation_disabled: position.json_validation_disabled,
+        });
+        self.load_paths(vec![recent.path], mode, restore, window, cx);
+    }
+
     fn load_paths(
         &mut self,
         paths: Vec<PathBuf>,
@@ -166,7 +190,7 @@ impl Workspace {
         self.error = None;
         self.session_notice = None;
         let executor = cx.background_executor().clone();
-        let mut recent = self.recent.clone();
+        let mut recent = self.recent.detached();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let mut opened_files = Vec::new();
@@ -202,10 +226,10 @@ impl Workspace {
             }
 
             let opened_any = !opened_files.is_empty();
-            let (recent, history_error) = executor
+            let (recent, opened_files, history_error) = executor
                 .spawn(async move {
-                    let error = recent.record(opened_files).err();
-                    (recent, error)
+                    let error = recent.record(opened_files.clone()).err();
+                    (recent, opened_files, error)
                 })
                 .await;
             this.update_in(cx, |this, _, cx| {
@@ -215,7 +239,10 @@ impl Workspace {
                     this.closed.retain(|entry| entry.tab.id != tab.id);
                 }
                 this.busy = None;
-                this.recent = recent;
+                if opened_any {
+                    this.recent.record_in_memory(&opened_files);
+                    this.recent.merge_loaded(recent);
+                }
                 this.error = first_error
                     .map(|error| {
                         if failures == 1 {
@@ -440,23 +467,28 @@ impl Workspace {
 
         let snapshot = doc.editor.read(cx).text().clone();
         let format = doc.format;
-        let mut recent = self.recent.clone();
+        let mut recent = self.recent.detached();
         self.busy = Some("Сохранение…");
         cx.notify();
         let task = cx.background_spawn(async move {
             let result = files::save(target, format, &snapshot.to_string());
-            let history_error = result.as_ref().ok().and_then(|file| {
-                recent
-                    .record([RecentFile::new(file.path.clone(), format.encoding)])
-                    .err()
-            });
-            (snapshot, result, recent, history_error)
+            let recorded = result
+                .as_ref()
+                .ok()
+                .map(|file| RecentFile::new(file.path.clone(), format.encoding));
+            let history_error = recorded
+                .as_ref()
+                .and_then(|entry| recent.record([entry.clone()]).err());
+            (snapshot, result, recent, recorded, history_error)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let (snapshot, result, recent, history_error) = task.await;
+            let (snapshot, result, recent, recorded, history_error) = task.await;
             this.update_in(cx, |this, _, cx| {
                 this.busy = None;
-                this.recent = recent;
+                if let Some(recorded) = recorded {
+                    this.recent.record_in_memory(&[recorded]);
+                    this.recent.merge_loaded(recent);
+                }
                 this.error = history_error.map(recent_warning);
                 let save_succeeded = result.is_ok();
                 match result {
@@ -477,6 +509,7 @@ impl Workspace {
                     }
                 }
                 if save_succeeded {
+                    this.session_notice = None;
                     this.schedule_json_validation(id, cx);
                 }
                 cx.notify();
