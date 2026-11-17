@@ -7,12 +7,15 @@ use std::{
 };
 
 use gpui_kit::component::input::Rope;
+use ropey::extra::esoterica::ropes_are_instances;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 use crate::{files::FileTarget, log_file::LogBookmark, text_format::TextFormat};
 
 const FORMAT_VERSION: u32 = 1;
 const RECORD_PREFIX: &str = "checkpoint-";
+const VIEW_FILE: &str = "view.json";
 pub(crate) const MAX_CLOSED_TABS: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -114,6 +117,8 @@ pub struct Journal {
     last_valid: Option<u64>,
     last_sequence: u64,
     committed_revision: u64,
+    last_capture: Option<Capture>,
+    redundant_drafts: bool,
 }
 
 impl Journal {
@@ -140,10 +145,15 @@ impl Journal {
             last_valid: None,
             last_sequence,
             committed_revision: 0,
+            last_capture: None,
+            redundant_drafts: false,
         })
     }
 
     fn restore(&mut self) -> (Option<Recovered>, Option<String>) {
+        self.last_valid = None;
+        self.last_capture = None;
+        self.redundant_drafts = false;
         let sequences = match records(&self.directory) {
             Ok(sequences) => sequences,
             Err(error) => {
@@ -156,12 +166,25 @@ impl Journal {
         let mut latest_error = None;
         for sequence in sequences {
             match read_record(&self.record_path(sequence)) {
-                Ok(recovered) => {
+                Ok(mut recovered) => {
                     self.last_valid = Some(sequence);
+                    let view_error = match read_view(&self.record_path(sequence), &recovered.state)
+                    {
+                        Ok(Some(state)) => {
+                            recovered.state = state;
+                            None
+                        }
+                        Ok(None) => None,
+                        Err(error) => Some(error),
+                    };
                     let warning = latest_error.map(|error| {
                         format!(
                             "Последняя запись сессии повреждена. Восстановлена предыдущая. {error}"
                         )
+                    }).or_else(|| {
+                        view_error.map(|error| {
+                            format!("Не удалось восстановить последнее положение вкладок. {error}")
+                        })
                     });
                     return (Some(recovered), warning);
                 }
@@ -195,6 +218,20 @@ impl Journal {
         let excess = capture.state.closed.len().saturating_sub(MAX_CLOSED_TABS);
         capture.state.closed.drain(..excess);
         capture.closed_drafts.drain(..excess);
+        let same_drafts = self.last_capture.as_ref().is_some_and(|last| {
+            same_draft_slots(&last.state, &capture.state)
+                && same_ropes(&last.drafts, &capture.drafts)
+                && same_ropes(&last.closed_drafts, &capture.closed_drafts)
+        });
+        if self.redundant_drafts
+            && same_drafts
+            && let Some(previous) = previous
+        {
+            // Both checkpoints already own independent copies of these drafts.
+            write_view(&self.record_path(previous), &capture.state)?;
+            self.committed_revision = revision;
+            return Ok(());
+        }
         let sequence = self
             .last_sequence
             .checked_add(1)
@@ -221,6 +258,17 @@ impl Journal {
         self.last_sequence = sequence;
         self.last_valid = Some(sequence);
         self.committed_revision = revision;
+        self.redundant_drafts = same_drafts
+            && capture
+                .drafts
+                .iter()
+                .chain(&capture.closed_drafts)
+                .any(Option::is_some);
+        self.last_capture = Some(Capture {
+            state: manifest.state,
+            drafts: capture.drafts,
+            closed_drafts: capture.closed_drafts,
+        });
 
         if let Ok(sequences) = records(&self.directory) {
             for old in sequences
@@ -237,6 +285,56 @@ impl Journal {
         self.directory
             .join(format!("{RECORD_PREFIX}{sequence:020}"))
     }
+}
+
+fn same_draft_slots(first: &State, second: &State) -> bool {
+    let slots = |first: &[Tab], second: &[Tab]| {
+        first.len() == second.len()
+            && first.iter().zip(second).all(|(left, right)| {
+                left.id == right.id && left.draft_revision == right.draft_revision
+            })
+    };
+    slots(&first.tabs, &second.tabs) && slots(&first.closed, &second.closed)
+}
+
+fn same_ropes(first: &[Option<Rope>], second: &[Option<Rope>]) -> bool {
+    first
+        .iter()
+        .zip(second)
+        .all(|(left, right)| match (left, right) {
+            (Some(left), Some(right)) => ropes_are_instances(left, right),
+            (None, None) => true,
+            _ => false,
+        })
+}
+
+fn write_view(directory: &Path, state: &State) -> io::Result<()> {
+    let mut pending = NamedTempFile::new_in(directory)?;
+    let mut writer = BufWriter::new(pending.as_file_mut());
+    serde_json::to_writer(&mut writer, state)?;
+    writer.flush()?;
+    drop(writer);
+    pending.as_file().sync_all()?;
+    pending
+        .persist(directory.join(VIEW_FILE))
+        .map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn read_view(directory: &Path, base: &State) -> io::Result<Option<State>> {
+    let data = match fs::read(directory.join(VIEW_FILE)) {
+        Ok(data) => data,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let state: State = serde_json::from_slice(&data)?;
+    if state.active >= state.tabs.len().max(1) || !same_draft_slots(base, &state) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Некорректное положение вкладок в записи сессии",
+        ));
+    }
+    Ok(Some(state))
 }
 
 fn records(directory: &Path) -> io::Result<Vec<u64>> {

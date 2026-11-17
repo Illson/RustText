@@ -176,6 +176,84 @@ fn restores_previous_checkpoint_after_corrupting_an_unchanged_draft() {
 }
 
 #[test]
+fn moving_the_cursor_reuses_two_independent_draft_snapshots() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut snapshot = capture(&"large unsaved document\n".repeat(500_000));
+    let mut journal = Journal::open(directory.clone()).unwrap();
+
+    for revision in 1..=5 {
+        let cursor = revision as usize;
+        snapshot.state.tabs[0].selection = cursor..cursor;
+        journal
+            .commit(
+                revision,
+                Capture {
+                    state: snapshot.state.clone(),
+                    drafts: snapshot.drafts.clone(),
+                    closed_drafts: snapshot.closed_drafts.clone(),
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(records(&directory).unwrap(), vec![2, 1]);
+    assert_eq!(journal.restore().0.unwrap().state.tabs[0].selection, 5..5);
+    assert!(
+        fs::metadata(journal.record_path(2).join(VIEW_FILE))
+            .unwrap()
+            .len()
+            < 1024
+    );
+    fs::write(journal.record_path(2).join(VIEW_FILE), "damaged").unwrap();
+    let (recovered, warning) = journal.restore();
+    assert_eq!(recovered.unwrap().state.tabs[0].selection, 2..2);
+    assert!(warning.is_some());
+    fs::write(journal.record_path(2).join("draft-0.txt"), "damaged").unwrap();
+    drop(journal);
+
+    let mut reopened = Journal::open(directory).unwrap();
+    let (recovered, warning) = reopened.restore();
+    let recovered = recovered.unwrap();
+    assert!(warning.is_some());
+    assert_eq!(recovered.state.tabs[0].selection, 1..1);
+    assert_eq!(
+        recovered.drafts[0].as_ref().unwrap().as_str(),
+        snapshot.drafts[0].as_ref().unwrap()
+    );
+}
+
+#[test]
+fn editing_a_draft_after_a_view_checkpoint_still_creates_a_full_checkpoint() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut snapshot = capture("first version");
+    let mut journal = Journal::open(directory.clone()).unwrap();
+    for revision in 1..=3 {
+        journal
+            .commit(
+                revision,
+                Capture {
+                    state: snapshot.state.clone(),
+                    drafts: snapshot.drafts.clone(),
+                    closed_drafts: vec![],
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(records(&directory).unwrap(), vec![2, 1]);
+
+    snapshot.drafts[0] = Some(Rope::from("other version"));
+    snapshot.state.tabs[0].draft_revision = Some(2);
+    journal.commit(4, snapshot).unwrap();
+    assert_eq!(records(&directory).unwrap(), vec![3, 2]);
+    assert_eq!(
+        journal.restore().0.unwrap().drafts,
+        [Some("other version".into())]
+    );
+}
+
+#[test]
 fn corrupted_previous_draft_is_rewritten_from_the_current_capture() {
     let temporary = tempfile::tempdir().unwrap();
     let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
