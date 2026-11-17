@@ -16,6 +16,7 @@ mod recent_files;
 mod search;
 mod search_highlight;
 mod session;
+mod settings;
 mod single_instance;
 mod template;
 mod text_format;

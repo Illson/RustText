@@ -820,7 +820,11 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(body),
             )
-            .children((!showing_home).then(|| self.search_panel(window, cx)).flatten())
+            .children(
+                (!showing_home)
+                    .then(|| self.search_panel(window, cx))
+                    .flatten(),
+            )
             .children(self.update_panel(cx));
         div()
             .relative()
@@ -829,5 +833,6 @@ impl Render for Workspace {
             .children(self.template_generator_panel(cx))
             .children(self.list_comparison_panel(cx))
             .children(self.versions_panel(cx))
+            .children(self.settings_panel(cx))
     }
 }

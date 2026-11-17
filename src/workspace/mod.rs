@@ -10,6 +10,7 @@ mod menus;
 mod reveal;
 mod search_panel;
 mod session_runtime;
+mod settings_panel;
 mod template_generator;
 mod updates;
 mod version_actions;
@@ -35,6 +36,7 @@ use crate::{
     log_viewer::LogViewer,
     recent_files::{RecentFile, RecentFiles},
     session::{MAX_CLOSED_TABS, Tab},
+    settings::{Settings, untitled_tab_name_rope},
     single_instance::SingleInstance,
     text_format::{TextEncoding, TextFormat},
 };
@@ -77,6 +79,10 @@ pub(crate) struct Workspace {
     tab_scroll: ScrollHandle,
     closed: Vec<ClosedTab>,
     recent: RecentFiles,
+    settings: Settings,
+    settings_panel: Option<settings_panel::SettingsPanel>,
+    settings_pending: Option<Settings>,
+    settings_writing: bool,
     busy: Option<&'static str>,
     error: Option<SharedString>,
     wrap: bool,
@@ -99,6 +105,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let (recent, recent_error) = RecentFiles::load();
+        let (settings, settings_error) = Settings::load();
         let (version_store, version_error) = match crate::file_versions::VersionStore::load() {
             Ok(store) => (Some(Arc::new(store)), None),
             Err(error) => (
@@ -118,8 +125,15 @@ impl Workspace {
             tab_scroll: ScrollHandle::new(),
             closed: Vec::new(),
             recent,
+            settings,
+            settings_panel: None,
+            settings_pending: None,
+            settings_writing: false,
             busy: None,
-            error: recent_error.map(recent_warning).or(version_error),
+            error: recent_error
+                .map(recent_warning)
+                .or_else(|| settings_error.map(settings_warning))
+                .or(version_error),
             wrap: false,
             font_size: 15.0,
             search: None,
@@ -181,9 +195,6 @@ impl Workspace {
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let name = file
-            .as_ref()
-            .map_or_else(|| "Без имени".into(), |file| file_name(&file.path));
         let language = file
             .as_ref()
             .map_or_else(|| "text".to_owned(), |file| syntax_for(&file.path));
@@ -208,6 +219,10 @@ impl Workspace {
             state
         });
         let saved_text = editor.read(cx).text().clone();
+        let name = file.as_ref().map_or_else(
+            || untitled_tab_name_rope(&saved_text, self.settings.untitled_tab_limit).into(),
+            |file| file_name(&file.path),
+        );
         let (search_viewport, minimap) = crate::minimap::install(&editor, cx);
         let change =
             cx.subscribe_in(
@@ -215,8 +230,13 @@ impl Workspace {
                 window,
                 move |this, editor, event, window, cx| match event {
                     InputEvent::Change => {
+                        let untitled_limit = this.settings.untitled_tab_limit;
                         if let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id) {
-                            doc.dirty = doc.saved_text.as_ref() != Some(editor.read(cx).text());
+                            let text = editor.read(cx).text();
+                            doc.dirty = doc.saved_text.as_ref() != Some(text);
+                            if doc.file.is_none() {
+                                doc.name = untitled_tab_name_rope(text, untitled_limit).into();
+                            }
                             doc.revision = doc.revision.wrapping_add(1);
                             cx.notify();
                             this.schedule_json_validation(id, cx);
@@ -307,6 +327,15 @@ impl Workspace {
             self.focus_home_query(window, cx);
         } else {
             self.focus_active_document(window, cx);
+        }
+    }
+
+    pub(super) fn refresh_untitled_tab_names(&mut self, cx: &App) {
+        let limit = self.settings.untitled_tab_limit;
+        for doc in &mut self.documents {
+            if doc.file.is_none() {
+                doc.name = untitled_tab_name_rope(doc.editor.read(cx).text(), limit).into();
+            }
         }
     }
     fn insert_log(
@@ -444,20 +473,10 @@ impl Workspace {
                 let label = if let Some(file) = &entry.tab.file {
                     display_path(&file.path)
                 } else {
-                    let preview: String = entry
-                        .draft
-                        .iter()
-                        .flat_map(|draft| draft.chunks())
-                        .flat_map(str::chars)
-                        .take(60)
-                        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
-                        .collect();
-                    let preview = preview.trim();
-                    if preview.is_empty() {
-                        "Без имени".to_owned()
-                    } else {
-                        format!("Без имени — {preview}")
-                    }
+                    entry.draft.as_ref().map_or_else(
+                        || "Без имени".to_owned(),
+                        |draft| untitled_tab_name_rope(draft, self.settings.untitled_tab_limit),
+                    )
                 };
                 (entry.tab.id, label)
             })
@@ -594,4 +613,8 @@ fn syntax_for(path: &Path) -> String {
 
 fn recent_warning(error: std::io::Error) -> SharedString {
     format!("Список недавних файлов недоступен. {error}").into()
+}
+
+fn settings_warning(error: std::io::Error) -> SharedString {
+    format!("Настройки недоступны. {error}").into()
 }
