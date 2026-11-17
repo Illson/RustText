@@ -75,7 +75,7 @@ pub fn apply(cx: &mut App) {
         theme.primary = rgb(ACCENT).into();
         theme.primary_foreground = rgb(BACKGROUND).into();
         theme.ring = rgb(ACCENT).into();
-        theme.selection = rgb(ACTIVE).into();
+        theme.selection = selection_color();
         theme.caret = rgb(ACCENT).into();
         theme.input = rgb(BORDER).into();
         theme.colors.list = rgb(BACKGROUND).into();
@@ -94,4 +94,19 @@ pub fn apply(cx: &mut App) {
         highlight.style.editor_line_number = Some(rgb(MUTED).into());
         highlight.style.editor_active_line_number = Some(rgb(ACCENT).into());
     });
+}
+
+fn selection_color() -> Hsla {
+    rgb(ACCENT).opacity(0.22).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selection_color;
+
+    #[test]
+    fn selection_color_stays_translucent_so_range_decorations_remain_visible() {
+        let selection = selection_color();
+        assert!(selection.a > 0.0 && selection.a < 1.0);
+    }
 }
