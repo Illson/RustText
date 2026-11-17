@@ -111,7 +111,7 @@ impl<K: PartialEq> ProjectionCache<K> {
 fn visible_byte_ranges(editor: &EditorState, captured: Bounds<Pixels>) -> Vec<Range<usize>> {
     use gpui_kit::base::input::DisplayPoint;
     let input = editor.input_bounds();
-    let Some(text_bounds) = editor.text_bounds() else {
+    let Some(top) = editor.viewport_top_in_content() else {
         return Vec::new();
     };
     let Some(height) = editor.line_height().filter(|height| *height > px(0.)) else {
@@ -122,8 +122,9 @@ fn visible_byte_ranges(editor: &EditorState, captured: Bounds<Pixels>) -> Vec<Ra
     if right <= left {
         return Vec::new();
     }
-    let first = ((input.top() - text_bounds.top()) / height).floor().max(0.) as usize;
-    let last = ((input.bottom() - text_bounds.top()) / height)
+    let height = f64::from(f32::from(height));
+    let first = (top / height).floor().max(0.) as usize;
+    let last = ((top + f64::from(f32::from(input.size.height))) / height)
         .ceil()
         .max(0.) as usize;
     let count = editor.display_map().display_row_count();

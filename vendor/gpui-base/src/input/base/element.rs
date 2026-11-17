@@ -699,7 +699,7 @@ pub(super) fn cursor_surrounding_padding(
 /// top padding. A viewport shorter than a row can only align its start.
 pub(super) fn reveal_row(
     offset: Pixels,
-    row_top: Pixels,
+    row_top: f64,
     line_height: Pixels,
     viewport_height: Pixels,
     edge_padding: Pixels,
@@ -707,9 +707,20 @@ pub(super) fn reveal_row(
     let row_height = line_height.min(viewport_height);
     let bottom = edge_padding.max(row_height).min(viewport_height);
     let top = edge_padding.min(viewport_height - bottom);
-    offset
-        .clamp(top - row_top, viewport_height - bottom - row_top)
-        .min(px(0.))
+    px(wide_pixels(offset)
+        .clamp(
+            wide_pixels(top) - row_top,
+            wide_pixels(viewport_height - bottom) - row_top,
+        )
+        .min(0.) as f32)
+}
+
+fn wide_pixels(value: Pixels) -> f64 {
+    f64::from(f32::from(value))
+}
+
+pub(super) fn row_top(row: usize, line_height: Pixels) -> f64 {
+    row as f64 * wide_pixels(line_height)
 }
 
 /// `height` rounded up to a whole device pixel.
@@ -935,7 +946,7 @@ impl<M: InputModeKind> TextElement<M> {
                 }
                 let caret = old.cursor_bounds();
                 let viewport = old.input_bounds();
-                let top = caret.top() + scroll_offset.y;
+                let top = old.painted_top + (scroll_offset.y - old.scroll_offset().y);
                 // Cached x already contains its painted scroll; account only
                 // for a wheel offset change since that geometry was produced.
                 let left = caret.left() + scroll_offset.x - old.scroll_offset().x;
@@ -947,25 +958,30 @@ impl<M: InputModeKind> TextElement<M> {
 
         // Resolve a cursor or selection endpoint to a content-space position.
         let visible_buffer_lines = &last_layout.visible_buffer_lines;
-        let caret_for = |row: usize, offset: usize, affinity: bool| -> Point<Pixels> {
+        let caret_for = |row: usize, offset: usize, affinity: bool| -> (Pixels, f64) {
             // y of the top of buffer line `row` in content space.
-            let top = line_height * state.display_map.buffer_line_to_display_row(row);
-            let line_origin = point(px(0.), top);
+            let top = row_top(
+                state.display_map.buffer_line_to_display_row(row),
+                line_height,
+            );
 
             if let Some(vi) = visible_buffer_lines.iter().position(|&bl| bl == row) {
                 let line = &lines[vi];
                 let line_start = last_layout.visible_line_byte_offsets[vi];
                 let local = offset.saturating_sub(line_start);
                 if let Some(pos) = line.position_for_index(local, last_layout, affinity) {
-                    return line_origin + pos;
+                    return (pos.x, top + wide_pixels(pos.y));
                 }
             }
             if state.masked {
-                return line_origin;
+                return (px(0.), top);
             }
-            point(
+            (
                 px(0.),
-                line_height * state.display_map.offset_to_display_row(offset, affinity),
+                row_top(
+                    state.display_map.offset_to_display_row(offset, affinity),
+                    line_height,
+                ),
             )
         };
 
@@ -1004,9 +1020,9 @@ impl<M: InputModeKind> TextElement<M> {
             }
 
             let affinity = is_active && state.cursor_line_end_affinity;
-            let cursor_pos = caret_for(cursor_row, cursor, affinity);
-            let cursor_start = caret_for(sel_start_row, selected_range.start, false);
-            let cursor_end = caret_for(sel_end_row, selected_range.end, false);
+            let (cursor_x, cursor_y) = caret_for(cursor_row, cursor, affinity);
+            let (start_x, start_y) = caret_for(sel_start_row, selected_range.start, false);
+            let (end_x, end_y) = caret_for(sel_end_row, selected_range.end, false);
 
             if is_active {
                 current_row = Some(cursor_row);
@@ -1023,12 +1039,12 @@ impl<M: InputModeKind> TextElement<M> {
                             TextAlign::Right => px(0.),
                             TextAlign::Center => CURSOR_WIDTH,
                         };
-                        scroll_offset.x = if scroll_offset.x + cursor_pos.x
+                        scroll_offset.x = if scroll_offset.x + cursor_x
                             > (bounds.size.width - line_number_width - safety_margin)
                         {
-                            bounds.size.width - line_number_width - safety_margin - cursor_pos.x
-                        } else if scroll_offset.x + cursor_pos.x < px(0.) {
-                            -cursor_pos.x
+                            bounds.size.width - line_number_width - safety_margin - cursor_x
+                        } else if scroll_offset.x + cursor_x < px(0.) {
+                            -cursor_x
                         } else {
                             scroll_offset.x
                         };
@@ -1039,7 +1055,7 @@ impl<M: InputModeKind> TextElement<M> {
                     if !auto_scrolling {
                         scroll_offset.y = reveal_row(
                             scroll_offset.y,
-                            cursor_pos.y,
+                            cursor_y,
                             line_height,
                             bounds.size.height,
                             top_bottom_margin,
@@ -1049,24 +1065,24 @@ impl<M: InputModeKind> TextElement<M> {
 
                     // For selection to move scroll
                     if selection.reversed {
-                        if selection_changed && scroll_offset.x + cursor_start.x < px(0.) {
+                        if selection_changed && scroll_offset.x + start_x < px(0.) {
                             // selection start is out of left
-                            scroll_offset.x = -cursor_start.x;
+                            scroll_offset.x = -start_x;
                         }
-                        if !auto_scrolling && scroll_offset.y + cursor_start.y < px(0.) {
+                        if !auto_scrolling && wide_pixels(scroll_offset.y) + start_y < 0. {
                             // selection start is out of top
-                            scroll_offset.y = -cursor_start.y;
+                            scroll_offset.y = px(-start_y as f32);
                         }
                     } else {
                         // TODO: Consider to remove this part,
                         // maybe is not necessary (But selection_reversed is needed).
-                        if selection_changed && scroll_offset.x + cursor_end.x <= px(0.) {
+                        if selection_changed && scroll_offset.x + end_x <= px(0.) {
                             // selection end is out of left
-                            scroll_offset.x = -cursor_end.x;
+                            scroll_offset.x = -end_x;
                         }
-                        if !auto_scrolling && scroll_offset.y + cursor_end.y <= px(0.) {
+                        if !auto_scrolling && wide_pixels(scroll_offset.y) + end_y <= 0. {
                             // selection end is out of top
-                            scroll_offset.y = -cursor_end.y;
+                            scroll_offset.y = px(-end_y as f32);
                         }
                     }
                 }
@@ -1074,16 +1090,15 @@ impl<M: InputModeKind> TextElement<M> {
 
             // Apply the final horizontal offset to every caret after cursor-follow and
             // deferred scrolling have been resolved, regardless of selection order.
-            let cursor_x = bounds.left() + cursor_pos.x + line_number_width;
+            let cursor_x = bounds.left() + cursor_x + line_number_width;
+            let paint_y = cursor_y + wide_pixels(bounds.top() + (line_height - cursor_height) / 2.);
             cursor_infos.push(CursorRenderInfo {
                 bounds: Bounds::new(
-                    point(
-                        cursor_x,
-                        bounds.top() + cursor_pos.y + ((line_height - cursor_height) / 2.),
-                    ),
+                    point(cursor_x, px(paint_y as f32)),
                     size(CURSOR_WIDTH, cursor_height),
                 ),
                 is_active,
+                paint_y,
             });
         }
 
@@ -1106,7 +1121,8 @@ impl<M: InputModeKind> TextElement<M> {
         scroll_offset.y =
             clamp_vertical_scroll_offset(scroll_offset.y, scroll_size.height, bounds.size.height);
 
-        bounds.origin = bounds.origin + scroll_offset;
+        bounds.origin.x += scroll_offset.x;
+        bounds.origin.y += px((last_layout.vertical_anchor + wide_pixels(scroll_offset.y)) as f32);
 
         (
             cursor_infos,
@@ -1416,18 +1432,18 @@ impl<M: InputModeKind> TextElement<M> {
         state: &InputBaseState<M>,
         line_height: Pixels,
         input_height: Pixels,
-    ) -> (Range<usize>, Vec<usize>, Pixels) {
+    ) -> (Range<usize>, Vec<usize>, f64) {
         // Add extra rows to avoid showing empty space when scroll to bottom.
         let extra_rows = 1;
         if state.is_single_line() {
-            return (0..1, vec![0], px(0.));
+            return (0..1, vec![0], 0.);
         }
 
         let total_lines = state.display_map.wrap_row_count();
         let display_count = state.display_map.display_row_count();
         let buffer_line_count = state.display_map.buffer_line_count();
         if display_count == 0 || buffer_line_count == 0 {
-            return (0..0, Vec::new(), px(0.));
+            return (0..0, Vec::new(), 0.);
         }
 
         let mut scroll_top = if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
@@ -1449,13 +1465,13 @@ impl<M: InputModeKind> TextElement<M> {
 
         // Display rows are uniformly `line_height` tall, so the visible window maps
         // directly to a display-row range.
-        let viewport_top = (-scroll_top).max(px(0.));
-        let viewport_bottom = viewport_top + input_height;
-        let line_height_f = f32::from(line_height);
+        let viewport_top = wide_pixels(-scroll_top).max(0.);
+        let viewport_bottom = viewport_top + wide_pixels(input_height);
+        let line_height_f = wide_pixels(line_height);
         let first_display =
-            ((f32::from(viewport_top) / line_height_f).floor() as usize).min(display_count - 1);
+            ((viewport_top / line_height_f).floor() as usize).min(display_count - 1);
         let last_display =
-            ((f32::from(viewport_bottom) / line_height_f).ceil() as usize).min(display_count - 1);
+            ((viewport_bottom / line_height_f).ceil() as usize).min(display_count - 1);
 
         let start_line = state.display_map.display_row_to_buffer_line(first_display);
         let end_line = state.display_map.display_row_to_buffer_line(last_display);
@@ -1465,8 +1481,8 @@ impl<M: InputModeKind> TextElement<M> {
             .display_map
             .buffer_line_to_display_row_range(start_line)
         {
-            Some(range) => line_height * range.start,
-            None => line_height * first_display,
+            Some(range) => row_top(range.start, line_height),
+            None => row_top(first_display, line_height),
         };
 
         let visible_range = start_line..(end_line + 1 + extra_rows).min(buffer_line_count);
@@ -1696,7 +1712,9 @@ impl<M: InputModeKind> TextElement<M> {
             let ghost = ghost_rows
                 .filter(|(after, _)| row > *after)
                 .map_or(px(0.), |(_, height)| height);
-            bounds.origin.y + line_height * row as f32 + ghost
+            bounds.origin.y
+                + px((row_top(row, line_height) - last_layout.vertical_anchor) as f32)
+                + ghost
         };
         let bar = |rows: Range<usize>, color: Hsla| {
             let bottom = top(rows.end.saturating_sub(1).max(rows.start)) + line_height;
@@ -2538,7 +2556,8 @@ impl<M: InputModeKind> TextElement<M> {
         let (top, height) = if !self.state.read(cx).is_multi_line() {
             (input_bounds.top(), input_bounds.size.height)
         } else if let Some(caret) = cursor_infos.iter().find(|info| info.is_active) {
-            let top = (caret.bounds.top() + cursor_scroll_offset.y)
+            let top = caret
+                .painted_top(cursor_scroll_offset.y)
                 .clamp(input_bounds.top(), input_bounds.bottom());
             (top, line_height.min(input_bounds.bottom() - top))
         } else {
@@ -2925,6 +2944,13 @@ impl<M: InputModeKind> TextElement<M> {
 struct CursorRenderInfo {
     bounds: Bounds<Pixels>,
     is_active: bool,
+    paint_y: f64,
+}
+
+impl CursorRenderInfo {
+    fn painted_top(&self, scroll_y: Pixels) -> Pixels {
+        px((self.paint_y + wide_pixels(scroll_y)) as f32)
+    }
 }
 
 pub(super) struct PrepaintState {
@@ -2974,10 +3000,11 @@ impl PrepaintState {
             .iter()
             .map(|info| {
                 let mut bounds = info.bounds;
-                bounds.origin.y += self.cursor_scroll_offset.y;
+                bounds.origin.y = info.painted_top(self.cursor_scroll_offset.y);
                 CursorRenderInfo {
                     bounds,
                     is_active: info.is_active,
+                    paint_y: info.paint_y,
                 }
             })
             .collect()
@@ -3278,6 +3305,13 @@ impl<M: InputModeKind> Element for TextElement<M> {
 
         let (visible_range, visible_buffer_lines, visible_top) =
             self.calculate_visible_range(&state, line_height, bounds.size.height);
+        // Cancel large scroll positions before converting either layout term to f32.
+        let vertical_anchor = if visible_top >= 65_536. {
+            visible_top
+        } else {
+            0.
+        };
+        let visible_top = px((visible_top - vertical_anchor) as f32);
         let visible_start_offset = state.text.line_start_offset(visible_range.start);
         let visible_end_offset = state
             .text
@@ -3319,6 +3353,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             visible_buffer_lines,
             visible_line_byte_offsets,
             visible_top,
+            vertical_anchor,
             visible_range_offset,
             line_height,
             wrap_width,
@@ -3596,6 +3631,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
             );
             let mut geometry =
                 PrepaintCaretGeometry::new(cursor_bounds, line_height, input_bounds, scroll_offset);
+            if let Some(cursor) = cursor_infos.iter().find(|info| info.is_active) {
+                geometry.painted_top = cursor.painted_top(scroll_offset.y);
+            }
             geometry.resize_reveal_owned = resize_reveal_owned;
             geometry
         });
@@ -4571,6 +4609,46 @@ mod tests {
             DecorationHarness(state)
         });
         (editor.unwrap(), window)
+    }
+
+    #[gpui::test]
+    fn deep_editor_rows_share_text_caret_and_hit_test_geometry(cx: &mut TestAppContext) {
+        let text = "abc\n".repeat(9_101_081);
+        let (editor, window) = decoration_editor(cx, &text, false);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let height = editor.read(cx).line_height().unwrap();
+            for line in [20, 729_461, 729_462, 5_835_553, 9_101_078] {
+                let row = line - 1;
+                let byte = row * 4 + 1;
+                let scroll_y = -row_top(row - 2, height);
+                editor.update(cx, |state, cx| {
+                    state.set_selected_range(byte..byte, cx);
+                    state.set_scroll_offset(point(px(0.), px(scroll_y as f32)), cx);
+                });
+                window.draw(cx).clear(cx);
+                window.draw(cx).clear(cx);
+
+                let state = editor.read(cx);
+                let text = state.range_to_bounds(&(byte..byte)).unwrap();
+                let caret = state.prepaint_caret_geometry().unwrap();
+                let expected = text.top() + (height - caret.cursor_bounds().size.height) / 2.;
+                assert!(
+                    (caret.painted_top - expected).abs() < px(0.1),
+                    "line {line}"
+                );
+                assert!(state.input_bounds().contains(&text.origin), "line {line}");
+                let hit = point(text.left(), text.top() + height / 2.);
+                assert_eq!(state.resolve_mouse_position(hit).0, byte, "line {line}");
+                let layout = state.last_layout.as_ref().unwrap();
+                let selection =
+                    TextElement::<EditorMode>::layout_range_corners(&(byte..byte + 1), layout)
+                        .unwrap();
+                let selection_top = state.last_bounds.unwrap().top() + selection[0].top_left.y;
+                assert!((selection_top - text.top()).abs() < px(0.1), "line {line}");
+            }
+        });
     }
 
     #[gpui::test]
@@ -6914,7 +6992,7 @@ mod tests {
     #[test]
     fn row_reveal_contains_the_whole_row_and_has_a_stable_offset() {
         let line_height = px(20.);
-        let row_top = px(1000.);
+        let row_top = 1000.;
         for viewport_height in [px(20.), px(30.), px(600.)] {
             for auto_grow in [false, true] {
                 for surrounding in [None, Some(0), Some(50)] {
@@ -6927,8 +7005,8 @@ mod tests {
                     for previous in [px(-1500.), px(-1000.), px(0.)] {
                         let offset =
                             reveal_row(previous, row_top, line_height, viewport_height, padding);
-                        assert!(row_top + offset >= px(0.));
-                        assert!(row_top + offset + line_height <= viewport_height);
+                        assert!(px(row_top as f32) + offset >= px(0.));
+                        assert!(px(row_top as f32) + offset + line_height <= viewport_height);
                         assert_eq!(
                             reveal_row(offset, row_top, line_height, viewport_height, padding),
                             offset,
@@ -6942,11 +7020,8 @@ mod tests {
 
     #[test]
     fn undersized_row_reveal_aligns_the_start_without_oscillating() {
-        let offset = reveal_row(px(0.), px(80.), px(20.), px(10.), px(60.));
+        let offset = reveal_row(px(0.), 80., px(20.), px(10.), px(60.));
         assert_eq!(px(80.) + offset, px(0.));
-        assert_eq!(
-            reveal_row(offset, px(80.), px(20.), px(10.), px(60.)),
-            offset
-        );
+        assert_eq!(reveal_row(offset, 80., px(20.), px(10.), px(60.)), offset);
     }
 }

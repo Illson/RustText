@@ -382,6 +382,7 @@ pub struct PrepaintCaretGeometry {
     line_height: Pixels,
     input_bounds: Bounds<Pixels>,
     scroll_offset: Point<Pixels>,
+    pub(super) painted_top: Pixels,
     /// A resize owns visibility while its requested repaint settles.
     pub(super) resize_reveal_owned: bool,
 }
@@ -395,6 +396,7 @@ impl PrepaintCaretGeometry {
     ) -> Self {
         Self {
             cursor_bounds,
+            painted_top: cursor_bounds.top() + scroll_offset.y,
             line_height,
             input_bounds,
             scroll_offset,
@@ -770,7 +772,17 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub fn text_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.last_bounds
+        let mut bounds = self.last_bounds?;
+        let anchor = self.last_layout.as_ref()?.vertical_anchor;
+        bounds.origin.y = px((f64::from(f32::from(bounds.origin.y)) - anchor) as f32);
+        Some(bounds)
+    }
+
+    /// Vertical content position at the top of the viewport, in logical pixels.
+    pub fn viewport_top_in_content(&self) -> Option<f64> {
+        let layout = self.last_layout.as_ref()?;
+        let bounds = self.last_bounds?;
+        Some(layout.vertical_anchor + f64::from(f32::from(self.input_bounds.top() - bounds.top())))
     }
 
     /// The cached display map for querying wrapped rows and display positions.
@@ -3151,7 +3163,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         let display_row = self
             .display_map
             .offset_to_display_row(offset, self.line_end_affinity_at(offset));
-        let row_offset_y = line_height * display_row;
+        let row_offset_y = super::element::row_top(display_row, line_height);
 
         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
         // in layout_cursors, so shifting the text here would cause a first-click visual jump.
@@ -5204,7 +5216,11 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         let last_layout = self.last_layout.as_ref()?;
         // The same origin as `resolve_mouse_position`: past the gutter, at the first
         // visible line.
-        let inner_point = self.last_bounds?.localize(&point)?
+        if !self.input_bounds.contains(&point) {
+            return None;
+        }
+        let inner_point = point
+            - self.last_bounds?.origin
             - gpui::point(last_layout.line_number_width, last_layout.visible_top);
 
         let mut line_top = px(0.);
