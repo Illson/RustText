@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -148,13 +149,17 @@ public partial class MainWindow
         var editor = new TextEditor
         {
             Text = text,
-            FontFamily = new FontFamily("Consolas, monospace"),
+            FontFamily = new FontFamily("Cascadia Mono, Consolas, monospace"),
             FontSize = _fontSize,
+            Background = FocusTheme.Editor,
+            Foreground = FocusTheme.Text,
+            LineNumbersForeground = FocusTheme.Gutter,
             WordWrap = _wordWrap,
             ShowLineNumbers = true,
             HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
         };
+        editor.TextArea.SelectionBrush = FocusTheme.Selection;
         editor.Options.ShowBoxForControlCharacters = true;
         tab.Editor = editor;
         SetSyntax(editor, tab.Path);
@@ -165,7 +170,11 @@ public partial class MainWindow
         var undoStack = editor.Document.UndoStack;
         undoStack.MarkAsOriginalFile();
 
-        var warning = new TextBlock { VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+        var warning = new TextBlock
+        {
+            Foreground = FocusTheme.Danger,
+            VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap
+        };
         var jump = Button("Перейти к ошибке", () =>
         {
             if (tab.JsonError is { } error)
@@ -184,7 +193,7 @@ public partial class MainWindow
         actions.Children.Add(disable);
         var banner = new Border
         {
-            Background = new SolidColorBrush(Color.Parse("#58282E")),
+            Background = FocusTheme.DangerSurface,
             Padding = new Thickness(10, 5),
             IsVisible = false,
             Child = actions
@@ -353,9 +362,11 @@ public partial class MainWindow
                 TextWrapping = TextWrapping.Wrap
             });
             var dialog = Dialog("Закрыть без сохранения?", body);
-            var cancel = Button("Отмена", () => dialog.Close(false));
+            var cancel = FocusButton(Button("Отмена", () => dialog.Close(false)));
             cancel.IsCancel = true;
-            body.Children.Add(Row(cancel, Button("Закрыть", () => dialog.Close(true))));
+            var discard = Button("Закрыть", () => dialog.Close(true));
+            discard.Classes.Add("focus-danger");
+            body.Children.Add(Row(cancel, discard));
             _confirmingTabClose = true;
             try
             {
@@ -431,7 +442,9 @@ public partial class MainWindow
     private void UpdateTab(WorkTab tab)
     {
         var title = tab.Path is { } path ? Path.GetFileName(path) : UntitledName(tab);
-        tab.Label.Text = title + (tab.Dirty ? " •" : "");
+        tab.Label.Text = title;
+        tab.DirtyMark.Opacity = tab.Dirty ? 1 : 0;
+        AutomationProperties.SetName(tab.Item, title + (tab.Dirty ? ", изменено" : ""));
         ToolTip.SetTip(tab.Label, tab.Path ?? title);
         if (ReferenceEquals(tab, ActiveTab))
         {
@@ -464,6 +477,7 @@ public partial class MainWindow
 
     private void UpdateStatus(WorkTab tab)
     {
+        SetCaption(tab.Label.Text);
         if (tab.Editor is { } editor)
         {
             var status = tab.Dirty ? "Изменено" : "Сохранено";
@@ -557,6 +571,7 @@ public partial class MainWindow
         public Group Group { get; set; } = group;
         public TabItem Item { get; } = new();
         public TextBlock Label { get; set; } = null!;
+        public TextBlock DirtyMark { get; set; } = null!;
         public string? Path { get; set; }
         public TextEditor? Editor { get; set; }
         public LogView? Log { get; set; }

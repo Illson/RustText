@@ -2,7 +2,6 @@ using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
-using Avalonia.Media;
 using AvaloniaEdit.Rendering;
 using RustText.Demo.Editor;
 
@@ -33,22 +32,25 @@ public partial class MainWindow
         _wordOption = new CheckBox { Content = "Целое слово" };
         _allTabs = new CheckBox { Content = "Все вкладки" };
         _onlyCurrent = new CheckBox { Content = "Только текущее" };
-        _searchResults = new ListBox { MaxHeight = 130, MinHeight = 55 };
-        _searchStatus = new TextBlock { Foreground = new SolidColorBrush(Color.Parse("#C0CEDA")), VerticalAlignment = VerticalAlignment.Center };
-        var searchRow = new DockPanel { LastChildFill = true };
-        var commands = Row(Button("Найти", () => Run(FindAsync)), Button("↑", () => Run(() => NavigateSearchAsync(true))),
-            Button("↓", () => Run(() => NavigateSearchAsync(false))),
-            Button("Замена", () => { _replacementRow.IsVisible = !_replacementRow.IsVisible; }),
-            Button("Отменить", () => _searchCancellation?.Cancel()), Button("×", CloseSearchPanel));
+        _searchResults = new ListBox { MaxHeight = 112, MinHeight = 40 };
+        _searchStatus = new TextBlock { Foreground = FocusTheme.Muted, VerticalAlignment = VerticalAlignment.Center };
+        var searchRow = new DockPanel { LastChildFill = true, MinHeight = 34 };
+        var findButton = FocusButton(Button("Найти", () => Run(FindAsync)), primary: true);
+        var previousButton = FocusIcon(Button("↑", () => Run(() => NavigateSearchAsync(true))));
+        var nextButton = FocusIcon(Button("↓", () => Run(() => NavigateSearchAsync(false))));
+        var replaceToggle = FocusButton(Button("Замена", () => { _replacementRow.IsVisible = !_replacementRow.IsVisible; }));
+        var cancelButton = FocusButton(Button("Отменить", () => _searchCancellation?.Cancel()));
+        var closeButton = FocusIcon(Button("×", CloseSearchPanel));
+        var commands = Row(findButton, previousButton, nextButton, replaceToggle, cancelButton, closeButton);
         DockPanel.SetDock(commands, Dock.Right);
         searchRow.Children.Add(commands);
         searchRow.Children.Add(_searchInput);
 
-        _replacementRow = Row(_replacement, Button("Заменить", () => Run(() => ReplaceAsync(false))),
-            Button("Заменить все", () => Run(() => ReplaceAsync(true))));
+        _replacementRow = Row(_replacement, FocusButton(Button("Заменить", () => Run(() => ReplaceAsync(false)))),
+            FocusButton(Button("Заменить все", () => Run(() => ReplaceAsync(true))), primary: true));
         _replacementRow.IsVisible = false;
 
-        var layout = new StackPanel { Margin = new Thickness(12, 8), Spacing = 6 };
+        var layout = new StackPanel { Margin = new Thickness(10, 7), Spacing = 5 };
         layout.Children.Add(searchRow);
         layout.Children.Add(_replacementRow);
         var options = new WrapPanel { ItemSpacing = 9 };
@@ -61,8 +63,8 @@ public partial class MainWindow
         layout.Children.Add(_searchResults);
         PanelHost.Content = new Border
         {
-            Background = new SolidColorBrush(Color.Parse("#1B2734")),
-            BorderBrush = new SolidColorBrush(Color.Parse("#3C4D5C")),
+            Background = FocusTheme.Panel,
+            BorderBrush = FocusTheme.Border,
             BorderThickness = new Thickness(0, 1, 0, 0),
             Child = layout
         };

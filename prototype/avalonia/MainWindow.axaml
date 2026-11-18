@@ -1,26 +1,45 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:RustText.Demo"
         x:Class="RustText.Demo.MainWindow"
         Icon="avares://rusttext/Assets/rusttext.ico" Title="RustText" Width="1080" Height="700" MinWidth="650" MinHeight="360"
         WindowStartupLocation="CenterScreen"
-        Background="#131B23" Foreground="#E9F0F6">
+        ExtendClientAreaToDecorationsHint="True" ExtendClientAreaTitleBarHeightHint="38" WindowDecorations="Full"
+        Background="{x:Static local:FocusTheme.Editor}" Foreground="{x:Static local:FocusTheme.Text}" FontSize="13">
     <Grid RowDefinitions="Auto,*,Auto,Auto">
-        <Border BorderBrush="#31404D" BorderThickness="0,0,0,1" Background="#17212A">
-            <DockPanel>
-                <Button DockPanel.Dock="Left" Content="RustText" Background="Transparent"
-                        FontWeight="SemiBold" Padding="16,8" Click="HomeClicked" />
-                <Menu x:Name="TopMenu" VerticalAlignment="Center" />
-            </DockPanel>
+        <Border Background="{x:Static local:FocusTheme.Chrome}" BorderBrush="{x:Static local:FocusTheme.Border}"
+                BorderThickness="0,0,0,1" MinHeight="38" WindowDecorationProperties.ElementRole="TitleBar">
+            <Grid ColumnDefinitions="Auto,Auto,*,144" ColumnSpacing="6" Margin="8,0,0,0">
+                <Button Classes="focus-quiet" Foreground="{x:Static local:FocusTheme.Text}" Padding="5,3"
+                        AutomationProperties.Name="Главный экран RustText" Click="HomeClicked"
+                        WindowDecorationProperties.ElementRole="User">
+                    <StackPanel Orientation="Horizontal" Spacing="7">
+                        <Border Width="22" Height="21" CornerRadius="5" Background="#37302C" BorderBrush="#5E544A" BorderThickness="1">
+                            <TextBlock Text="›_" FontFamily="Consolas" FontWeight="Bold"
+                                       Foreground="{x:Static local:FocusTheme.Warning}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <TextBlock Text="RustText" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+                <Menu Grid.Column="1" x:Name="TopMenu" Classes="focus-menu" VerticalAlignment="Center"
+                      WindowDecorationProperties.ElementRole="User" />
+                <TextBlock Grid.Column="2" x:Name="ActiveCaption" Foreground="{x:Static local:FocusTheme.Muted}"
+                           Margin="12,0" HorizontalAlignment="Right" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" FontSize="12" />
+            </Grid>
         </Border>
         <ContentControl Grid.Row="1" x:Name="WorkspaceHost"
                         HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
         <ContentControl Grid.Row="2" x:Name="PanelHost" IsVisible="False"
                         HorizontalContentAlignment="Stretch" />
-        <Border Grid.Row="3" Padding="12,5" BorderBrush="#31404D" BorderThickness="0,1,0,0"
-                Background="#17212A">
+        <Border Grid.Row="3" Padding="12,3" MinHeight="26" BorderBrush="{x:Static local:FocusTheme.Border}"
+                BorderThickness="0,1,0,0" Background="{x:Static local:FocusTheme.Deep}">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                <TextBlock x:Name="StatusText" TextTrimming="CharacterEllipsis" Foreground="#C0CEDA" />
-                <TextBlock Grid.Column="1" x:Name="FormatText" Foreground="#C0CEDA" />
+                <TextBlock x:Name="StatusText" TextTrimming="CharacterEllipsis" FontSize="12"
+                           VerticalAlignment="Center" Foreground="{x:Static local:FocusTheme.Muted}" />
+                <TextBlock Grid.Column="1" x:Name="FormatText" FontSize="12"
+                           VerticalAlignment="Center" Foreground="{x:Static local:FocusTheme.Muted}" />
             </Grid>
         </Border>
     </Grid>

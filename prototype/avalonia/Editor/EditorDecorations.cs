@@ -11,16 +11,13 @@ namespace RustText.Demo.Editor;
 
 internal sealed class DocumentMinimap : Control
 {
-    private static readonly IBrush BackgroundBrush = new SolidColorBrush(Color.Parse("#17212A"));
-    private static readonly IBrush LineBrush = new SolidColorBrush(Color.Parse("#516775"));
-    private static readonly IBrush ViewBrush = new SolidColorBrush(Color.Parse("#314D66"));
     private readonly TextEditor _editor;
     private bool _dragging;
 
     public DocumentMinimap(TextEditor editor)
     {
         _editor = editor;
-        Width = 55;
+        Width = 72;
         _editor.TextChanged += (_, _) => InvalidateVisual();
         _editor.TextArea.TextView.VisualLinesChanged += (_, _) => InvalidateVisual();
         ToolTip.SetTip(this, "Перейти к области документа");
@@ -34,21 +31,22 @@ internal sealed class DocumentMinimap : Control
             return;
         }
 
-        context.FillRectangle(BackgroundBrush, new Rect(Bounds.Size));
+        context.FillRectangle(FocusTheme.Hover, new Rect(Bounds.Size));
+        context.FillRectangle(FocusTheme.Border, new Rect(0, 0, 1, Bounds.Height));
         var count = document.LineCount;
         var rows = Math.Clamp((int)(Bounds.Height / 3), 1, 160);
         var view = _editor.TextArea.TextView;
         var first = view.VisualLinesValid ? view.VisualLines.FirstOrDefault()?.FirstDocumentLine.LineNumber : null;
         var current = Math.Clamp((first ?? _editor.TextArea.Caret.Line) - 1, 0, count - 1);
         var viewY = Bounds.Height * current / Math.Max(count, 1);
-        context.FillRectangle(ViewBrush, new Rect(0, viewY, Bounds.Width, Math.Min(18, Bounds.Height - viewY)));
+        context.FillRectangle(FocusTheme.Selection, new Rect(1, viewY, Bounds.Width - 1, Math.Min(18, Bounds.Height - viewY)));
         for (var row = 0; row < rows; row++)
         {
             var line = document.GetLineByNumber(1 + (int)((long)row * count / rows));
             var width = Math.Min(Bounds.Width - 12, line.Length * .6);
             if (width > 0)
             {
-                context.FillRectangle(LineBrush, new Rect(6, row * Bounds.Height / rows, width, 1));
+                context.FillRectangle(FocusTheme.Border, new Rect(7, row * Bounds.Height / rows, width, 1));
             }
         }
     }
@@ -99,8 +97,6 @@ internal sealed class DocumentMinimap : Control
 
 internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
 {
-    private static readonly IBrush Brush = new SolidColorBrush(Color.Parse("#665528"));
-    private static readonly IBrush CurrentBrush = new SolidColorBrush(Color.Parse("#366187"));
     public Regex? Pattern { get; set; }
     public bool OnlyCurrent { get; set; }
     public (int Offset, int Length)? Current { get; set; }
@@ -152,7 +148,7 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
 
         if (all.CreateGeometry() is { } matches)
         {
-            drawingContext.DrawGeometry(Brush, null, matches);
+            drawingContext.DrawGeometry(FocusTheme.Match, null, matches);
         }
 
         if (Current is { Length: > 0 } current && current.Offset + current.Length <= document.TextLength)
@@ -161,7 +157,7 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
             active.AddSegment(view, new TextSegment { StartOffset = current.Offset, Length = current.Length });
             if (active.CreateGeometry() is { } selected)
             {
-                drawingContext.DrawGeometry(CurrentBrush, null, selected);
+            drawingContext.DrawGeometry(FocusTheme.CurrentMatch, null, selected);
             }
         }
     }

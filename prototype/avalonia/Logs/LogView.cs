@@ -50,15 +50,29 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly TextBlock _fileLabel = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBox _logText = new()
     {
+        Classes = { "focus-log-editor" },
         IsReadOnly = true,
         AcceptsReturn = true,
         FontFamily = new FontFamily("Consolas, monospace"),
-        FontSize = 14,
+        FontSize = FocusTheme.EditorFontSize,
         IsInactiveSelectionHighlightEnabled = true,
-        Padding = new Thickness(12),
+        Padding = new Thickness(8, 6),
+        Background = FocusTheme.Editor,
+        Foreground = FocusTheme.Text,
+        CaretBrush = FocusTheme.Accent,
+        SelectionBrush = FocusTheme.Selection,
+        SelectionForegroundBrush = FocusTheme.Text,
         TextWrapping = TextWrapping.NoWrap,
     };
-    private readonly TextBox _percentBox = new() { Width = 90, PlaceholderText = "%", Text = "0" };
+    private readonly TextBox _percentBox = new()
+    {
+        Width = 76,
+        PlaceholderText = "%",
+        Text = "0",
+        Background = FocusTheme.Field,
+        Foreground = FocusTheme.Text,
+        BorderBrush = FocusTheme.Border,
+    };
     private readonly TextBox _searchBox = new() { PlaceholderText = "Текст или регулярное выражение" };
     private readonly CheckBox _regexBox = new() { Content = "Регулярное выражение" };
     private readonly CheckBox _caseBox = new() { Content = "Учитывать регистр" };
@@ -87,9 +101,26 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly TextBlock _statusLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _countLabel = new();
     private readonly TextBlock _indexLabel = new();
-    private readonly ListBox _minimapList = new() { Width = 110 };
-    private readonly StackPanel _searchPanel = new() { Spacing = 7, IsVisible = false };
+    private readonly ListBox _minimapList = new()
+    {
+        Width = 62,
+        Background = FocusTheme.Hover,
+        Foreground = FocusTheme.Muted,
+        BorderBrush = FocusTheme.Border,
+    };
+    private readonly StackPanel _searchPanel = new()
+    {
+        Spacing = 7,
+        Margin = new Thickness(0, 6, 0, 0),
+        Background = FocusTheme.Panel,
+        IsVisible = false,
+    };
     private readonly StackPanel _searchResultButtons = new() { Spacing = 2 };
+    private readonly TextBlock _liveLabel = new()
+    {
+        VerticalAlignment = VerticalAlignment.Center,
+        FontSize = 12,
+    };
 
     private readonly List<IndexEntry> _lineIndex = [];
     private readonly HashSet<long> _skippedSearchLines = [];
@@ -279,53 +310,72 @@ internal sealed class LogView : UserControl, IDisposable
 
     private Control BuildLayout()
     {
-        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto") };
-        var contextRow = new StackPanel
+        var root = new Grid
         {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            Spacing = 8
+            RowDefinitions = new RowDefinitions("Auto,*,Auto,Auto"),
+            Background = FocusTheme.Editor,
         };
-        contextRow.Children.Add(_fileLabel);
-        contextRow.Children.Add(new TextBlock { Text = "ТОЛЬКО ЧТЕНИЕ", Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center });
-        contextRow.Children.Add(_pauseButton);
-        contextRow.Children.Add(_followButton);
-        contextRow.Children.Add(_indexButton);
-        contextRow.Children.Add(_cancelIndexButton);
-        contextRow.Children.Add(_openSearchButton);
-        contextRow.Children.Add(_wrapButton);
-        contextRow.Children.Add(_hideButton);
-        contextRow.Children.Add(_revealButton);
-        contextRow.Children.Add(_trimButton);
-        contextRow.Children.Add(_cancelTrimButton);
-        root.Children.Add(contextRow);
 
-        var navigation = new StackPanel
+        _fileLabel.FontSize = 12;
+        _fileLabel.FontWeight = FontWeight.Medium;
+        _fileLabel.MinWidth = 0;
+        _fileLabel.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _fileLabel.Foreground = FocusTheme.Text;
+        var readOnlyLabel = new TextBlock
+        {
+            Text = "ТОЛЬКО ЧТЕНИЕ",
+            FontSize = 11,
+            Foreground = FocusTheme.Muted,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var titleGroup = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 10,
+            MinWidth = 0,
+        };
+        _fileLabel.VerticalAlignment = VerticalAlignment.Center;
+        titleGroup.Children.Add(_fileLabel);
+        Grid.SetColumn(readOnlyLabel, 1);
+        titleGroup.Children.Add(readOnlyLabel);
+
+        SetButtonStyle(_pauseButton, "focus-quiet");
+        SetButtonStyle(_followButton, "focus-quiet");
+        var contextActions = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Spacing = 6,
-            Margin = new Thickness(0, 8, 0, 8)
+            Spacing = 5,
         };
-        Grid.SetRow(navigation, 1);
-        navigation.Children.Add(_startButton);
-        navigation.Children.Add(_previousButton);
-        navigation.Children.Add(_nextButton);
-        navigation.Children.Add(_endButton);
-        navigation.Children.Add(_middleButton);
-        navigation.Children.Add(_percentBox);
-        var percentButton = new Button { Content = "Перейти, %" };
-        percentButton.Click += async (_, _) => await JumpByPercentageAsync();
-        navigation.Children.Add(percentButton);
-        navigation.Children.Add(_timeButton);
-        root.Children.Add(navigation);
+        contextActions.Children.Add(_pauseButton);
+        contextActions.Children.Add(_followButton);
+        contextActions.Children.Add(_liveLabel);
+
+        var contextGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 12,
+        };
+        contextGrid.Children.Add(titleGroup);
+        Grid.SetColumn(contextActions, 1);
+        contextGrid.Children.Add(contextActions);
+        var contextBorder = new Border
+        {
+            Padding = new Thickness(10, 5),
+            Background = FocusTheme.Chrome,
+            BorderBrush = FocusTheme.Border,
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Child = contextGrid,
+        };
+        root.Children.Add(contextBorder);
 
         var content = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            ColumnSpacing = 8
+            ColumnSpacing = 0,
+            Background = FocusTheme.Editor,
         };
-        Grid.SetRow(content, 2);
+        Grid.SetRow(content, 1);
         content.Children.Add(_logText);
         _minimapList.ItemsSource = _miniSamples;
         _minimapList.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<MiniSample>((sample, _) =>
@@ -337,11 +387,24 @@ internal sealed class LogView : UserControl, IDisposable
 
             var button = new Button
             {
-                Padding = new Thickness(3),
+                Height = 5,
+                MinHeight = 5,
+                MaxHeight = 5,
+                Padding = new Thickness(0),
+                Margin = new Thickness(0),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Left,
-                Content = new TextBlock { Text = sample.Preview, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 9 }
+                Content = new Border
+                {
+                    Width = Math.Clamp(sample.Preview.Length * 1.35, 6, 46),
+                    Height = 2,
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    Background = FocusTheme.Muted,
+                },
             };
-            ToolTip.SetTip(button, $"{sample.Offset:N0} байт");
+            SetButtonStyle(button, "focus-quiet");
+            button.Margin = new Thickness(0);
+            ToolTip.SetTip(button, $"{sample.Offset:N0} байт · {sample.Preview}");
             button.Click += async (_, _) => await NavigateAsync(sample.Offset, true);
             return button;
         });
@@ -349,30 +412,134 @@ internal sealed class LogView : UserControl, IDisposable
         content.Children.Add(_minimapList);
         root.Children.Add(content);
 
-        var footer = new StackPanel { Spacing = 6, Margin = new Thickness(0, 8, 0, 0) };
-        Grid.SetRow(footer, 3);
-        var statusRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
-        statusRow.Children.Add(_countLabel);
-        Grid.SetColumn(_positionLabel, 1);
-        statusRow.Children.Add(_positionLabel);
-        footer.Children.Add(statusRow);
-        footer.Children.Add(_indexLabel);
-        footer.Children.Add(_statusLabel);
-
-        var searchRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        var searchRow = new WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+        };
+        _searchBox.MinWidth = 180;
+        _searchBox.FontSize = 12;
+        _searchBox.Background = FocusTheme.Field;
+        _searchBox.Foreground = FocusTheme.Text;
+        _searchBox.BorderBrush = FocusTheme.Border;
+        _percentBox.FontSize = 12;
+        _regexBox.FontSize = 12;
+        _caseBox.FontSize = 12;
+        _wholeWordBox.FontSize = 12;
         searchRow.Children.Add(_searchBox);
         searchRow.Children.Add(_regexBox);
         searchRow.Children.Add(_caseBox);
         searchRow.Children.Add(_wholeWordBox);
+        _regexBox.Foreground = FocusTheme.Muted;
+        _caseBox.Foreground = FocusTheme.Muted;
+        _wholeWordBox.Foreground = FocusTheme.Muted;
+        SetButtonStyle(_searchButton, "focus-primary");
+        SetButtonStyle(_moreButton, "focus-quiet");
+        SetButtonStyle(_cancelSearchButton, "focus-quiet");
+        SetButtonStyle(_searchCloseButton, "focus-quiet");
         searchRow.Children.Add(_searchButton);
         searchRow.Children.Add(_moreButton);
         searchRow.Children.Add(_cancelSearchButton);
         searchRow.Children.Add(_searchCloseButton);
         _searchPanel.Children.Add(searchRow);
-        _searchPanel.Children.Add(_searchResultButtons);
-        footer.Children.Add(_searchPanel);
+        var searchResults = new ScrollViewer
+        {
+            MaxHeight = 90,
+            Content = _searchResultButtons,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        };
+        _searchPanel.Children.Add(searchResults);
+        Grid.SetRow(_searchPanel, 2);
+        root.Children.Add(_searchPanel);
+
+        SetButtonStyle(_startButton, "focus-quiet");
+        SetButtonStyle(_previousButton, "focus-quiet");
+        SetButtonStyle(_nextButton, "focus-quiet");
+        SetButtonStyle(_endButton, "focus-quiet");
+        SetButtonStyle(_middleButton, "focus-quiet");
+        SetButtonStyle(_timeButton, "focus-quiet");
+        var percentButton = new Button { Content = "Перейти, %" };
+        SetButtonStyle(percentButton, "focus-quiet");
+        percentButton.Click += async (_, _) => await JumpByPercentageAsync();
+
+        var navigation = new WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 2, 0, 4),
+        };
+        navigation.Children.Add(_startButton);
+        navigation.Children.Add(_previousButton);
+        navigation.Children.Add(_nextButton);
+        navigation.Children.Add(_endButton);
+        navigation.Children.Add(_middleButton);
+        navigation.Children.Add(_percentBox);
+        navigation.Children.Add(percentButton);
+        navigation.Children.Add(_timeButton);
+
+        SetButtonStyle(_indexButton, "focus-quiet");
+        SetButtonStyle(_cancelIndexButton, "focus-quiet");
+        SetButtonStyle(_openSearchButton, "focus-quiet");
+        SetButtonStyle(_wrapButton, "focus-quiet");
+        SetButtonStyle(_hideButton, "focus-quiet");
+        SetButtonStyle(_revealButton, "focus-quiet");
+        SetButtonStyle(_trimButton, "focus-danger");
+        SetButtonStyle(_cancelTrimButton, "focus-quiet");
+        var fileActions = new WrapPanel { Orientation = Orientation.Horizontal };
+        fileActions.Children.Add(_indexButton);
+        fileActions.Children.Add(_cancelIndexButton);
+        fileActions.Children.Add(_openSearchButton);
+        fileActions.Children.Add(_wrapButton);
+        fileActions.Children.Add(_hideButton);
+        fileActions.Children.Add(_revealButton);
+        fileActions.Children.Add(_trimButton);
+        fileActions.Children.Add(_cancelTrimButton);
+
+        _countLabel.FontSize = 11;
+        _countLabel.Foreground = FocusTheme.Muted;
+        _positionLabel.FontSize = 11;
+        _positionLabel.Foreground = FocusTheme.Muted;
+        _indexLabel.FontSize = 11;
+        _indexLabel.Foreground = FocusTheme.Muted;
+        _statusLabel.FontSize = 11;
+        _statusLabel.Foreground = FocusTheme.Muted;
+        var footerContent = new StackPanel
+        {
+            Spacing = 2,
+            Margin = new Thickness(8, 4),
+            Background = FocusTheme.Chrome,
+        };
+        footerContent.Children.Add(navigation);
+        footerContent.Children.Add(fileActions);
+
+        var statusRow = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 12,
+            Margin = new Thickness(0, 3, 0, 0),
+        };
+        statusRow.Children.Add(_countLabel);
+        Grid.SetColumn(_positionLabel, 1);
+        statusRow.Children.Add(_positionLabel);
+        footerContent.Children.Add(statusRow);
+        footerContent.Children.Add(_indexLabel);
+        footerContent.Children.Add(_statusLabel);
+        var footer = new Border
+        {
+            Background = FocusTheme.Chrome,
+            BorderBrush = FocusTheme.Border,
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Child = footerContent,
+        };
+        Grid.SetRow(footer, 3);
         root.Children.Add(footer);
         return root;
+    }
+
+    private static void SetButtonStyle(Button button, string styleClass)
+    {
+        button.Classes.Add(styleClass);
+        button.FontSize = 12;
+        button.Margin = new Thickness(0, 0, 4, 3);
     }
 
     private void ConfigureInteractions()
@@ -600,8 +767,15 @@ internal sealed class LogView : UserControl, IDisposable
                 var button = new Button
                 {
                     HorizontalContentAlignment = HorizontalAlignment.Left,
-                    Content = $"{hit.LineNumber?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"} · {hit.Preview}"
+                    Content = new TextBlock
+                    {
+                        Text = $"{hit.LineNumber?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"} · {hit.Preview}",
+                        TextWrapping = TextWrapping.Wrap,
+                        FontSize = 12,
+                        Foreground = FocusTheme.Text,
+                    }
                 };
+                SetButtonStyle(button, "focus-quiet");
                 ToolTip.SetTip(button, $"Байт {hit.Offset:N0}");
                 button.Click += async (_, _) => await OpenSearchHitAsync(hit);
                 _searchResultButtons.Children.Add(button);
@@ -940,21 +1114,31 @@ internal sealed class LogView : UserControl, IDisposable
             Width = 460,
             SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            CanResize = false
+            CanResize = false,
+            Background = FocusTheme.Panel,
+            Foreground = FocusTheme.Text,
         };
         var result = false;
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Spacing = 8 };
         var accept = new Button { Content = "Удалить начало", MinWidth = 120 };
         var cancel = new Button { Content = "Отмена", MinWidth = 90 };
+        SetButtonStyle(accept, "focus-danger");
+        SetButtonStyle(cancel, "focus-quiet");
         accept.Click += (_, _) => { result = true; dialog.Close(); };
         cancel.Click += (_, _) => dialog.Close();
         buttons.Children.Add(cancel);
         buttons.Children.Add(accept);
-        dialog.Content = new StackPanel
+        dialog.Content = new Border
         {
-            Margin = new Thickness(18),
-            Spacing = 16,
-            Children = { new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, buttons }
+            Padding = new Thickness(18),
+            Background = FocusTheme.Panel,
+            BorderBrush = FocusTheme.Border,
+            BorderThickness = new Thickness(1),
+            Child = new StackPanel
+            {
+                Spacing = 16,
+                Children = { new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, Foreground = FocusTheme.Text }, buttons }
+            }
         };
         await dialog.ShowDialog(window);
         return result;
@@ -1311,9 +1495,17 @@ internal sealed class LogView : UserControl, IDisposable
     {
         var enabled = !_busy && !_closed;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
-        _followButton.Content = _followEnd ? "Следовать: вкл." : "Следовать за концом";
+        _followButton.Content = _followEnd ? "К концу" : "Следовать";
+        _liveLabel.Text = _autoRefresh ? "● Обновляется" : "● На паузе";
+        _liveLabel.Foreground = _autoRefresh ? FocusTheme.Success : FocusTheme.Muted;
+        _followButton.Background = _followEnd ? FocusTheme.Hover : Brushes.Transparent;
+        _followButton.Foreground = _followEnd ? FocusTheme.Accent : FocusTheme.Text;
+        _indexButton.Background = _indexPaused ? FocusTheme.Hover : Brushes.Transparent;
+        _indexButton.Foreground = _indexPaused ? FocusTheme.Accent : FocusTheme.Text;
         _indexButton.Content = _indexPaused ? "Продолжить индекс" : "Индексирование";
         _wrapButton.Content = _wordWrap ? "Перенос: вкл." : "Перенос: выкл.";
+        _wrapButton.Background = _wordWrap ? FocusTheme.Hover : Brushes.Transparent;
+        _wrapButton.Foreground = _wordWrap ? FocusTheme.Accent : FocusTheme.Text;
         _previousButton.IsEnabled = enabled && _previousOffsets.Count > 0;
         _nextButton.IsEnabled = enabled && _page?.HasMore == true;
         _startButton.IsEnabled = enabled && _page is not null;

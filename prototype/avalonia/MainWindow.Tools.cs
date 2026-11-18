@@ -47,7 +47,7 @@ public partial class MainWindow
             MenuGroup("Масштаб текста",
                 Command("Увеличить", () => ResizeText(1)),
                 Command("Уменьшить", () => ResizeText(-1)),
-                Command("Сбросить", () => ResizeText(14 - _fontSize))),
+                Command("Сбросить", () => ResizeText(FocusTheme.EditorFontSize - _fontSize))),
             new Separator(),
             Command("Генератор строк…", () => Run(ShowGeneratorAsync)),
             Command("Сравнить списки…", () => Run(ShowListComparisonAsync)),
@@ -105,7 +105,7 @@ public partial class MainWindow
             case Key.J when shift: Run(FormatJsonAsync); break;
             case Key.OemPlus or Key.Add: ResizeText(1); break;
             case Key.OemMinus or Key.Subtract: ResizeText(-1); break;
-            case Key.D0: ResizeText(14 - _fontSize); break;
+            case Key.D0: ResizeText(FocusTheme.EditorFontSize - _fontSize); break;
             default: return;
         }
 
@@ -223,11 +223,11 @@ public partial class MainWindow
         var body = DialogPanel(new TextBlock { Text = "Шаблон" }, template, new TextBlock { Text = "Количество строк" }, count, progress, status);
         var dialog = Dialog("Генератор строк", body, 560);
         CancellationTokenSource? source = null;
-        var generate = new Button { Content = "В новую вкладку" };
-        var file = new Button { Content = "В файл…" };
+        var generate = FocusButton(new Button { Content = "В новую вкладку" }, primary: true);
+        var file = FocusButton(new Button { Content = "В файл…" });
         generate.Click += (_, _) => Generate(false);
         file.Click += (_, _) => Generate(true);
-        body.Children.Add(Row(generate, file, Button("Отменить", () => source?.Cancel())));
+        body.Children.Add(Row(generate, file, FocusButton(Button("Отменить", () => source?.Cancel()))));
         dialog.Closing += (_, e) =>
         {
             if (source is not null)
@@ -321,7 +321,7 @@ public partial class MainWindow
         }
 
         results.SelectedIndex = 0;
-        var body = DialogPanel(inputs, Button("Сравнить", () => Run(async () =>
+        var body = DialogPanel(inputs, FocusButton(Button("Сравнить", () => Run(async () =>
         {
             var a = left.Text ?? "";
             var b = right.Text ?? "";
@@ -329,9 +329,9 @@ public partial class MainWindow
             tabs[0].Text.Text = comparison.Common;
             tabs[1].Text.Text = comparison.LeftOnly;
             tabs[2].Text.Text = comparison.RightOnly;
-        })), results);
-        body.Children.Add(Row(Button("Скопировать результат", () => Run(() => CopyTextAsync(tabs[Math.Max(0, results.SelectedIndex)].Text.Text))),
-            Button("Открыть во вкладке", () => NewTab(tabs[Math.Max(0, results.SelectedIndex)].Text.Text ?? ""))));
+        })), primary: true), results);
+        body.Children.Add(Row(FocusButton(Button("Скопировать результат", () => Run(() => CopyTextAsync(tabs[Math.Max(0, results.SelectedIndex)].Text.Text)))),
+            FocusButton(Button("Открыть во вкладке", () => NewTab(tabs[Math.Max(0, results.SelectedIndex)].Text.Text ?? "")), primary: true)));
         await Dialog("Сравнение списков", body, 740).ShowDialog(this);
     }
 
@@ -345,9 +345,9 @@ public partial class MainWindow
             new TextBlock { Text = "Лимит снимка файла, МиБ" }, perFile,
             new TextBlock { Text = "Общий лимит снимков, МиБ" }, total, autoUpdate);
         var dialog = Dialog("Настройки", body);
-        var warning = new TextBlock();
+        var warning = new TextBlock { Foreground = FocusTheme.Danger };
         body.Children.Add(warning);
-        body.Children.Add(Button("Сохранить", () =>
+        body.Children.Add(FocusButton(Button("Сохранить", () =>
         {
             if (int.TryParse(limit.Text, out var length) && length is >= 1 and <= 200
                 && int.TryParse(perFile.Text, out var fileLimit) && fileLimit is >= 0 and <= 64
@@ -367,7 +367,7 @@ public partial class MainWindow
             {
                 warning.Text = "Введите допустимые целые значения.";
             }
-        }));
+        }), primary: true));
 
         if (await dialog.ShowDialog<bool>(this))
         {
@@ -384,7 +384,8 @@ public partial class MainWindow
         var input = new TextBox { Text = initial, MinWidth = 160 };
         var body = DialogPanel(new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap }, input);
         var dialog = Dialog(title, body);
-        body.Children.Add(Row(Button("OK", () => dialog.Close(input.Text ?? "")), Button("Отмена", () => dialog.Close())));
+        body.Children.Add(Row(FocusButton(Button("OK", () => dialog.Close(input.Text ?? "")), primary: true),
+            FocusButton(Button("Отмена", () => dialog.Close()))));
         input.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter)
@@ -397,9 +398,21 @@ public partial class MainWindow
         return await dialog.ShowDialog<string?>(this);
     }
 
+    private static Button FocusButton(Button button, bool primary = false)
+    {
+        button.Classes.Add(primary ? "focus-primary" : "focus-quiet");
+        return button;
+    }
+
+    private static Button FocusIcon(Button button)
+    {
+        button.Classes.Add("focus-icon");
+        return button;
+    }
+
     private static StackPanel DialogPanel(params Control[] children)
     {
-        var body = new StackPanel { Spacing = 10, Margin = new Thickness(18) };
+        var body = new StackPanel { Spacing = 9, Margin = new Thickness(16) };
         foreach (var child in children)
         {
             body.Children.Add(child);
@@ -408,14 +421,28 @@ public partial class MainWindow
         return body;
     }
 
-    private static Window Dialog(string title, Control body, double width = 430) => new()
+    private static Window Dialog(string title, Control body, double width = 430)
     {
-        Title = title,
-        Width = width,
-        MaxHeight = 820,
-        SizeToContent = SizeToContent.Height,
-        WindowStartupLocation = WindowStartupLocation.CenterOwner,
-        Content = new ScrollViewer { Content = body },
-        CanResize = true
-    };
+        var dialog = new Window
+        {
+            Title = title,
+            Width = Math.Clamp(width, 360, 760),
+            MinWidth = 360,
+            MaxWidth = 760,
+            MinHeight = 190,
+            MaxHeight = 720,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = FocusTheme.Panel,
+            Foreground = FocusTheme.Text,
+            Content = new Border
+            {
+                Background = FocusTheme.Panel,
+                Child = new ScrollViewer { Content = body }
+            },
+            CanResize = true
+        };
+        dialog.Classes.Add("focus-dialog");
+        return dialog;
+    }
 }

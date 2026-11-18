@@ -1,5 +1,6 @@
 using System.Text;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
@@ -28,7 +29,7 @@ public partial class MainWindow : Window
     private bool _closed;
     private bool _restoreFinished;
     private bool _wordWrap = true;
-    private double _fontSize = 14;
+    private double _fontSize = FocusTheme.EditorFontSize;
     private int _titleLimit = 10;
 
 
@@ -99,15 +100,25 @@ public partial class MainWindow : Window
         ToolTip.SetTip(across, "Разделить рядом");
         var below = Button("⇅", () => SplitGroup(group, Orientation.Vertical));
         ToolTip.SetTip(below, "Разделить снизу");
-        var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3 };
-        foreach (var button in new[] { add, restore, across, below })
+        var search = Button("⌕", () =>
         {
+            if (SelectedIn(group) is { } tab)
+            {
+                ActivateTab(tab);
+            }
+
+            OpenSearchPanel();
+        });
+        ToolTip.SetTip(search, "Найти (Ctrl+F)");
+        AutomationProperties.SetName(search, "Найти");
+        var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        foreach (var button in new[] { add, restore, across, below, search })
+        {
+            button.Classes.Add("focus-icon");
             tools.Children.Add(button);
         }
 
-        group.View.RowDefinitions = new RowDefinitions("Auto,*");
-        group.View.Children.Add(tools);
-        Grid.SetRow(group.Tabs, 1);
+        group.Tabs.HeaderActions = tools;
         group.View.Children.Add(group.Tabs);
         group.Tabs.SelectionChanged += (_, args) =>
         {
@@ -133,7 +144,7 @@ public partial class MainWindow : Window
         }, RoutingStrategies.Tunnel);
         group.Tabs.DoubleTapped += (_, e) =>
         {
-            if (ReferenceEquals(e.Source, group.Tabs))
+            if (ReferenceEquals(e.Source, group.Tabs) || e.Source is Border { Name: "TabBar" })
             {
                 _active = group;
                 NewTab();
@@ -171,14 +182,29 @@ public partial class MainWindow : Window
         var tab = new WorkTab(id ?? NextId(), group);
         _nextId = Math.Max(_nextId, tab.Id);
         _tabs.Add(tab.Id, tab);
-        var label = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Text = "Без имени" };
+        var label = new TextBlock
+        {
+            Text = "Без имени", TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 200, VerticalAlignment = VerticalAlignment.Center
+        };
+        var dirtyMark = new TextBlock
+        {
+            Text = "●", FontSize = 9, Foreground = FocusTheme.Accent, Opacity = 0,
+            VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false
+        };
         var close = Button("×", () => Run(() => CloseTabAsync(tab)));
-        close.Padding = new Thickness(5, 0);
-        close.Background = Brushes.Transparent;
-        var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
+        close.Classes.Add("focus-icon");
+        AutomationProperties.SetName(close, "Закрыть вкладку");
+        ToolTip.SetTip(close, "Закрыть вкладку");
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 5 };
         header.Children.Add(label);
+        Grid.SetColumn(dirtyMark, 1);
+        header.Children.Add(dirtyMark);
+        Grid.SetColumn(close, 2);
         header.Children.Add(close);
         tab.Label = label;
+        tab.DirtyMark = dirtyMark;
+        tab.Item.Classes.Add("focus-tab");
         tab.Item.Header = header;
         tab.Item.ContextMenu = new ContextMenu
         {
@@ -299,6 +325,7 @@ public partial class MainWindow : Window
 
         _splitGrids.Clear();
         WorkspaceHost.Content = BuildGroupView(_root);
+        SetCaption(SelectedIn(_active)?.Label.Text);
     }
 
     private Control BuildGroupView(Group group)
@@ -315,7 +342,7 @@ public partial class MainWindow : Window
         _splitGrids.Add(split);
         var splitter = new GridSplitter
         {
-            Background = new SolidColorBrush(Color.Parse("#3C4D5C")),
+            Background = FocusTheme.Border,
             ResizeDirection = horizontal ? GridResizeDirection.Columns : GridResizeDirection.Rows
         };
         if (horizontal)
@@ -500,6 +527,12 @@ public partial class MainWindow : Window
 
     private void SetStatus(string? message) => StatusText.Text = message;
 
+    private void SetCaption(string? document)
+    {
+        ActiveCaption.Text = document;
+        Title = document is null ? "RustText" : $"{document} — RustText";
+    }
+
     private static Button Button(string label, Action action)
     {
         var button = new Button { Content = label };
@@ -551,7 +584,7 @@ public partial class MainWindow : Window
     {
         public long Id { get; } = id;
         public Grid View { get; } = new();
-        public TabControl Tabs { get; } = new();
+        public WorkspaceTabs Tabs { get; } = new();
         public Orientation? Axis { get; init; }
         public Group? First { get; set; }
         public Group? Second { get; set; }
