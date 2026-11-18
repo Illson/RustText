@@ -21,14 +21,21 @@ use crate::{
 };
 
 const PAGE_SIZE: usize = 40;
+const RECENT_REFRESH_INTERVAL_MS: u64 = 10_000;
 const MINUTE_MS: u64 = 60_000;
 const HOUR_MS: u64 = 60 * MINUTE_MS;
 const DAY_MS: u64 = 24 * HOUR_MS;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HistoryRefresh {
+    deadline_ms: u64,
+    min_interval_ms: u64,
+}
+
 pub(super) struct Home {
     query: Entity<InputState>,
     page: usize,
-    refresh: Option<(u64, Task<()>)>,
+    refresh: Option<(HistoryRefresh, Task<()>)>,
     _change: Subscription,
     pub(super) open: bool,
     pub(super) positions: HashMap<PathBuf, RecentPosition>,
@@ -69,15 +76,18 @@ impl Home {
 
     fn schedule_refresh(
         &mut self,
-        deadline: Option<u64>,
+        refresh: Option<HistoryRefresh>,
         now_ms: u64,
         cx: &mut Context<Workspace>,
     ) {
-        if self.refresh.as_ref().map(|(deadline, _)| *deadline) == deadline {
+        if let (Some((scheduled, _)), Some(refresh)) = (&self.refresh, refresh)
+            && scheduled.min_interval_ms == refresh.min_interval_ms
+            && scheduled.deadline_ms <= refresh.deadline_ms
+        {
             return;
         }
-        self.refresh = deadline.map(|deadline| {
-            let delay = Duration::from_millis(deadline.saturating_sub(now_ms));
+        self.refresh = refresh.map(|refresh| {
+            let delay = Duration::from_millis(refresh.deadline_ms.saturating_sub(now_ms));
             let executor = cx.background_executor().clone();
             let task = cx.spawn(async move |this, cx| {
                 executor.timer(delay).await;
@@ -86,7 +96,7 @@ impl Home {
                     cx.notify();
                 });
             });
-            (deadline, task)
+            (refresh, task)
         });
     }
 }
@@ -510,18 +520,29 @@ pub(crate) fn format_last_worked(last_worked_ms: u64, now_ms: u64) -> String {
     }
 }
 
-fn next_history_refresh(timestamps: impl Iterator<Item = u64>, now_ms: u64) -> Option<u64> {
-    timestamps
-        .filter_map(|timestamp| {
-            let age = now_ms.saturating_sub(timestamp);
-            let interval = match age {
-                ..HOUR_MS => MINUTE_MS,
-                HOUR_MS..DAY_MS => HOUR_MS,
-                _ => return None,
-            };
-            Some(now_ms.saturating_add(interval - age % interval))
-        })
-        .min()
+fn next_history_refresh(
+    timestamps: impl Iterator<Item = u64>,
+    now_ms: u64,
+) -> Option<HistoryRefresh> {
+    let mut min_interval_ms = MINUTE_MS;
+    let mut next_change: Option<u64> = None;
+    for timestamp in timestamps {
+        let age = now_ms.saturating_sub(timestamp);
+        let interval = match age {
+            ..HOUR_MS => {
+                min_interval_ms = RECENT_REFRESH_INTERVAL_MS;
+                MINUTE_MS
+            }
+            HOUR_MS..DAY_MS => HOUR_MS,
+            _ => continue,
+        };
+        let until_change = interval - age % interval;
+        next_change = Some(next_change.map_or(until_change, |next| next.min(until_change)));
+    }
+    next_change.map(|until_change| HistoryRefresh {
+        deadline_ms: now_ms.saturating_add(until_change.max(min_interval_ms)),
+        min_interval_ms,
+    })
 }
 
 fn format_local_datetime(epoch_ms: u64) -> String {
