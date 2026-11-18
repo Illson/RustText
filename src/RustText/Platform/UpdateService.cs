@@ -34,7 +34,7 @@ public static class UpdateService
     private static readonly TimeSpan ReadyWaitLimit = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan StartupCheckDelay = TimeSpan.FromMilliseconds(1500);
 
-    private static readonly string[] BundleNames =
+    private static readonly string[] SupportedBundleNames =
     [
         "rusttext.exe",
         "libSkiaSharp.dll",
@@ -52,8 +52,17 @@ public static class UpdateService
         string currentVersion,
         CancellationToken cancellationToken = default)
     {
-        var current = ParseVersion(currentVersion, allowTag: false);
         using var client = CreateClient(TimeSpan.FromSeconds(20));
+        return await CheckLatestAsync(currentVersion, client, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static async Task<UpdateRelease?> CheckLatestAsync(
+        string currentVersion,
+        HttpClient client,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        var current = ParseVersion(currentVersion, allowTag: false);
         var jsonBytes = await GetLimitedBytesAsync(client, new Uri(ApiUrl), MaximumReleaseJsonBytes, cancellationToken)
             .ConfigureAwait(false);
         using var document = JsonDocument.Parse(jsonBytes, new JsonDocumentOptions { MaxDepth = 24 });
@@ -78,9 +87,17 @@ public static class UpdateService
 
         var expectedArchive = new Uri($"{AssetPrefix}{tag}/{ArchiveName}");
         var expectedChecksum = new Uri($"{expectedArchive.AbsoluteUri}.sha256");
-        var archive = FindAsset(root.GetProperty("assets"), ArchiveName);
+        var archive = TryFindAsset(root.GetProperty("assets"), ArchiveName);
+        // Rust releases do not contain a .NET bundle. Ignore them instead of treating
+        // their payload as an update for this application.
+        if (archive is null)
+        {
+            return null;
+        }
+
+        var archiveInfo = archive.Value;
         var checksum = FindAsset(root.GetProperty("assets"), ChecksumName);
-        if (archive.Uri != expectedArchive || archive.Size is <= 0 or > MaximumArchiveBytes)
+        if (archiveInfo.Uri != expectedArchive || archiveInfo.Size is <= 0 or > MaximumArchiveBytes)
         {
             throw new InvalidDataException("The .NET update archive has an invalid URL or size.");
         }
@@ -90,11 +107,11 @@ public static class UpdateService
             throw new InvalidDataException("The .NET update checksum has an invalid URL or size.");
         }
 
-        var apiDigest = archive.Digest is null ? null : ParseApiDigest(archive.Digest);
-        return new UpdateRelease(version, tag, pageUri, archive.Uri, checksum.Uri, archive.Size, apiDigest);
+        var apiDigest = archiveInfo.Digest is null ? null : ParseApiDigest(archiveInfo.Digest);
+        return new UpdateRelease(version, tag, pageUri, archiveInfo.Uri, checksum.Uri, archiveInfo.Size, apiDigest);
     }
 
-    /// <summary>Downloads and stages the verified four-file Native AOT bundle beside the installed executable.</summary>
+    /// <summary>Downloads and stages a verified single-executable or legacy four-file .NET bundle.</summary>
     public static async Task<StagedUpdate> StageAsync(
         UpdateRelease release,
         string currentExecutable,
@@ -193,9 +210,14 @@ public static class UpdateService
 
         var helperDirectory = Path.Combine(stagedUpdate.StagingDirectory, "helper");
         Directory.CreateDirectory(helperDirectory);
-        foreach (var name in BundleNames)
+        foreach (var name in SupportedBundleNames)
         {
             var source = Path.Combine(installDirectory, name);
+            if (name != "rusttext.exe" && !File.Exists(source))
+            {
+                continue;
+            }
+
             if (!File.Exists(source))
             {
                 throw new FileNotFoundException($"The installed .NET bundle is missing {name}.", source);
@@ -449,20 +471,20 @@ public static class UpdateService
         await using var archiveStream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read,
             64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
-        if (archive.Entries.Count != BundleNames.Length || archive.Entries.Count > MaximumArchiveEntries)
+        if (archive.Entries.Count is not (1 or 4) || archive.Entries.Count > MaximumArchiveEntries)
         {
-            throw new InvalidDataException("The .NET update archive must contain exactly the four required bundle files.");
+            throw new InvalidDataException("The .NET update archive must contain rusttext.exe, optionally with all three legacy native DLLs.");
         }
 
         var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var result = new List<BundleFile>(BundleNames.Length);
+        var result = new List<BundleFile>(archive.Entries.Count);
         long totalLength = 0;
         foreach (var entry in archive.Entries)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var name = entry.FullName;
             if (entry.Name.Length == 0 || name != entry.Name || name.Contains('/') || name.Contains('\\') ||
-                !BundleNames.Contains(name, StringComparer.OrdinalIgnoreCase) || !found.Add(name) ||
+                !IsBundleFileName(name) || !found.Add(name) ||
                 ((entry.ExternalAttributes >> 16) & 0xF000) == 0xA000 ||
                 entry.Length <= 0 || entry.Length > MaximumBundleFileBytes)
             {
@@ -487,9 +509,9 @@ public static class UpdateService
             result.Add(new BundleFile(name, copied, await HashFileAsync(destination, cancellationToken).ConfigureAwait(false)));
         }
 
-        if (found.Count != BundleNames.Length || !found.Contains("rusttext.exe"))
+        if (!IsSupportedFileSet(found))
         {
-            throw new InvalidDataException("The .NET update archive is missing a required bundle file.");
+            throw new InvalidDataException("The .NET update archive contains an incomplete legacy bundle.");
         }
 
         VerifyPeX64(Path.Combine(bundleDirectory, "rusttext.exe"));
@@ -560,7 +582,7 @@ public static class UpdateService
         }
     }
 
-    private static (Uri Uri, long Size, string? Digest) FindAsset(JsonElement assets, string expectedName)
+    private static (Uri Uri, long Size, string? Digest)? TryFindAsset(JsonElement assets, string expectedName)
     {
         JsonElement match = default;
         var found = false;
@@ -583,7 +605,7 @@ public static class UpdateService
 
         if (!found)
         {
-            throw new InvalidDataException($"The release does not contain {expectedName}.");
+            return null;
         }
 
         var url = new Uri(match.GetProperty("browser_download_url").GetString() ?? string.Empty);
@@ -593,6 +615,23 @@ public static class UpdateService
             : null;
         return (url, size, digest);
     }
+
+    private static (Uri Uri, long Size, string? Digest) FindAsset(JsonElement assets, string expectedName) =>
+        TryFindAsset(assets, expectedName) ?? throw new InvalidDataException($"The release does not contain {expectedName}.");
+
+    private static bool IsBundleFileName(string name) =>
+        SupportedBundleNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+
+    private static bool IsSupportedFileSet(IEnumerable<string> names)
+    {
+        var set = new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
+        return set.Count == 1 && set.Contains("rusttext.exe") ||
+            set.Count == SupportedBundleNames.Length && SupportedBundleNames.All(set.Contains);
+    }
+
+    private static bool IsSupportedManifestFileSet(BundleFile[] files) =>
+        IsSupportedFileSet(files.Select(file => file.Name)) &&
+        files.Select(file => file.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() == files.Length;
 
     private static void ValidateRelease(UpdateRelease release)
     {
@@ -684,7 +723,7 @@ public static class UpdateService
         var manifest = JsonSerializer.Deserialize(bytes, BundleManifestJsonContext.Default.BundleManifest)
             ?? throw new InvalidDataException("The staged bundle manifest is invalid.");
         if (manifest.Version != version || !manifest.ArchiveSha256.Equals(archiveSha256, StringComparison.OrdinalIgnoreCase) ||
-            manifest.Files.Length != BundleNames.Length)
+            !IsSupportedManifestFileSet(manifest.Files))
         {
             throw new InvalidDataException("The staged bundle manifest does not match the release.");
         }
@@ -693,7 +732,7 @@ public static class UpdateService
         long total = 0;
         foreach (var item in manifest.Files)
         {
-            if (!BundleNames.Contains(item.Name, StringComparer.OrdinalIgnoreCase) || !seen.Add(item.Name) ||
+            if (!IsBundleFileName(item.Name) || !seen.Add(item.Name) ||
                 item.Length <= 0 || item.Length > MaximumBundleFileBytes || !IsSha256(item.Sha256))
             {
                 throw new InvalidDataException("The staged bundle manifest contains an invalid file entry.");
@@ -710,8 +749,8 @@ public static class UpdateService
             total = checked(total + item.Length);
         }
 
-        if (seen.Count != BundleNames.Length || total > MaximumBundleBytes ||
-            Directory.EnumerateFiles(bundleDirectory).Count() != BundleNames.Length)
+        if (!IsSupportedFileSet(seen) || total > MaximumBundleBytes ||
+            Directory.EnumerateFiles(bundleDirectory).Count() != manifest.Files.Length)
         {
             throw new InvalidDataException("The staged bundle is incomplete or contains unexpected files.");
         }
@@ -797,15 +836,39 @@ public static class UpdateService
 
     private static void ApplyBundleTransaction(string installDirectory, string stageDirectory)
     {
+        ApplyBundleTransactionCore(
+            installDirectory,
+            stageDirectory,
+            (executable, stage) => StartAndVerifyInstalledApplication(executable, stage),
+            (executable, stage) => StartApplicationWithCleanup(executable, stage).Dispose());
+    }
+
+    internal static void ApplyBundleTransactionForTesting(
+        string installDirectory,
+        string stageDirectory,
+        Action<string, string> verifyStartup,
+        Action<string, string> restartAfterRollback) =>
+        ApplyBundleTransactionCore(installDirectory, stageDirectory, verifyStartup, restartAfterRollback);
+
+    private static void ApplyBundleTransactionCore(
+        string installDirectory,
+        string stageDirectory,
+        Action<string, string> verifyStartup,
+        Action<string, string> restartAfterRollback)
+    {
+        ArgumentNullException.ThrowIfNull(verifyStartup);
+        ArgumentNullException.ThrowIfNull(restartAfterRollback);
         var bundleDirectory = Path.Combine(stageDirectory, "bundle");
         var backupDirectory = Path.Combine(stageDirectory, "backup");
+        var manifest = ReadManifest(stageDirectory);
         Directory.CreateDirectory(backupDirectory);
         var changed = new List<(string Name, bool HadOriginal)>();
 
         try
         {
-            foreach (var name in BundleNames)
+            foreach (var item in manifest.Files)
             {
+                var name = item.Name;
                 var source = Path.Combine(bundleDirectory, name);
                 var destination = Path.Combine(installDirectory, name);
                 var backup = Path.Combine(backupDirectory, name);
@@ -823,14 +886,14 @@ public static class UpdateService
             }
 
             VerifyInstalledBundle(installDirectory, Path.Combine(stageDirectory, "bundle-manifest.json"));
-            StartAndVerifyInstalledApplication(Path.Combine(installDirectory, "rusttext.exe"), stageDirectory);
+            verifyStartup(Path.Combine(installDirectory, "rusttext.exe"), stageDirectory);
         }
         catch (Exception updateError)
         {
             try
             {
                 RollBackBundle(installDirectory, backupDirectory, changed);
-                StartApplicationWithCleanup(Path.Combine(installDirectory, "rusttext.exe"), stageDirectory);
+                restartAfterRollback(Path.Combine(installDirectory, "rusttext.exe"), stageDirectory);
             }
             catch (Exception rollbackError)
             {
@@ -850,7 +913,7 @@ public static class UpdateService
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in manifest.Files)
         {
-            if (!BundleNames.Contains(item.Name, StringComparer.OrdinalIgnoreCase) || !seen.Add(item.Name))
+            if (!IsBundleFileName(item.Name) || !seen.Add(item.Name))
             {
                 throw new InvalidDataException("The staged bundle manifest contains an invalid installed file entry.");
             }
@@ -864,7 +927,7 @@ public static class UpdateService
             }
         }
 
-        if (seen.Count != BundleNames.Length)
+        if (!IsSupportedFileSet(seen))
         {
             throw new InvalidDataException("The installed .NET bundle is incomplete.");
         }
