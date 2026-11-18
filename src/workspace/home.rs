@@ -14,7 +14,7 @@ use gpui_kit::{
     *,
 };
 
-use super::{Workspace, display_path, file_name};
+use super::{Workspace, closed_tab_entries, display_path, file_name};
 use crate::{
     appearance,
     recent_files::{RecentFile, RecentFiles, RecentPosition, now_millis},
@@ -296,12 +296,18 @@ impl Workspace {
             .page
             .min(entries.len().saturating_sub(1) / PAGE_SIZE);
         let start = page * PAGE_SIZE;
-        let drafts: Vec<_> = self
-            .closed_tab_entries()
-            .filter(|entry| {
-                entry.is_draft && (query.is_empty() || entry.label.to_lowercase().contains(&query))
-            })
-            .collect();
+        let drafts = self
+            .closed
+            .iter()
+            .rev()
+            .filter(|entry| entry.tab.file.is_none());
+        let drafts: Vec<_> = closed_tab_entries(
+            drafts,
+            self.recent.entries(),
+            self.settings.untitled_tab_limit,
+        )
+        .filter(|entry| query.is_empty() || entry.label.to_lowercase().contains(&query))
+        .collect();
         let visible_entries = entries.iter().skip(start).take(PAGE_SIZE);
         let timestamps = visible_entries
             .clone()

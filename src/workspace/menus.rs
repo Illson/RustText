@@ -9,7 +9,7 @@ use gpui_kit::{
 };
 
 use super::{
-    Workspace,
+    Workspace, closed_tab_entries,
     home::{history_file_label, history_meta},
     view::*,
 };
@@ -106,15 +106,6 @@ impl Workspace {
             .then(|| self.active_document_opt())
             .flatten();
         let can_save = !busy && doc.is_some_and(|doc| doc.log.is_none() && !doc.placeholder);
-        let closed_entries = self.closed_tab_entries().collect::<Vec<_>>();
-        let can_reopen = !busy && !closed_entries.is_empty();
-        let recent_entries = self
-            .recent
-            .entries()
-            .iter()
-            .take(16)
-            .cloned()
-            .collect::<Vec<_>>();
         let workspace = cx.entity().downgrade();
         let focus = self.menu_focus(cx);
         Button::new("file-menu")
@@ -123,10 +114,23 @@ impl Workspace {
             .label("Файл")
             .dropdown_menu(move |menu, window, cx| {
                 let now_ms = now_millis();
+                let (recent_entries, closed_entries) = workspace
+                    .read_with(cx, |this, _| {
+                        let recent = this.recent.entries();
+                        (
+                            recent.iter().take(16).cloned().collect::<Vec<_>>(),
+                            closed_tab_entries(
+                                this.closed.iter().rev(),
+                                recent,
+                                this.settings.untitled_tab_limit,
+                            )
+                            .collect::<Vec<_>>(),
+                        )
+                    })
+                    .unwrap_or_default();
+                let can_reopen = !busy && !closed_entries.is_empty();
                 let closed_workspace = workspace.clone();
-                let closed_entries = closed_entries.clone();
                 let recent_workspace = workspace.clone();
-                let recent_entries = recent_entries.clone();
                 menu.action_context(focus.clone())
                     .min_w(px(280.))
                     .scrollable(true)
