@@ -101,6 +101,7 @@ fn available_history_line_count(
 struct ClosedTab {
     tab: Tab,
     draft: Option<Draft>,
+    digest: Option<crate::session::DraftDigest>,
 }
 
 fn draft_name(draft: &Draft, limit: usize) -> String {
@@ -289,6 +290,7 @@ impl Workspace {
             None => (None, String::new(), TextFormat::default()),
         };
         let id = self.insert_document(file, text, format, window, cx);
+        self.schedule_json_validation(id, cx);
         self.select(id, window, cx);
     }
 
@@ -379,7 +381,6 @@ impl Workspace {
             _subscriptions: [change, cursor],
         });
         self.layout.attach(id);
-        self.schedule_json_validation(id, cx);
         id
     }
 
@@ -563,14 +564,14 @@ impl Workspace {
             recovery.cancel();
         }
         self.layout.remove(id);
-        let (mut tab, draft) =
-            doc.session_snapshot(doc.file.is_none() || doc.recovery.is_some(), cx);
+        let (mut tab, draft, digest) =
+            doc.session_snapshot_with_digest(doc.file.is_none() || doc.recovery.is_some(), cx);
         tab.line_count = doc.history_line_count(cx);
         tab.last_worked_ms = Some(crate::recent_files::now_millis());
         if self.closed.len() == MAX_CLOSED_TABS {
             self.closed.remove(0);
         }
-        self.closed.push(ClosedTab { tab, draft });
+        self.closed.push(ClosedTab { tab, draft, digest });
 
         self.clear_search(cx);
         if let Some(next) = self.layout.active() {
@@ -605,8 +606,8 @@ impl Workspace {
             let tab = tab.clone();
             self.open_closed_file(recent, tab, window, cx);
         } else {
-            let ClosedTab { tab, draft } = self.closed.remove(index);
-            let id = self.restore_tab(tab, draft, window, cx);
+            let ClosedTab { tab, draft, digest } = self.closed.remove(index);
+            let id = self.restore_tab(tab, draft, digest, window, cx);
             self.select(id, window, cx);
         }
     }

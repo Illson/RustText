@@ -43,7 +43,7 @@ impl OpenMode {
     }
 }
 
-enum LoadedDocument {
+pub(super) enum LoadedDocument {
     Text(OpenedFile),
     Log(FileTarget),
 }
@@ -56,22 +56,34 @@ struct ReopenExisting<'a> {
 fn reopen_existing_document<'a>(
     dirty: bool,
     placeholder: bool,
-    current_target: Option<&FileTarget>,
-    opened_target: &FileTarget,
-    current_encoding: TextEncoding,
-    opened_encoding: TextEncoding,
+    current: Option<(&FileTarget, TextEncoding)>,
+    opened: (&FileTarget, TextEncoding),
     restore: Option<&'a Tab>,
+    pending_restore: Option<&'a Tab>,
 ) -> ReopenExisting<'a> {
     ReopenExisting {
-        replace_text: !dirty
-            && (placeholder
-                || current_target != Some(opened_target)
-                || current_encoding != opened_encoding),
-        restore: if dirty { None } else { restore },
+        replace_text: !dirty && (placeholder || current != Some(opened)),
+        restore: if dirty {
+            None
+        } else {
+            restore.or(pending_restore)
+        },
     }
 }
 
-fn read_document(path: &Path, mode: OpenMode) -> std::io::Result<LoadedDocument> {
+fn can_reuse_log_document(
+    current_path: Option<&Path>,
+    opened_path: &Path,
+    current_encoding: TextEncoding,
+    windows_1251: bool,
+    is_draft_preview: bool,
+) -> bool {
+    !is_draft_preview
+        && current_path == Some(opened_path)
+        && matches!(current_encoding, TextEncoding::Windows1251) == windows_1251
+}
+
+pub(super) fn read_document(path: &Path, mode: OpenMode) -> std::io::Result<LoadedDocument> {
     let metadata = std::fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(std::io::Error::new(
@@ -277,20 +289,24 @@ impl Workspace {
                     .is_some_and(|file| file.path == opened.target.path)
         }) {
             let id = doc.id;
-            if let Some(recovery) = &doc.recovery
-                && recovery.draft.is_none()
-            {
-                recovery.cancel();
+            let pending_restore = doc
+                .recovery
+                .as_ref()
+                .filter(|recovery| recovery.draft.is_none())
+                .map(|recovery| recovery.tab.clone());
+            if pending_restore.is_some() {
+                if let Some(recovery) = &doc.recovery {
+                    recovery.cancel();
+                }
                 doc.recovery = None;
             }
             let reopen = reopen_existing_document(
                 doc.dirty,
                 doc.placeholder,
-                doc.file.as_ref(),
-                &opened.target,
-                doc.format.encoding,
-                opened.format.encoding,
+                doc.file.as_ref().map(|file| (file, doc.format.encoding)),
+                (&opened.target, opened.format.encoding),
                 restore,
+                pending_restore.as_ref(),
             );
             if reopen.replace_text {
                 doc.editor
@@ -352,11 +368,16 @@ impl Workspace {
         recent.view_as_log = true;
         if let Some(doc) = self.documents.iter().find(|doc| {
             doc.log.is_some()
-                && doc
-                    .file
-                    .as_ref()
-                    .is_some_and(|file| file.path == target.path)
-                && matches!(doc.format.encoding, TextEncoding::Windows1251) == windows_1251
+                && can_reuse_log_document(
+                    doc.file.as_ref().map(|file| file.path.as_path()),
+                    &target.path,
+                    doc.format.encoding,
+                    windows_1251,
+                    doc.recovery.as_ref().is_some_and(|recovery| {
+                        recovery.draft.is_some()
+                            && matches!(recovery.stage, super::draft_recovery::Stage::Preview)
+                    }),
+                )
         }) {
             recent.line_count = doc
                 .log

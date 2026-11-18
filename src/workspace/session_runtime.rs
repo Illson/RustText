@@ -51,12 +51,12 @@ impl Document {
         cx: &App,
     ) -> (Tab, Option<Draft>, Option<DraftDigest>) {
         if let Some(recovery) = &self.recovery {
-            let (mut tab, draft) = recovery.snapshot(include_draft);
+            let (mut tab, draft, digest) = recovery.snapshot(include_draft);
             if let Some(viewer) = &self.log {
                 let offset = viewer.read(cx).bookmark().offset as usize;
                 tab.selection = offset..offset;
             }
-            return (tab, draft, None);
+            return (tab, draft, digest);
         }
         let editor = self.editor.read(cx);
         let offset = editor.scroll_offset();
@@ -260,14 +260,18 @@ impl Workspace {
             .closed
             .into_iter()
             .zip(closed_drafts)
-            .map(|(tab, draft)| ClosedTab { tab, draft })
+            .map(|(tab, draft)| ClosedTab {
+                tab,
+                draft,
+                digest: None,
+            })
             .collect();
 
         let mut active = None;
         let mut remap = std::collections::HashMap::new();
         for (index, (tab, draft)) in state.tabs.into_iter().zip(drafts).enumerate() {
             let saved_id = tab.id;
-            let id = self.restore_tab(tab, draft, window, cx);
+            let id = self.restore_tab(tab, draft, None, window, cx);
             remap.insert(saved_id, id);
             if index == state.active {
                 active = Some(id);
@@ -294,6 +298,7 @@ impl Workspace {
         &mut self,
         tab: Tab,
         draft: Option<Draft>,
+        digest: Option<DraftDigest>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> u64 {
@@ -312,7 +317,7 @@ impl Workspace {
         let doc = self.documents.last_mut().expect("restored tab exists");
         doc.json_validation_disabled = tab.json_validation_disabled;
         if tab.file.is_some() || draft.is_some() {
-            doc.begin_recovery(tab, draft, self.settings.untitled_tab_limit);
+            doc.begin_recovery(tab, draft, digest, self.settings.untitled_tab_limit);
         } else {
             doc.restore_view(tab.selection, tab.reversed, tab.scroll, cx);
         }
@@ -480,7 +485,7 @@ impl Workspace {
         for entry in &self.closed {
             closed.push(entry.tab.clone());
             closed_drafts.push(entry.draft.clone());
-            closed_draft_digests.push(None);
+            closed_draft_digests.push(entry.digest);
         }
         (
             Capture {

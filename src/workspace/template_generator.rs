@@ -424,6 +424,7 @@ impl Workspace {
             document.saved_text = Some(gpui_kit::component::input::Rope::new());
             document.dirty = dirty;
         }
+        self.schedule_json_validation(id, cx);
         self.select(id, window, cx);
     }
 }

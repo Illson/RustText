@@ -10,12 +10,17 @@ use std::{
 use gpui_kit::{component::input::Rope, *};
 use tempfile::NamedTempFile;
 
-use super::{Document, Workspace, disk_status::DiskStatus, draft_name};
+use super::{
+    Document, Workspace,
+    disk_status::DiskStatus,
+    draft_name,
+    file_actions::{LoadedDocument, OpenMode, read_document},
+};
 use crate::{
     files::{self, FileTarget, OpenedFile},
     log_file::{self, LogBookmark},
     log_viewer::LogViewer,
-    session::{Draft, Tab},
+    session::{Draft, DraftDigest, Tab},
     text_format::TextEncoding,
 };
 
@@ -173,19 +178,18 @@ fn prepare_tab(
         .file
         .as_ref()
         .ok_or_else(|| io::Error::other("Не указан файл вкладки"))?;
-    let bytes = std::fs::metadata(&file.path)?.len();
     progress.check_cancelled()?;
-    if bytes > files::MAX_EDITOR_BYTES {
-        return FileTarget::from_picker(file.path.clone()).map(PreparedDraft::FileLog);
-    }
-    let opened = files::open(&file.path, tab.format.encoding == TextEncoding::Windows1251)?;
-    progress.check_cancelled()?;
-    let prepared = if EditorBudget::default().accepts(opened.text.as_bytes()) {
-        PreparedDraft::File(opened)
+    let mode = if tab.format.encoding == TextEncoding::Windows1251 {
+        OpenMode::WINDOWS_1251
     } else {
-        PreparedDraft::FileLog(opened.target)
+        OpenMode::NORMAL
     };
-    Ok(prepared)
+    let opened = read_document(&file.path, mode)?;
+    progress.check_cancelled()?;
+    Ok(match opened {
+        LoadedDocument::Text(file) => PreparedDraft::File(file),
+        LoadedDocument::Log(file) => PreparedDraft::FileLog(file),
+    })
 }
 
 pub(super) struct RestoreProgress {
@@ -227,17 +231,22 @@ pub(super) enum Stage {
 pub(super) struct Recovery {
     pub(super) tab: Tab,
     pub(super) draft: Option<Draft>,
+    digest: Option<DraftDigest>,
     pub(super) stage: Stage,
 }
 
 impl Recovery {
-    pub(super) fn snapshot(&self, include_draft: bool) -> (Tab, Option<Draft>) {
+    pub(super) fn snapshot(
+        &self,
+        include_draft: bool,
+    ) -> (Tab, Option<Draft>, Option<DraftDigest>) {
         let mut tab = self.tab.clone();
         let draft = self.draft.as_ref().filter(|_| include_draft).cloned();
+        let digest = draft.as_ref().and(self.digest);
         if draft.is_none() {
             tab.draft_revision = None;
         }
-        (tab, draft)
+        (tab, draft, digest)
     }
 
     pub(super) fn cancel(&self) {
@@ -248,7 +257,13 @@ impl Recovery {
 }
 
 impl Document {
-    pub(super) fn begin_recovery(&mut self, mut tab: Tab, draft: Option<Draft>, name_limit: usize) {
+    pub(super) fn begin_recovery(
+        &mut self,
+        mut tab: Tab,
+        draft: Option<Draft>,
+        digest: Option<DraftDigest>,
+        name_limit: usize,
+    ) {
         tab.id = self.id;
         self.placeholder = true;
         self.dirty = draft.is_some();
@@ -260,6 +275,7 @@ impl Document {
         self.recovery = Some(Recovery {
             tab,
             draft,
+            digest,
             stage: Stage::Queued,
         });
     }

@@ -38,6 +38,7 @@ fn closed_tabs_fill_only_missing_metadata_from_first_recent_match() {
             last_worked_ms,
         },
         draft: None,
+        digest: None,
     };
     let closed = [
         closed_tab(Some(0), Some(800)),

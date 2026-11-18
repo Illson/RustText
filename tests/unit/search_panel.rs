@@ -1,4 +1,7 @@
-use super::{invalidate_document_highlights, sync_all_highlights, visible_highlight_tabs};
+use super::{
+    RecoverySearchAction, SearchRecoveryState, invalidate_document_highlights,
+    recovery_search_action, sync_all_highlights, visible_highlight_tabs,
+};
 use crate::layout::{Axis, Layout};
 
 #[test]
@@ -53,4 +56,31 @@ fn sync_all_highlights_rebuilds_visible_tabs_after_reset_and_clears_when_empty_g
     );
     assert_eq!(all, vec![(10, "new-10"), (20, "new-20")]);
     assert_eq!(disposed, vec!["old-10", "old-20"]);
+}
+
+#[test]
+fn all_tabs_search_waits_for_an_active_restore_before_starting_another() {
+    assert_eq!(
+        recovery_search_action([SearchRecoveryState::Queued(2), SearchRecoveryState::Loading,]),
+        RecoverySearchAction::Wait,
+    );
+    assert_eq!(
+        recovery_search_action([
+            SearchRecoveryState::Queued(2),
+            SearchRecoveryState::Queued(3),
+        ]),
+        RecoverySearchAction::Start(2),
+    );
+}
+
+#[test]
+fn all_tabs_search_reports_failed_restores_but_treats_log_previews_as_logs() {
+    assert_eq!(
+        recovery_search_action([SearchRecoveryState::Failed, SearchRecoveryState::Preview,]),
+        RecoverySearchAction::Ready { incomplete_tabs: 1 },
+    );
+    assert_eq!(
+        recovery_search_action([SearchRecoveryState::Preview]),
+        RecoverySearchAction::Ready { incomplete_tabs: 0 },
+    );
 }
