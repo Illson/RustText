@@ -2,7 +2,7 @@ use std::{path::Path, time::Duration};
 
 use gpui_kit::{
     base::input::{Diagnostic, DiagnosticSeverity},
-    component::input::{Position, Rope},
+    component::input::{EditorState, Position, Rope},
     *,
 };
 use serde::de::IgnoredAny;
@@ -14,7 +14,6 @@ const VALIDATION_DELAY: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Status {
-    Checking,
     Valid,
     Invalid(Problem),
     TooLarge,
@@ -40,8 +39,39 @@ pub(super) fn should_validate(path: Option<&Path>, mut source: impl Iterator<Ite
             .is_some_and(|character| matches!(character, '{' | '['))
 }
 
-fn validation_is_current(disabled: bool, generation: u64, expected_generation: u64) -> bool {
-    !disabled && generation == expected_generation
+#[derive(Default)]
+pub(super) struct Validation {
+    active_revision: Option<u64>,
+    generation: u64,
+    result: Option<(u64, Status)>,
+}
+
+impl Validation {
+    fn set_active_revision(&mut self, revision: Option<u64>) -> bool {
+        if self.active_revision == revision {
+            return false;
+        }
+        self.active_revision = revision;
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+
+    fn is_current(&self, revision: u64, generation: u64) -> bool {
+        self.active_revision == Some(revision) && self.generation == generation
+    }
+
+    pub(super) fn status(&self) -> Option<&Status> {
+        let (revision, status) = self.result.as_ref()?;
+        (self.active_revision == Some(*revision)).then_some(status)
+    }
+
+    fn complete(&mut self, revision: u64, generation: u64, result: Status) -> bool {
+        if !self.is_current(revision, generation) {
+            return false;
+        }
+        self.result = Some((revision, result));
+        true
+    }
 }
 
 pub(super) fn validate_rope(source: &Rope) -> Status {
@@ -81,6 +111,19 @@ pub(super) fn diagnostic(problem: &Problem) -> Diagnostic {
     Diagnostic::new(problem.range.clone(), problem.message.clone())
         .with_severity(DiagnosticSeverity::Error)
         .with_source("RustText JSON")
+}
+
+fn update_diagnostics(editor: &Entity<EditorState>, status: Option<&Status>, cx: &mut App) {
+    editor.update(cx, |state, cx| {
+        let text = state.text().clone();
+        if let Some(diagnostics) = state.diagnostics_mut() {
+            diagnostics.reset(&text);
+            if let Some(Status::Invalid(problem)) = status {
+                diagnostics.push(diagnostic(problem));
+            }
+        }
+        cx.notify();
+    });
 }
 
 fn diagnostic_range(
@@ -147,28 +190,28 @@ impl Workspace {
         let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) else {
             return;
         };
-        doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
-        let generation = doc.json_validation_generation;
-        let editor = doc.editor.clone();
-        if doc.json_validation_disabled
-            || doc.placeholder
-            || !should_validate(
+        let enabled = !doc.json_validation_disabled
+            && !doc.placeholder
+            && should_validate(
                 doc.file.as_ref().map(|file| file.path.as_path()),
-                editor.read(cx).text().chars(),
-            )
+                doc.editor.read(cx).text().chars(),
+            );
+        let revision = doc.revision;
+        if !doc
+            .json_validation
+            .set_active_revision(enabled.then_some(revision))
         {
-            doc.json_status = None;
-            editor.update(cx, |state, cx| {
-                let text = state.text().clone();
-                if let Some(diagnostics) = state.diagnostics_mut() {
-                    diagnostics.reset(&text);
-                }
-                cx.notify();
-            });
             return;
         }
 
-        let revision = doc.revision;
+        let editor = doc.editor.clone();
+        let status = doc.json_validation.status();
+        if !enabled || status.is_some() {
+            update_diagnostics(&editor, status, cx);
+            return;
+        }
+
+        let generation = doc.json_validation.generation;
         let executor = cx.background_executor().clone();
         let validation_executor = executor.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -181,11 +224,7 @@ impl Workspace {
                         .find(|doc| {
                             doc.id == id
                                 && doc.revision == revision
-                                && validation_is_current(
-                                    doc.json_validation_disabled,
-                                    doc.json_validation_generation,
-                                    generation,
-                                )
+                                && doc.json_validation.is_current(revision, generation)
                         })
                         .map(|doc| doc.editor.read(cx).text().clone())
                 })
@@ -202,39 +241,20 @@ impl Workspace {
                     .await
             };
             let _ = this.update(cx, |workspace, cx| {
-                let Some(doc) = workspace.documents.iter_mut().find(|doc| {
-                    doc.id == id
-                        && doc.revision == revision
-                        && validation_is_current(
-                            doc.json_validation_disabled,
-                            doc.json_validation_generation,
-                            generation,
-                        )
-                }) else {
+                let Some(doc) = workspace
+                    .documents
+                    .iter_mut()
+                    .find(|doc| doc.id == id && doc.revision == revision)
+                else {
                     return;
                 };
-                doc.json_status = match &result {
-                    Status::Valid => None,
-                    Status::Checking => Some(Status::Checking),
-                    Status::Invalid(_) | Status::TooLarge => Some(result.clone()),
-                };
-                editor.update(cx, |state, cx| {
-                    let text = state.text().clone();
-                    if let Some(diagnostics) = state.diagnostics_mut() {
-                        diagnostics.reset(&text);
-                        if let Status::Invalid(problem) = &result {
-                            diagnostics.push(diagnostic(problem));
-                        }
-                    }
+                if doc.json_validation.complete(revision, generation, result) {
+                    update_diagnostics(&editor, doc.json_validation.status(), cx);
                     cx.notify();
-                });
-                cx.notify();
+                }
             });
         });
         task.detach();
-        if let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) {
-            doc.json_status = Some(Status::Checking);
-        }
     }
 }
 

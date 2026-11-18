@@ -299,7 +299,6 @@ impl Workspace {
             }
             if let Some(tab) = reopen.restore {
                 doc.json_validation_disabled = tab.json_validation_disabled;
-                doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
                 doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             }
             let mut recent = RecentFile::new(opened.target.path, doc.format.encoding);
@@ -322,7 +321,6 @@ impl Workspace {
             let doc = self.documents.last_mut().expect("opened document exists");
             let id = doc.id;
             doc.json_validation_disabled = tab.json_validation_disabled;
-            doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
             doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             self.schedule_json_validation(id, cx);
         }
@@ -492,6 +490,10 @@ impl Workspace {
             {
                 let _ = store.capture(&target.path, format.encoding);
             }
+            #[cfg(windows)]
+            let icon_position = target
+                .version
+                .and_then(|_| super::desktop_icon::DesktopIconPosition::capture(&target.path));
             let result = files::save(target, format, &snapshot.to_string());
             let version_error = result.as_ref().ok().and_then(|file| {
                 version_store
@@ -507,6 +509,10 @@ impl Workspace {
             let history_error = recorded
                 .as_ref()
                 .and_then(|entry| recent.record([entry.clone()]).err());
+            #[cfg(windows)]
+            if let (Some(position), Ok(saved)) = (icon_position, &result) {
+                position.restore(saved);
+            }
             (
                 snapshot,
                 result,
