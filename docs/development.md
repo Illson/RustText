@@ -88,7 +88,9 @@ if ($LASTEXITCODE -ne 0 -or ($published -split '\s+')[0] -ne $head) {
 
 ## Что обеспечивает CI
 
-[Windows CI](../.github/workflows/windows-ci.yml) запускает форматирование, тесты и Clippy на Windows x64 при push в `main`, в ветки `codex/**` и для PR в `main`. CI устанавливает точную версию Rust 1.100.0 из README и использует `--locked` для сборки тестов и проверки Clippy. Версию Rust обновляй вместе с проверкой на Windows и документацией. [Образ Windows](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md) · [Rust 1.100.0](https://github.com/rust-lang/rust/releases/tag/1.100.0)
+[Windows CI](../.github/workflows/windows-ci.yml) запускает форматирование, тесты и Clippy на Windows x64 при push в `main`, в ветки `codex/**` и для PR в `main`. CI устанавливает точную версию Rust 1.100.0 из README и использует `--locked` для сборки тестов и проверки Clippy. CI также собирает переносимый Release EXE со статической связью с MSVC CRT и проверяет, что он не импортирует `icuuc.dll`. Версию Rust обновляй вместе с проверкой на Windows и документацией. [Образ Windows](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md) · [Rust 1.100.0](https://github.com/rust-lang/rust/releases/tag/1.100.0)
+
+Отдельный шаг запускает тест пакета `gpui-pre-windows`, который проверяет загрузку шрифтов без DirectWrite Factory5 на современном Windows-раннере.
 
 CI имеет разрешение `contents: read` и использует action, закреплённый по полному SHA. Сборки PR запускаются через `pull_request` без передачи секретов в команды. Для обязательной проверки перед слиянием владелец может указать `Windows Rust checks` в правилах `main` после первого появления результата. Изменение правил ветки и выпуск новой версии выполняются отдельными задачами. [Безопасность GitHub Actions](https://docs.github.com/en/actions/reference/security/secure-use) · [Правила PR](https://docs.github.com/en/pull-requests/reference/managing-and-standardizing-pull-requests)
 
