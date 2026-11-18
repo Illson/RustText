@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn recognizes_a_desktop_junction_after_the_editor_canonicalizes_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("Storage");
+    let desktop = dir.path().join("Desktop");
+    fs::create_dir_all(storage.join("Nested")).unwrap();
+    let junction = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:RUSTTEXT_TEST_JUNCTION -Target $env:RUSTTEXT_TEST_STORAGE | Out-Null",
+        ])
+        .env("RUSTTEXT_TEST_JUNCTION", &desktop)
+        .env("RUSTTEXT_TEST_STORAGE", &storage)
+        .output()
+        .unwrap();
+    assert!(
+        junction.status.success(),
+        "{}",
+        String::from_utf8_lossy(&junction.stderr)
+    );
+
+    for folder in [&desktop, &desktop.join("Nested")] {
+        let path = folder.join("sample.txt");
+        fs::write(&path, "sample").unwrap();
+        let target = FileTarget::from_picker(path).unwrap();
+        let parent = target.path.parent().unwrap();
+        assert!(!same_shell_path(folder, parent));
+        assert!(desktop_folder_matches(
+            folder,
+            parent,
+            Instant::now() + Duration::from_secs(5)
+        ));
+    }
+    fs::remove_dir(&desktop).unwrap();
+}
+
+#[test]
 fn compares_local_and_redirected_desktop_paths_without_opening_them() {
     let equal_paths = [
         (r"C:\Users\Иван\Desktop", r"\\?\c:\users\ИВАН\desktop"),
@@ -20,6 +58,14 @@ fn compares_local_and_redirected_desktop_paths_without_opening_them() {
     ));
     assert!(!same_shell_path(local, Path::new(r"C:\Logs\Desktop")));
     assert!(!same_shell_path(local, Path::new(r"D:\Logs")));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for remote in [
+        r"\\offline-server\profiles\Desktop",
+        r"\\?\UNC\offline-server\profiles\Desktop",
+    ] {
+        assert!(local_folder_link(Path::new(remote), deadline).is_none());
+        assert!(!desktop_folder_matches(Path::new(remote), local, deadline));
+    }
 }
 
 #[test]

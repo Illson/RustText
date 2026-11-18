@@ -6,7 +6,7 @@ use std::{
         ffi::{OsStrExt, OsStringExt},
         fs::MetadataExt,
     },
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
     ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -20,13 +20,14 @@ use windows::{
     Win32::{
         Foundation::{POINT, S_OK},
         Globalization::{CSTR_EQUAL, CompareStringOrdinal},
-        Storage::FileSystem::WIN32_FIND_DATAW,
+        Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, GetDriveTypeW, WIN32_FIND_DATAW},
         System::{
             Com::{
                 CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
                 CoTaskMemFree, CoUninitialize, IServiceProvider,
             },
             Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VT_I4},
+            WindowsProgramming::{DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE},
         },
         UI::Shell::{
             CSIDL_DESKTOP, Common::ITEMIDLIST, FOLDERID_Desktop, FOLDERID_PublicDesktop,
@@ -37,7 +38,7 @@ use windows::{
             SWFO_NEEDDISPATCH, ShellWindows,
         },
     },
-    core::{GUID, Interface, PWSTR},
+    core::{GUID, Interface, PCWSTR, PWSTR},
 };
 
 use super::reveal::normalize_shell_path;
@@ -58,7 +59,7 @@ impl DesktopIconPosition {
             if ![FOLDERID_Desktop, FOLDERID_PublicDesktop]
                 .iter()
                 .filter_map(known_folder)
-                .any(|folder| same_shell_path(&folder, parent))
+                .any(|folder| desktop_folder_matches(&folder, parent, deadline))
                 || Instant::now() >= deadline
             {
                 return None;
@@ -130,6 +131,59 @@ impl DesktopIconPosition {
 fn known_folder(id: &GUID) -> Option<PathBuf> {
     let path = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, None) }.ok()?;
     owned_shell_path(path)
+}
+
+fn desktop_folder_matches(configured: &Path, parent: &Path, deadline: Instant) -> bool {
+    if same_shell_path(configured, parent) {
+        return true;
+    }
+
+    let mut folder = configured.to_path_buf();
+    for _ in 0..32 {
+        let Some(target) = local_folder_link(&folder, deadline) else {
+            return false;
+        };
+        if same_shell_path(&target, parent) {
+            return true;
+        }
+        folder = target;
+    }
+    false
+}
+
+fn local_folder_link(folder: &Path, deadline: Instant) -> Option<PathBuf> {
+    let Some(Component::Prefix(prefix)) = folder.components().next() else {
+        return None;
+    };
+    let (Prefix::Disk(drive) | Prefix::VerbatimDisk(drive)) = prefix.kind() else {
+        return None;
+    };
+    if !folder.is_absolute() || Instant::now() >= deadline {
+        return None;
+    }
+    let root = [u16::from(drive), u16::from(b':'), u16::from(b'\\'), 0];
+    if !matches!(
+        unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) },
+        DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK
+    ) {
+        return None;
+    }
+
+    // Inspect each component before traversing it. A local directory link
+    // can lead to a network path, which must only be compared by name.
+    let ancestors: Vec<_> = folder.ancestors().collect();
+    for directory in ancestors.into_iter().rev().skip(1) {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let attributes = fs::symlink_metadata(directory).ok()?.file_attributes();
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            let link = fs::read_link(directory).ok()?;
+            let suffix = folder.strip_prefix(directory).ok()?;
+            return Some(directory.parent()?.join(link).join(suffix));
+        }
+    }
+    None
 }
 
 fn same_shell_path(left: &Path, right: &Path) -> bool {
