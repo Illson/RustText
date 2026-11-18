@@ -1,7 +1,5 @@
 use super::{format_last_worked, history_meta, text_line_count, utc_datetime_parts};
-use crate::{recent_files::RecentFile, text_format::TextEncoding};
 use gpui_kit::component::input::Rope;
-use std::path::PathBuf;
 
 #[test]
 fn formats_recent_work_time_as_relative_under_a_day_and_datetime_after() {
@@ -10,7 +8,8 @@ fn formats_recent_work_time_as_relative_under_a_day_and_datetime_after() {
     assert_eq!(format_last_worked(now - 5 * 60_000, now), "5 мин назад");
     assert_eq!(format_last_worked(now - 3 * 3_600_000, now), "3 ч назад");
 
-    let older = now - 2 * 86_400_000;
+    assert_eq!(format_last_worked(now - 86_399_999, now), "23 ч назад");
+    let older = now - 86_400_000;
     let formatted = format_last_worked(older, now);
     assert!(formatted.contains('.'));
     assert!(formatted.contains(':'));
@@ -24,10 +23,14 @@ fn formats_recent_work_time_as_relative_under_a_day_and_datetime_after() {
 #[test]
 fn formats_history_metadata_with_line_count_and_last_worked() {
     let now = 1_700_000_000_000_u64;
-    let mut entry = RecentFile::new(PathBuf::from("app.log"), TextEncoding::Utf8);
-    entry.line_count = Some(420);
-    entry.last_worked_ms = Some(now - 12 * 60_000);
-    assert_eq!(history_meta(&entry, now), "420 стр. · 12 мин назад");
+    let last_worked = Some(now - 12 * 60_000);
+    assert_eq!(
+        history_meta(Some(420), last_worked, now),
+        "420 стр. · 12 мин назад"
+    );
+    assert_eq!(history_meta(Some(0), None, now), "0 стр.");
+    assert_eq!(history_meta(None, last_worked, now), "12 мин назад");
+    assert_eq!(history_meta(None, None, now), "");
 }
 
 #[test]

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use gpui_kit::{
     component::{
@@ -101,16 +104,7 @@ impl Workspace {
             scroll: tab.scroll,
             log: tab.log,
         };
-        let line_count = doc.log.as_ref().map_or_else(
-            || {
-                let text = doc
-                    .saved_text
-                    .as_ref()
-                    .unwrap_or_else(|| doc.editor.read(cx).text());
-                Some(text_line_count(text))
-            },
-            |log| log.read(cx).total_line_count(),
-        );
+        let line_count = doc.history_line_count(cx);
         let stored = self.recent.entry(&file.path);
         let known_position = self
             .home
@@ -261,12 +255,8 @@ impl Workspace {
         let start = page * PAGE_SIZE;
         let drafts: Vec<_> = self
             .closed_tab_entries()
-            .into_iter()
-            .filter(|(id, name)| {
-                self.closed
-                    .iter()
-                    .any(|entry| entry.tab.id == *id && entry.tab.file.is_none())
-                    && (query.is_empty() || name.to_lowercase().contains(&query))
+            .filter(|entry| {
+                entry.is_draft && (query.is_empty() || entry.label.to_lowercase().contains(&query))
             })
             .collect();
         div()
@@ -344,7 +334,7 @@ impl Workspace {
                             let entry = (*entry).clone();
                             let path = display_path(&entry.path);
                             let name = file_name(&entry.path);
-                            let meta = history_meta(&entry, now_ms);
+                            let meta = history_meta(entry.line_count, entry.last_worked_ms, now_ms);
                             div()
                                 .flex()
                                 .items_center()
@@ -381,13 +371,28 @@ impl Workspace {
                     .children(
                         (!drafts.is_empty()).then(|| Label::new("Закрытые черновики").text_lg()),
                     )
-                    .children(drafts.into_iter().map(|(id, name)| {
-                        Button::new(("home-draft", id))
-                            .small()
-                            .ghost()
-                            .label(name)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.reopen_closed_tab(id, window, cx)
+                    .children(drafts.into_iter().map(|entry| {
+                        let id = entry.id;
+                        let meta = history_meta(entry.line_count, entry.last_worked_ms, now_ms);
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                Button::new(("home-draft", id))
+                                    .small()
+                                    .ghost()
+                                    .label(entry.label)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.reopen_closed_tab(id, window, cx)
+                                    })),
+                            )
+                            .children((!meta.is_empty()).then(|| {
+                                Label::new(meta)
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .text_color(rgb(appearance::MUTED))
                             }))
                     })),
             )
@@ -433,12 +438,22 @@ impl Workspace {
     }
 }
 
-fn history_meta(entry: &RecentFile, now_ms: u64) -> String {
+pub(super) fn history_file_label(path: &Path) -> String {
+    let name = file_name(path);
+    let directory = path.parent().map(display_path).unwrap_or_default();
+    format!("{name} — {directory}")
+}
+
+pub(super) fn history_meta(
+    line_count: Option<u64>,
+    last_worked_ms: Option<u64>,
+    now_ms: u64,
+) -> String {
     let mut parts = Vec::new();
-    if let Some(lines) = entry.line_count {
+    if let Some(lines) = line_count {
         parts.push(format!("{lines} стр."));
     }
-    if let Some(last_worked_ms) = entry.last_worked_ms {
+    if let Some(last_worked_ms) = last_worked_ms {
         parts.push(format_last_worked(last_worked_ms, now_ms));
     }
     parts.join(" · ")

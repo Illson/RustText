@@ -64,6 +64,8 @@ fn view_only_changes_wait_for_quiet_window_and_flush_on_shutdown() {
         scroll: [0.0, 0.0],
         draft_revision: Some(1),
         log: None,
+        line_count: None,
+        last_worked_ms: None,
     });
     base.drafts
         .push(Some(gpui_kit::component::input::Rope::from("text")));

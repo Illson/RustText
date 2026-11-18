@@ -169,6 +169,8 @@ impl Workspace {
             scroll: position.scroll,
             draft_revision: None,
             log: position.log,
+            line_count: None,
+            last_worked_ms: None,
             json_validation_disabled: position.json_validation_disabled,
         });
         self.load_paths(vec![recent.path], mode, restore, window, cx);

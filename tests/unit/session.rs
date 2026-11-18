@@ -15,6 +15,8 @@ fn capture(text: &str) -> Capture {
                 scroll: [0., -154.],
                 draft_revision: Some(1),
                 log: None,
+                line_count: None,
+                last_worked_ms: None,
             }],
             closed: Vec::new(),
             active: 0,
@@ -57,9 +59,19 @@ fn legacy_sessions_default_to_one_group_and_enabled_json_validation() {
         .as_object_mut()
         .unwrap()
         .remove("json_validation_disabled");
+    legacy["tabs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("line_count");
+    legacy["tabs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("last_worked_ms");
     let state: State = serde_json::from_value(legacy).unwrap();
     assert!(state.layout.is_none());
     assert!(!state.tabs[0].json_validation_disabled);
+    assert_eq!(state.tabs[0].line_count, None);
+    assert_eq!(state.tabs[0].last_worked_ms, None);
 }
 
 #[test]
@@ -291,6 +303,8 @@ fn closed_scratch_tabs_keep_unicode_text_across_restart() {
         scroll: [3., 9.],
         draft_revision: Some(5),
         log: None,
+        line_count: Some(1),
+        last_worked_ms: Some(1_700_000_000_000),
     });
     state
         .closed_drafts
@@ -310,6 +324,11 @@ fn closed_scratch_tabs_keep_unicode_text_across_restart() {
     );
     assert_eq!(recovered.state.closed[0].id, 2);
     assert_eq!(recovered.state.closed[0].selection, 4..4);
+    assert_eq!(recovered.state.closed[0].line_count, Some(1));
+    assert_eq!(
+        recovered.state.closed[0].last_worked_ms,
+        Some(1_700_000_000_000)
+    );
 }
 
 #[test]
@@ -339,6 +358,8 @@ fn closed_log_tabs_keep_view_state_and_bookmark_across_restart() {
         scroll: [14., 72.],
         draft_revision: None,
         log: Some(bookmark.clone()),
+        line_count: None,
+        last_worked_ms: None,
     });
     state.closed_drafts.push(None);
     let mut journal = Journal::open(temporary.path().join("journal")).unwrap();
@@ -391,6 +412,8 @@ fn commits_keep_only_the_newest_hundred_closed_tabs() {
             scroll: [0., 0.],
             draft_revision: None,
             log: None,
+            line_count: None,
+            last_worked_ms: None,
         })
         .collect();
     state.closed_drafts = vec![None; MAX_CLOSED_TABS + 1];
@@ -524,6 +547,8 @@ fn reuses_draft_when_moving_between_open_and_closed_tabs_and_cleans_pending_dirs
         scroll: [0., 0.],
         draft_revision: Some(1),
         log: None,
+        line_count: None,
+        last_worked_ms: None,
     });
     closed.closed_drafts.push(Some(Rope::from("moved text")));
     journal.commit(3, closed).unwrap();

@@ -56,6 +56,10 @@ pub struct Tab {
     pub draft_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<LogBookmark>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_worked_ms: Option<u64>,
 }
 
 pub struct Capture {

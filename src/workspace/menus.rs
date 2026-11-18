@@ -8,8 +8,12 @@ use gpui_kit::{
     *,
 };
 
-use super::{Workspace, display_path, file_name, view::*};
-use crate::appearance;
+use super::{
+    Workspace,
+    home::{history_file_label, history_meta},
+    view::*,
+};
+use crate::{appearance, recent_files::now_millis};
 
 impl Workspace {
     pub(super) fn menubar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -42,21 +46,28 @@ impl Workspace {
             .border_b_1()
             .border_color(rgb(appearance::BORDER))
             .child(
-                Button::new("open-home")
-                    .small()
-                    .ghost()
-                    .selected(showing_home)
-                    .tooltip("История файлов")
+                div()
+                    // Windows caption presses ignore default prevention but honor stopped bubbling.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_color(rgb(appearance::ACCENT))
-                            .child(img(logo).w(px(22.)).h(px(22.)).flex_shrink_0())
-                            .child(Label::new("RustText")),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_home(window, cx))),
+                        Button::new("open-home")
+                            .small()
+                            .ghost()
+                            .selected(showing_home)
+                            .tooltip("История файлов")
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_color(rgb(appearance::ACCENT))
+                                    .child(img(logo).w(px(22.)).h(px(22.)).flex_shrink_0())
+                                    .child(Label::new("RustText")),
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_home(window, cx)),
+                            ),
+                    ),
             )
             .child(self.file_menu_button(cx))
             .child(self.tools_menu_button(cx))
@@ -95,7 +106,7 @@ impl Workspace {
             .then(|| self.active_document_opt())
             .flatten();
         let can_save = !busy && doc.is_some_and(|doc| doc.log.is_none() && !doc.placeholder);
-        let closed_entries = self.closed_tab_entries();
+        let closed_entries = self.closed_tab_entries().collect::<Vec<_>>();
         let can_reopen = !busy && !closed_entries.is_empty();
         let recent_entries = self
             .recent
@@ -111,6 +122,7 @@ impl Workspace {
             .ghost()
             .label("Файл")
             .dropdown_menu(move |menu, window, cx| {
+                let now_ms = now_millis();
                 let closed_workspace = workspace.clone();
                 let closed_entries = closed_entries.clone();
                 let recent_workspace = workspace.clone();
@@ -157,18 +169,17 @@ impl Workspace {
                                 .fold(menu.scrollable(true), |menu, entry| {
                                     let entry = entry.clone();
                                     let workspace = recent_workspace.clone();
-                                    let name = file_name(&entry.path);
-                                    let directory =
-                                        entry.path.parent().map(display_path).unwrap_or_default();
-                                    menu.item(
-                                        PopupMenuItem::new(format!("{name} — {directory}"))
-                                            .disabled(busy)
-                                            .on_click(move |_, window, cx| {
-                                                let _ = workspace.update(cx, |this, cx| {
-                                                    this.open_recent(entry.clone(), window, cx);
-                                                });
-                                            }),
-                                    )
+                                    let item = history_menu_item(
+                                        history_file_label(&entry.path),
+                                        entry.line_count,
+                                        entry.last_worked_ms,
+                                        now_ms,
+                                    );
+                                    menu.item(item.disabled(busy).on_click(move |_, window, cx| {
+                                        let _ = workspace.update(cx, |this, cx| {
+                                            this.open_recent(entry.clone(), window, cx);
+                                        });
+                                    }))
                                 })
                         },
                     )
@@ -180,22 +191,23 @@ impl Workspace {
                             if closed_entries.is_empty() {
                                 return menu.item(PopupMenuItem::label("Закрытых вкладок нет"));
                             }
-                            closed_entries.iter().fold(
-                                menu.scrollable(true),
-                                |menu, (id, label)| {
-                                    let id = *id;
+                            closed_entries
+                                .iter()
+                                .fold(menu.scrollable(true), |menu, entry| {
+                                    let id = entry.id;
                                     let workspace = closed_workspace.clone();
-                                    menu.item(
-                                        PopupMenuItem::new(label.clone()).disabled(busy).on_click(
-                                            move |_, window, cx| {
-                                                let _ = workspace.update(cx, |this, cx| {
-                                                    this.reopen_closed_tab(id, window, cx)
-                                                });
-                                            },
-                                        ),
-                                    )
-                                },
-                            )
+                                    let item = history_menu_item(
+                                        entry.label.clone(),
+                                        entry.line_count,
+                                        entry.last_worked_ms,
+                                        now_ms,
+                                    );
+                                    menu.item(item.disabled(busy).on_click(move |_, window, cx| {
+                                        let _ = workspace.update(cx, |this, cx| {
+                                            this.reopen_closed_tab(id, window, cx)
+                                        });
+                                    }))
+                                })
                         },
                     )
                     .separator()
@@ -364,4 +376,29 @@ impl Workspace {
                 }
             })
     }
+}
+
+fn history_menu_item(
+    label: String,
+    line_count: Option<u64>,
+    last_worked_ms: Option<u64>,
+    now_ms: u64,
+) -> PopupMenuItem {
+    let label: SharedString = label.into();
+    let meta = history_meta(line_count, last_worked_ms, now_ms);
+    let meta = (!meta.is_empty()).then(|| SharedString::from(meta));
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(Label::new(label.clone()).flex_1().min_w_0().truncate())
+            .children(meta.clone().map(|meta| {
+                Label::new(meta)
+                    .flex_shrink_0()
+                    .text_color(rgb(appearance::MUTED))
+            }))
+    })
 }

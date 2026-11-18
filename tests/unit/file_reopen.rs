@@ -14,6 +14,8 @@ fn closed_view(file: FileTarget) -> Tab {
         scroll: [0., 200.],
         draft_revision: None,
         log: None,
+        line_count: None,
+        last_worked_ms: None,
     }
 }
 
