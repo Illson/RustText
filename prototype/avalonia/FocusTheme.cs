@@ -13,11 +13,14 @@ internal static class FocusTheme
     public static Color BorderColor { get; } = Color.Parse("#414B54");
     public static Color TextColor { get; } = Color.Parse("#D8DEE9");
     public static Color MutedColor { get; } = Color.Parse("#A6B0BC");
+    public static Color PanelColor { get; } = Color.Parse("#252C33");
+    public static Color HoverColor { get; } = Color.Parse("#2C343C");
+    public static Color SelectionColor { get; } = Color.Parse("#444D58");
 
     public static IBrush Chrome { get; } = new ImmutableSolidColorBrush(ChromeColor);
     public static IBrush Deep { get; } = Brush("#181C21");
     public static IBrush Editor { get; } = Brush("#303841");
-    public static IBrush Panel { get; } = Brush("#252C33");
+    public static IBrush Panel { get; } = new ImmutableSolidColorBrush(PanelColor);
     public static IBrush Field { get; } = new ImmutableSolidColorBrush(FieldColor);
     public static IBrush Border { get; } = new ImmutableSolidColorBrush(BorderColor);
     public static IBrush Text { get; } = new ImmutableSolidColorBrush(TextColor);
@@ -25,8 +28,8 @@ internal static class FocusTheme
     public static IBrush Gutter { get; } = Brush("#96A1AE");
     public static IBrush Accent { get; } = new ImmutableSolidColorBrush(AccentColor);
     public static IBrush AccentHover { get; } = Brush("#DBD6D6");
-    public static IBrush Hover { get; } = Brush("#2C343C");
-    public static IBrush Selection { get; } = Brush("#444D58");
+    public static IBrush Hover { get; } = new ImmutableSolidColorBrush(HoverColor);
+    public static IBrush Selection { get; } = new ImmutableSolidColorBrush(SelectionColor);
     public static IBrush Match { get; } = Brush("#69583A");
     public static IBrush CurrentMatch { get; } = Brush("#7B6543");
     public static IBrush Warning { get; } = Brush("#E5BD85");

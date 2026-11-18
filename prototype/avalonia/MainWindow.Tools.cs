@@ -398,6 +398,17 @@ public partial class MainWindow
         return await dialog.ShowDialog<string?>(this);
     }
 
+    private static StackPanel DialogPanel(params Control[] children)
+    {
+        var body = new StackPanel { Spacing = 10, Margin = new Thickness(18) };
+        foreach (var child in children)
+        {
+            body.Children.Add(child);
+        }
+
+        return body;
+    }
+
     private static Button FocusButton(Button button, bool primary = false)
     {
         button.Classes.Add(primary ? "focus-primary" : "focus-quiet");
@@ -410,18 +421,7 @@ public partial class MainWindow
         return button;
     }
 
-    private static StackPanel DialogPanel(params Control[] children)
-    {
-        var body = new StackPanel { Spacing = 9, Margin = new Thickness(16) };
-        foreach (var child in children)
-        {
-            body.Children.Add(child);
-        }
-
-        return body;
-    }
-
-    private static Window Dialog(string title, Control body, double width = 430)
+    internal static Window Dialog(string title, Control body, double width = 430)
     {
         var dialog = new Window
         {

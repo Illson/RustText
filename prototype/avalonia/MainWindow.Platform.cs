@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Documents;
 using Avalonia.Input;
+using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using RustText.Demo.Platform;
 
@@ -69,15 +71,20 @@ public partial class MainWindow
 
     private VersionHistory VersionStore() => VersionHistory.OpenDefault(_settings.VersionFileLimitBytes, _settings.VersionTotalLimitBytes);
 
-    private async Task CaptureVersionAsync(string path, TextEncodingKind encoding)
+    private async Task<string?> CaptureVersionAsync(string path, TextEncodingKind encoding, FileStamp? expectedStamp = null)
     {
         try
         {
-            await VersionStore().CaptureAsync(path, encoding, _lifetime.Token);
+            var store = VersionStore();
+            if (expectedStamp is null)
+                await store.CaptureAsync(path, encoding, _lifetime.Token);
+            else
+                await store.CaptureExpectedAsync(path, encoding, expectedStamp, _lifetime.Token);
+            return null;
         }
         catch (Exception error) when (IsUserError(error))
         {
-            SetStatus($"Файл сохранён. Создать снимок не удалось. {error.Message}");
+            return error.Message;
         }
     }
 
@@ -94,7 +101,9 @@ public partial class MainWindow
         foreach (var version in items)
         {
             var when = DateTimeOffset.FromUnixTimeMilliseconds(version.CapturedMillis).LocalDateTime;
-            list.Items.Add(new ListBoxItem { Content = $"{when:g} · {version.Bytes:N0} байт", Tag = version });
+            var source = version.IsLegacy ? " · Rust" : string.Empty;
+            var encoding = version.Encoding is { } value ? $" · {value}" : " · кодировка неизвестна";
+            list.Items.Add(new ListBoxItem { Content = $"{when:g} · {version.Bytes:N0} байт{encoding}{source}", Tag = version });
         }
 
         var preview = new TextBox
@@ -102,17 +111,52 @@ public partial class MainWindow
             IsReadOnly = true, AcceptsReturn = true, MinHeight = 220, MaxHeight = 360,
             PlaceholderText = "Выберите снимок", FontFamily = editor.FontFamily
         };
+        var compare = new CheckBox { Content = "Подсветить отличия от текущего текста", IsEnabled = false };
+        var diffLegend = new TextBlock { Text = "Зелёный «+» — только в текущем тексте; красный «−» — только в версии.", IsVisible = false };
+        var diffPreview = new TextBlock { MinHeight = 220, MaxHeight = 360, FontFamily = editor.FontFamily, TextWrapping = TextWrapping.Wrap, IsVisible = false };
+        VersionSnapshot? displayedSnapshot = null;
+        string? displayedText = null;
+        string? displayedDiffText = null;
+        void RefreshVersionPreview()
+        {
+            var showDiff = compare.IsChecked == true && displayedSnapshot?.Encoding is not null && displayedDiffText is not null;
+            preview.IsVisible = !showDiff;
+            diffLegend.IsVisible = showDiff;
+            diffPreview.IsVisible = showDiff;
+            if (showDiff)
+            {
+                RenderVersionDiff(diffPreview, editor.Text, displayedDiffText!);
+            }
+        }
+        compare.IsCheckedChanged += (_, _) => RefreshVersionPreview();
         var body = DialogPanel(new TextBlock { Text = path, TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis },
-            list, preview);
+            list, compare, diffLegend, preview, diffPreview);
         var dialog = Dialog("Версии файла", body, 760);
         list.SelectionChanged += (_, _) => Run(async () =>
         {
             if (list.SelectedItem is ListBoxItem { Tag: VersionSnapshot selected })
             {
-                var bytes = await versions.ReadAsync(path, selected.Id, _lifetime.Token);
-                if (list.SelectedItem is ListBoxItem { Tag: VersionSnapshot current } && current.Id == selected.Id)
+                var bytes = await versions.ReadAsync(path, selected, _lifetime.Token);
+                if (list.SelectedItem is ListBoxItem { Tag: VersionSnapshot current } && current == selected)
                 {
-                    preview.Text = DocumentFiles.DecodeText(bytes, selected.Encoding);
+                    displayedSnapshot = selected;
+                    if (selected.Encoding is { } encoding)
+                    {
+                        displayedText = DocumentFiles.DecodeText(bytes, encoding);
+                        displayedDiffText = DocumentFiles.DecodeSnapshot(bytes, encoding).Text;
+                        preview.Text = displayedText;
+                        compare.IsEnabled = true;
+                    }
+                    else
+                    {
+                        displayedText = "У старой версии не записана кодировка. Показаны первые байты в HEX; восстановление текста отключено, чтобы не угадывать кодировку.\n\n"
+                            + Convert.ToHexString(bytes.AsSpan(0, Math.Min(bytes.Length, 256)));
+                        displayedDiffText = null;
+                        preview.Text = displayedText;
+                        compare.IsChecked = false;
+                        compare.IsEnabled = false;
+                    }
+                    RefreshVersionPreview();
                 }
             }
         });
@@ -120,7 +164,9 @@ public partial class MainWindow
         {
             if (list.SelectedItem is ListBoxItem { Tag: VersionSnapshot selected } && _tabs.ContainsKey(active.Id))
             {
-                var bytes = await versions.ReadAsync(path, selected.Id, _lifetime.Token);
+                if (selected.Encoding is not { } encoding)
+                    throw new IOException("Кодировка старой версии неизвестна. Выберите другую версию.");
+                var bytes = await versions.ReadAsync(path, selected, _lifetime.Token);
                 var revision = active.Revision;
                 var expected = active.Stamp ?? throw new IOException("Перечитайте исходный файл перед восстановлением.");
                 if (await DocumentFiles.GetStampAsync(path, _lifetime.Token) != expected)
@@ -128,8 +174,8 @@ public partial class MainWindow
                     throw new IOException("Исходный файл изменился на диске. Откройте его заново.");
                 }
 
-                await versions.CaptureAsync(path, active.Encoding, _lifetime.Token);
-                var snapshot = DocumentFiles.DecodeSnapshot(bytes, selected.Encoding);
+                await versions.CaptureExpectedAsync(path, active.Encoding, expected, _lifetime.Token);
+                var snapshot = DocumentFiles.DecodeSnapshot(bytes, encoding);
                 if (await DocumentFiles.GetStampAsync(path, _lifetime.Token) != expected || active.Revision != revision)
                 {
                     throw new IOException("Файл или текст изменились во время восстановления.");
@@ -145,6 +191,32 @@ public partial class MainWindow
             }
         })), primary: true), FocusButton(Button("Лимиты…", () => Run(ShowSettingsAsync)))));
         await dialog.ShowDialog(this);
+    }
+
+    private static void RenderVersionDiff(TextBlock target, string currentText, string snapshotText)
+    {
+        var lines = VersionDiff.Compare(currentText, snapshotText);
+        var inlines = target.Inlines;
+        if (inlines is null)
+        {
+            target.Text = string.Join(Environment.NewLine, lines.Select(line =>
+                (line.Kind == VersionDiffKind.Added ? "+ " : line.Kind == VersionDiffKind.Removed ? "− " : "  ") + line.Text));
+            return;
+        }
+
+        inlines.Clear();
+        foreach (var line in lines)
+        {
+            var (marker, foreground) = line.Kind switch
+            {
+                VersionDiffKind.Added => ("+ ", FocusTheme.Success),
+                VersionDiffKind.Removed => ("− ", FocusTheme.Danger),
+                VersionDiffKind.Info => ("· ", FocusTheme.Warning),
+                _ => ("  ", FocusTheme.Muted)
+            };
+            inlines.Add(new Run(marker + line.Text) { Foreground = foreground });
+            inlines.Add(new LineBreak());
+        }
     }
 
     private async Task SaveDraftCopyAsync(string sourcePath)

@@ -85,9 +85,19 @@
                                        RegionColor="{x:Static local:FocusTheme.ChromeColor}"
                                        AltHigh="{x:Static local:FocusTheme.FieldColor}"
                                        BaseHigh="{x:Static local:FocusTheme.TextColor}"
-                                       BaseMediumHigh="{x:Static local:FocusTheme.MutedColor}" />
+                                       BaseMediumHigh="{x:Static local:FocusTheme.MutedColor}"
+                                       BaseMedium="{x:Static local:FocusTheme.MutedColor}"
+                                       BaseLow="{x:Static local:FocusTheme.BorderColor}"
+                                       ChromeLow="{x:Static local:FocusTheme.ChromeColor}"
+                                       ChromeMediumLow="{x:Static local:FocusTheme.PanelColor}"
+                                       ListLow="{x:Static local:FocusTheme.HoverColor}"
+                                       ListMedium="{x:Static local:FocusTheme.SelectionColor}" />
             </FluentTheme.Palettes>
         </FluentTheme>
+        <Style Selector="Window">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Chrome}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
         <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
         <Style Selector="TabItem.focus-tab">
             <Setter Property="Theme" Value="{StaticResource FocusDocumentTab}" />

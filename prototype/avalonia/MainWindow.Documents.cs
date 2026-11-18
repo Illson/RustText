@@ -146,7 +146,7 @@ public partial class MainWindow
         tab.Log?.Close();
         tab.Log = null;
         tab.LastWorked = DateTimeOffset.Now;
-        var editor = new FocusTextEditor
+        var editor = new TextEditor
         {
             Text = text,
             FontFamily = new FontFamily("Cascadia Mono, Consolas, monospace"),
@@ -162,6 +162,7 @@ public partial class MainWindow
         };
         editor.TextArea.SelectionBrush = FocusTheme.Selection;
         editor.Options.ShowBoxForControlCharacters = true;
+        editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
         tab.Editor = editor;
         SetSyntax(editor, tab.Path);
         tab.RestoredDirty = false;
@@ -224,6 +225,10 @@ public partial class MainWindow
         {
             tab.Revision++;
             tab.LastWorked = DateTimeOffset.Now;
+            if (tab.Path is null)
+            {
+                SetSyntax(editor, null);
+            }
             UpdateTab(tab);
             ScheduleJsonValidation(tab);
             if (ReferenceEquals(tab, ActiveTab))
@@ -253,7 +258,7 @@ public partial class MainWindow
         {
             if (ReferenceEquals(tab, ActiveTab))
             {
-                SetStatus(status);
+                SetStatus(status.Length == 0 ? tab.Path : status);
             }
         };
         tab.Item.Content = log;
@@ -278,12 +283,43 @@ public partial class MainWindow
             return;
         }
 
-        var old = tab.Editor;
-        var offset = old?.CaretOffset ?? 0;
-        var loaded = await DocumentFiles.ReadAsync(path, encoding, _lifetime.Token);
+        if (tab.Editor is { } editor)
+        {
+            await ApplyEditorReloadAsync(tab, editor, DocumentFiles.ReadAsync(path, encoding, _lifetime.Token));
+        }
+    }
+
+    private async Task ApplyEditorReloadAsync(WorkTab tab, TextEditor editor, Task<LoadedDocument> read)
+    {
+        var revision = tab.Revision;
+        var path = tab.Path;
+        var loaded = await read;
+        if (_closed || !_tabs.TryGetValue(tab.Id, out var current) || !ReferenceEquals(tab, current)
+            || !ReferenceEquals(tab.Editor, editor) || !SamePath(tab.Path, path))
+        {
+            return;
+        }
+        if (tab.Dirty || tab.Revision != revision)
+        {
+            if (ReferenceEquals(tab, ActiveTab))
+            {
+                SetStatus("Перечитывание отменено: документ изменён.");
+            }
+            return;
+        }
+
+        var view = CaptureTab(tab);
+        var hadFocus = editor.IsKeyboardFocusWithin;
         AttachLoadedEditor(tab, loaded);
-        SelectText(tab, offset, 0);
-        SetStatus("Файл перечитан.");
+        RestoreEditorView(tab, view);
+        if (ReferenceEquals(tab, ActiveTab))
+        {
+            if (hadFocus)
+            {
+                tab.Editor?.Focus();
+            }
+            SetStatus("Файл перечитан.");
+        }
     }
 
     private async Task SaveAsync(bool saveAs = false)
@@ -325,6 +361,7 @@ public partial class MainWindow
         var text = editor.Text;
         var revision = tab.Revision;
         var iconPosition = expected is null ? null : await DesktopIconPosition.CaptureAsync(path, _lifetime.Token);
+        var preSaveVersionWarning = expected is null ? null : await CaptureVersionAsync(path, tab.Encoding, expected);
         var stamp = await DocumentFiles.SaveAsync(path, text, tab.Encoding, tab.Ending, expected, tab.OriginalEndings, _lifetime.Token);
         tab.Path = path;
         SetSyntax(editor, path);
@@ -343,9 +380,12 @@ public partial class MainWindow
         }
 
         UpdateTab(tab);
-        SetStatus($"Сохранено · {path}");
         await RecordRecentAsync(tab);
-        await CaptureVersionAsync(path, tab.Encoding);
+        var postSaveVersionWarning = await CaptureVersionAsync(path, tab.Encoding, stamp);
+        var versionWarning = preSaveVersionWarning ?? postSaveVersionWarning;
+        SetStatus(versionWarning is null
+            ? $"Сохранено · {path}"
+            : $"Сохранено · {path}. Версию не удалось записать: {versionWarning}");
     }
 
     private async Task CloseTabAsync(WorkTab tab)
@@ -487,14 +527,22 @@ public partial class MainWindow
         }
         else
         {
-            SetStatus(tab.Path);
+            SetStatus(tab.Log?.StatusText is { Length: > 0 } message ? message : tab.Path);
             FormatText.Text = tab.IsLog ? "Просмотр лога" : "";
         }
     }
 
     private static void SetSyntax(TextEditor editor, string? path)
     {
-        editor.SyntaxHighlighting = path is null ? null
+        var colorizer = editor.TextArea.TextView.LineTransformers.OfType<JsonColorizer>().Single();
+        var enabled = JsonColorizer.Applies(path, editor.Document);
+        if (colorizer.Enabled != enabled)
+        {
+            colorizer.Enabled = enabled;
+            editor.TextArea.TextView.Redraw();
+        }
+
+        editor.SyntaxHighlighting = enabled || path is null ? null
             : HighlightingManager.Instance.GetDefinitionByExtension(Path.GetExtension(path));
     }
 

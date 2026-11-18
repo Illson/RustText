@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
+using Avalonia.Media;
 using AvaloniaEdit.Rendering;
 using RustText.Demo.Editor;
 
@@ -35,13 +36,11 @@ public partial class MainWindow
         _searchResults = new ListBox { MaxHeight = 112, MinHeight = 40 };
         _searchStatus = new TextBlock { Foreground = FocusTheme.Muted, VerticalAlignment = VerticalAlignment.Center };
         var searchRow = new DockPanel { LastChildFill = true, MinHeight = 34 };
-        var findButton = FocusButton(Button("Найти", () => Run(FindAsync)), primary: true);
-        var previousButton = FocusIcon(Button("↑", () => Run(() => NavigateSearchAsync(true))));
-        var nextButton = FocusIcon(Button("↓", () => Run(() => NavigateSearchAsync(false))));
-        var replaceToggle = FocusButton(Button("Замена", () => { _replacementRow.IsVisible = !_replacementRow.IsVisible; }));
-        var cancelButton = FocusButton(Button("Отменить", () => _searchCancellation?.Cancel()));
-        var closeButton = FocusIcon(Button("×", CloseSearchPanel));
-        var commands = Row(findButton, previousButton, nextButton, replaceToggle, cancelButton, closeButton);
+        var commands = Row(FocusButton(Button("Найти", () => Run(FindAsync)), primary: true),
+            FocusIcon(Button("↑", () => Run(() => NavigateSearchAsync(true)))),
+            FocusIcon(Button("↓", () => Run(() => NavigateSearchAsync(false)))),
+            FocusButton(Button("Замена", () => { _replacementRow.IsVisible = !_replacementRow.IsVisible; })),
+            FocusButton(Button("Отменить", () => _searchCancellation?.Cancel())), FocusIcon(Button("×", CloseSearchPanel)));
         DockPanel.SetDock(commands, Dock.Right);
         searchRow.Children.Add(commands);
         searchRow.Children.Add(_searchInput);

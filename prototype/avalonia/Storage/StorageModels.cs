@@ -9,6 +9,7 @@ internal sealed record SessionTab(long Id, string? Path, TextEncodingKind Encodi
     public bool JsonValidationDisabled { get; init; }
     public LegacyFileStamp? LegacyStamp { get; init; }
     public bool SelectionUsesUtf8 { get; init; }
+    public string? UntitledName { get; init; }
 }
 internal sealed record LegacyFileStamp(long Length, DateTime LastWriteUtc, DateTime? CreatedUtc);
 internal sealed record SessionState(List<SessionTab> Tabs, List<SessionTab>? ClosedTabs = null, int Active = 0, double WindowWidth = 1100, double WindowHeight = 760, bool Maximized = false, bool Wrap = false, double FontSize = FocusTheme.EditorFontSize, WorkspaceLayout? Layout = null, long? ActiveGroupId = null);
@@ -16,8 +17,26 @@ public sealed record UserSettings(int UntitledTabLimit = 10, int RecentFileLimit
 {
     public bool AutoCheckUpdates { get; init; }
 }
-internal sealed record RecentFileEntry(string Path, TextEncodingKind Encoding, bool ViewAsLog = false, int SelectionStart = 0, int SelectionLength = 0, long? LogOffset = null, long? LineCount = null, long? LastWorkedMs = null);
-public sealed record VersionSnapshot(string Id, string Path, long CapturedMillis, long Bytes, string Sha256, TextEncodingKind Encoding);
+internal sealed record RecentFileEntry(
+    string Path,
+    TextEncodingKind? Encoding,
+    bool ViewAsLog = false,
+    int SelectionStart = 0,
+    int SelectionLength = 0,
+    long? LogOffset = null,
+    long? LineCount = null,
+    long? LastWorkedMs = null,
+    bool Reversed = false,
+    double ScrollX = 0,
+    double ScrollY = 0,
+    bool JsonValidationDisabled = false,
+    LogTabState? Log = null,
+    bool SelectionUsesUtf8 = false);
+public sealed record VersionSnapshot(string Id, string Path, long CapturedMillis, long Bytes, string Sha256, TextEncodingKind? Encoding)
+{
+    [JsonIgnore]
+    internal bool IsLegacy { get; init; }
+}
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower)]
 [JsonSerializable(typeof(SessionState))]

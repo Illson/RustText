@@ -6,21 +6,24 @@ namespace RustText.Demo;
 
 internal sealed class StorageService
 {
-    private const int MaxRecentFiles = 100;
+    private const int MaxRecentFiles = 10_000;
     private const int MaxClosedTabs = 100;
+    private const int MaximumCheckpointCount = 2;
     private readonly string _root;
+    private readonly string _profileBaseDirectory;
     private readonly string _checkpoints;
     private readonly string _drafts;
     private readonly string _versions;
     private readonly bool _hasProfileOverride;
 
-    private StorageService(string root)
+    private StorageService(string profileBaseDirectory, bool hasProfileOverride)
     {
-        _root = root;
-        _hasProfileOverride = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR"));
-        _checkpoints = Path.Combine(root, "session");
-        _drafts = Path.Combine(root, "drafts");
-        _versions = Path.Combine(root, "versions");
+        _profileBaseDirectory = Path.GetFullPath(profileBaseDirectory);
+        _root = Path.Combine(_profileBaseDirectory, "dotnet-demo");
+        _hasProfileOverride = hasProfileOverride;
+        _checkpoints = Path.Combine(_root, "session");
+        _drafts = Path.Combine(_root, "drafts");
+        _versions = Path.Combine(_root, "versions");
         Directory.CreateDirectory(_root);
         Directory.CreateDirectory(_checkpoints);
         Directory.CreateDirectory(_drafts);
@@ -33,12 +36,15 @@ internal sealed class StorageService
         if (!string.IsNullOrWhiteSpace(overridePath))
         {
             if (!Path.IsPathFullyQualified(overridePath)) throw new IOException("RUSTTEXT_PROFILE_DIR должен содержать абсолютный путь.");
-            return new StorageService(Path.Combine(Path.GetFullPath(overridePath), "dotnet-demo"));
+            return new StorageService(Path.GetFullPath(overridePath), hasProfileOverride: true);
         }
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(local)) throw new IOException("Папка LOCALAPPDATA недоступна.");
-        return new StorageService(Path.Combine(local, "RustText", "dotnet-demo"));
+        return new StorageService(Path.Combine(local, "RustText"), hasProfileOverride: false);
     }
+
+    internal static StorageService OpenForTesting(string profileBaseDirectory) =>
+        new(profileBaseDirectory, hasProfileOverride: false);
 
     public string RootDirectory => _root;
     public static string GetProfileBaseDirectory()
@@ -60,26 +66,25 @@ internal sealed class StorageService
         var backup = Path.Combine(_checkpoints, "previous.json");
         foreach (var path in new[] { current, backup })
         {
-            try
-            {
-                if (!File.Exists(path)) continue;
-                var checkpointName = (await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false)).Trim();
-                if (Path.GetFileName(checkpointName) != checkpointName || !checkpointName.StartsWith("checkpoint-", StringComparison.Ordinal)) continue;
-                var manifest = Path.Combine(_checkpoints, checkpointName, "manifest.json");
-                await using var stream = File.OpenRead(manifest);
-                return await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.SessionState, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is IOException or JsonException) { }
+            if (await ReadValidCheckpointAsync(path, cancellationToken).ConfigureAwait(false) is { } state)
+                return state;
         }
         return await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task SaveSessionAsync(SessionState state, IReadOnlyDictionary<long, string>? drafts = null, CancellationToken cancellationToken = default)
+    public async Task<SessionState> SaveSessionAsync(SessionState state, IReadOnlyDictionary<long, string>? drafts = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(state);
         using var writerLock = AcquireSessionLock();
+        var fallbackState = await LoadSessionAsync(cancellationToken).ConfigureAwait(false);
+        var fallbackDrafts = (fallbackState?.Tabs ?? [])
+            .Concat(fallbackState?.ClosedTabs ?? [])
+            .Where(tab => tab.DraftRef is not null)
+            .GroupBy(tab => tab.Id)
+            .ToDictionary(group => group.Key, group => group.First());
         var checkpoint = Path.Combine(_checkpoints, $"checkpoint-{DateTime.UtcNow.Ticks:x16}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(checkpoint);
+        var committed = false;
         try
         {
             var draftRefs = new Dictionary<long, (string Reference, string Hash)>();
@@ -95,10 +100,12 @@ internal sealed class StorageService
             }
             var tabs = new List<SessionTab>(state.Tabs.Count);
             foreach (var tab in state.Tabs)
-                tabs.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash } : await PreserveDraftReferenceAsync(checkpoint, tab, cancellationToken).ConfigureAwait(false));
+                tabs.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
+                    : await PreserveDraftReferenceAsync(checkpoint, tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var closed = new List<SessionTab>();
             foreach (var tab in (state.ClosedTabs ?? []).Take(MaxClosedTabs))
-                closed.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash } : await PreserveDraftReferenceAsync(checkpoint, tab, cancellationToken).ConfigureAwait(false));
+                closed.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
+                    : await PreserveDraftReferenceAsync(checkpoint, tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var snapshot = state with { Tabs = tabs, ClosedTabs = closed };
             await using (var stream = new FileStream(Path.Combine(checkpoint, "manifest.json"), FileMode.CreateNew, FileAccess.Write, FileShare.None, 16 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
@@ -106,12 +113,61 @@ internal sealed class StorageService
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false); stream.Flush(true);
             }
             var latest = Path.Combine(_checkpoints, "latest.json");
-            if (File.Exists(latest)) File.Copy(latest, Path.Combine(_checkpoints, "previous.json"), overwrite: true);
+            var previous = Path.Combine(_checkpoints, "previous.json");
+            if (await ReadValidCheckpointAsync(latest, cancellationToken).ConfigureAwait(false) is not null)
+            {
+                var currentPointer = await File.ReadAllTextAsync(latest, cancellationToken).ConfigureAwait(false);
+                await AtomicWriteAsync(previous, System.Text.Encoding.UTF8.GetBytes(currentPointer.Trim()), cancellationToken).ConfigureAwait(false);
+            }
             await AtomicWriteAsync(latest, System.Text.Encoding.UTF8.GetBytes(Path.GetFileName(checkpoint)), cancellationToken).ConfigureAwait(false);
-            var dirs = new DirectoryInfo(_checkpoints).GetDirectories("checkpoint-*").OrderByDescending(d => d.Name, StringComparer.Ordinal).Skip(2);
-            foreach (var old in dirs) old.Delete(recursive: true);
+            committed = true;
+            var retained = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pointer in new[] { latest, previous })
+            {
+                if (!File.Exists(pointer)) continue;
+                var name = (await File.ReadAllTextAsync(pointer, cancellationToken).ConfigureAwait(false)).Trim();
+                if (Path.GetFileName(name) == name && name.StartsWith("checkpoint-", StringComparison.Ordinal)) retained.Add(name);
+            }
+            foreach (var old in new DirectoryInfo(_checkpoints).GetDirectories("checkpoint-*").OrderByDescending(d => d.Name, StringComparer.Ordinal))
+            {
+                if (retained.Count >= MaximumCheckpointCount && !retained.Contains(old.Name))
+                {
+                    try { old.Delete(recursive: true); }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+                }
+                retained.Add(old.Name);
+            }
+            return snapshot;
         }
-        catch { try { Directory.Delete(checkpoint, recursive: true); } catch { } throw; }
+        catch
+        {
+            if (!committed) try { Directory.Delete(checkpoint, recursive: true); } catch { }
+            throw;
+        }
+    }
+
+    public async Task<SessionTab> ResolveCurrentDraftAsync(SessionTab tab, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tab.DraftRef)) return tab;
+        try
+        {
+            var path = ResolveAnyDraftReference(tab.DraftRef);
+            if (File.Exists(path))
+            {
+                if (tab.DraftSha256 is null) return tab;
+                await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+                    64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
+                if (hash.Equals(tab.DraftSha256, StringComparison.OrdinalIgnoreCase)) return tab;
+            }
+        }
+        catch (Exception error) when (IsInvalidCheckpointException(error)) { }
+
+        var latest = await LoadSessionAsync(cancellationToken).ConfigureAwait(false);
+        var candidate = (latest?.Tabs ?? []).Concat(latest?.ClosedTabs ?? [])
+            .FirstOrDefault(value => value.Id == tab.Id && value.DraftSha256 is not null
+                && string.Equals(value.DraftSha256, tab.DraftSha256, StringComparison.OrdinalIgnoreCase));
+        return candidate ?? throw new IOException("Черновик больше не доступен в сохранённых контрольных точках.");
     }
 
     public async Task<string?> LoadDraftAsync(SessionTab tab, CancellationToken cancellationToken = default)
@@ -120,7 +176,7 @@ internal sealed class StorageService
         var path = ResolveAnyDraftReference(tab.DraftRef);
         if (new FileInfo(path).Length > 8L * 1024 * 1024) throw new IOException("Черновик больше 8 МиБ. Используйте GetDraftPath для потокового чтения.");
         var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
-        if (tab.DraftSha256 is not null && !string.Equals(Convert.ToHexString(SHA256.HashData(bytes)), tab.DraftSha256, StringComparison.Ordinal))
+        if (tab.DraftSha256 is not null && !string.Equals(Convert.ToHexString(SHA256.HashData(bytes)), tab.DraftSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Черновик повреждён.");
         return new System.Text.UTF8Encoding(false, true).GetString(bytes);
     }
@@ -156,7 +212,7 @@ internal sealed class StorageService
         if (!File.Exists(path))
         {
             if (_hasProfileOverride) return new();
-            var legacyPath = Path.Combine(GetProfileBaseDirectory(), "settings.json");
+            var legacyPath = Path.Combine(_profileBaseDirectory, "settings.json");
             if (!File.Exists(legacyPath)) return new();
             await using var legacy = File.OpenRead(legacyPath);
             try { return (await JsonSerializer.DeserializeAsync(legacy, StorageJsonContext.Default.UserSettings, cancellationToken).ConfigureAwait(false) ?? new()).Normalize(); }
@@ -176,7 +232,7 @@ internal sealed class StorageService
         if (!File.Exists(path))
         {
             if (_hasProfileOverride) return [];
-            var legacyPath = Path.Combine(GetProfileBaseDirectory(), "recent-files.json");
+            var legacyPath = Path.Combine(_profileBaseDirectory, "recent-files.json");
             if (!File.Exists(legacyPath)) return [];
             return await ReadLegacyRecentAsync(legacyPath, cancellationToken).ConfigureAwait(false);
         }
@@ -197,7 +253,7 @@ internal sealed class StorageService
     {
         if (Path.GetFileName(fileName) != fileName) throw new ArgumentException("Ожидалось имя файла профиля.", nameof(fileName));
         if (_hasProfileOverride) return Task.FromResult<JsonDocument?>(null);
-        var path = Path.Combine(GetProfileBaseDirectory(), fileName);
+        var path = Path.Combine(_profileBaseDirectory, fileName);
         return ReadJsonDocumentAsync(path, cancellationToken);
     }
 
@@ -234,13 +290,77 @@ internal sealed class StorageService
             if (pieces.Length != 2 || !pieces[0].StartsWith("checkpoint-", StringComparison.Ordinal)
                 || !(pieces[1].StartsWith("draft-", StringComparison.Ordinal) || pieces[1].StartsWith("closed-draft-", StringComparison.Ordinal))
                 || Path.GetFileName(pieces[1]) != pieces[1]) throw new InvalidDataException("Некорректная legacy-ссылка на черновик.");
-            var legacyRoot = Path.GetFullPath(Path.Combine(GetProfileBaseDirectory(), "session"));
+            var legacyRoot = Path.GetFullPath(Path.Combine(_profileBaseDirectory, "session"));
             var legacyPath = Path.GetFullPath(Path.Combine(legacyRoot, pieces[0], pieces[1]));
             EnsureNoReparsePoints(legacyPath, legacyRoot);
             return legacyPath;
         }
         return ResolveCheckpointReference(reference);
     }
+
+    private async Task<bool> ValidateSessionDraftsAsync(SessionState state, CancellationToken token)
+    {
+        foreach (var tab in (state.Tabs ?? []).Concat(state.ClosedTabs ?? []))
+        {
+            token.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(tab.DraftRef))
+            {
+                continue;
+            }
+
+            try
+            {
+                var path = ResolveAnyDraftReference(tab.DraftRef);
+                var attributes = File.GetAttributes(path);
+                if ((attributes & FileAttributes.Directory) != 0 || (attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    return false;
+                }
+
+                if (tab.DraftSha256 is null)
+                {
+                    continue;
+                }
+
+                await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+                    64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream, token).ConfigureAwait(false));
+                if (!actual.Equals(tab.DraftSha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+            catch (Exception error) when (IsInvalidCheckpointException(error))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private async Task<SessionState?> ReadValidCheckpointAsync(string pointerPath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!File.Exists(pointerPath)) return null;
+            var checkpointName = (await File.ReadAllTextAsync(pointerPath, cancellationToken).ConfigureAwait(false)).Trim();
+            if (Path.GetFileName(checkpointName) != checkpointName || !checkpointName.StartsWith("checkpoint-", StringComparison.Ordinal)) return null;
+            var manifest = Path.Combine(_checkpoints, checkpointName, "manifest.json");
+            await using var stream = File.OpenRead(manifest);
+            var state = await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.SessionState, cancellationToken).ConfigureAwait(false);
+            return state is not null && state.Tabs is not null
+                && await ValidateSessionDraftsAsync(state, cancellationToken).ConfigureAwait(false) ? state : null;
+        }
+        catch (Exception error) when (IsInvalidCheckpointException(error))
+        {
+            return null;
+        }
+    }
+
+    private static bool IsInvalidCheckpointException(Exception error) =>
+        error is IOException or InvalidDataException or JsonException or InvalidOperationException or FormatException or ArgumentException
+            or UnauthorizedAccessException or System.Security.SecurityException or NotSupportedException;
 
     private static void EnsureNoReparsePoints(string path, string root)
     {
@@ -257,28 +377,69 @@ internal sealed class StorageService
         throw new InvalidDataException("Ссылка на черновик вышла за пределы хранилища.");
     }
 
-    private async Task<SessionTab> PreserveDraftReferenceAsync(string checkpoint, SessionTab tab, CancellationToken token)
+    private async Task<SessionTab> PreserveDraftReferenceAsync(
+        string checkpoint,
+        SessionTab tab,
+        SessionTab? fallback,
+        CancellationToken token)
     {
-        if (string.IsNullOrWhiteSpace(tab.DraftRef)) return tab;
-        var source = ResolveAnyDraftReference(tab.DraftRef);
-        if (!File.Exists(source)) return tab with { DraftRef = null, DraftSha256 = null };
+        if (string.IsNullOrWhiteSpace(tab.DraftRef))
+        {
+            return tab;
+        }
+
+        if (await TryPreserveDraftAsync(checkpoint, tab, token).ConfigureAwait(false) is { } preserved)
+        {
+            return preserved;
+        }
+
+        if (fallback is not null && await TryPreserveDraftAsync(checkpoint, fallback, token).ConfigureAwait(false) is { } recovered)
+        {
+            return tab with { DraftRef = recovered.DraftRef, DraftSha256 = recovered.DraftSha256 };
+        }
+
+        return tab with { DraftRef = null, DraftSha256 = null };
+    }
+
+    private async Task<SessionTab?> TryPreserveDraftAsync(string checkpoint, SessionTab tab, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(tab.DraftRef)) return null;
+        string source;
+        try
+        {
+            source = ResolveAnyDraftReference(tab.DraftRef);
+            var attributes = File.GetAttributes(source);
+            if ((attributes & FileAttributes.Directory) != 0 || (attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return null;
+            }
+        }
+        catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException or InvalidDataException or ArgumentException)
+        {
+            return null;
+        }
+
         var name = $"draft-{tab.Id}.txt";
         var destination = Path.Combine(checkpoint, name);
         await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        await using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
         var hash = await SHA256.HashDataAsync(input, token).ConfigureAwait(false);
+        var sha = Convert.ToHexString(hash);
+        if (tab.DraftSha256 is not null && !sha.Equals(tab.DraftSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
         input.Position = 0;
+        await using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
         await input.CopyToAsync(output, token).ConfigureAwait(false);
         await output.FlushAsync(token).ConfigureAwait(false); output.Flush(true);
-        var sha = Convert.ToHexString(hash);
-        if (tab.DraftSha256 is not null && !string.Equals(sha, tab.DraftSha256, StringComparison.Ordinal)) throw new InvalidDataException("Черновик повреждён.");
         return tab with { DraftRef = Path.GetFileName(checkpoint) + "/" + name, DraftSha256 = sha };
     }
 
     private async Task<SessionState?> LoadLegacySessionAsync(CancellationToken token)
     {
         if (_hasProfileOverride) return null;
-        var legacySession = Path.Combine(GetProfileBaseDirectory(), "session");
+        var legacySession = Path.Combine(_profileBaseDirectory, "session");
         if (!Directory.Exists(legacySession)) return null;
         foreach (var directory in new DirectoryInfo(legacySession).GetDirectories("checkpoint-*", SearchOption.TopDirectoryOnly).OrderByDescending(d => d.Name, StringComparer.Ordinal))
         {
@@ -361,14 +522,18 @@ internal sealed class StorageService
 
     private static SessionState ParseLegacyState(JsonElement state, string checkpoint, Dictionary<int, (string Ref, string? Hash)> drafts, Dictionary<int, (string Ref, string? Hash)> closedDrafts)
     {
-        var tabs = ParseTabs(state, "tabs", checkpoint, drafts, "draft-");
-        var closed = ParseTabs(state, "closed", checkpoint, closedDrafts, "closed-draft-");
+        var wrap = TryBool(state, "wrap");
+        var tabs = ApplyLegacyLogDefaults(ParseTabs(state, "tabs", checkpoint, drafts, "draft-"), wrap);
+        var closed = ApplyLegacyLogDefaults(ParseTabs(state, "closed", checkpoint, closedDrafts, "closed-draft-"), wrap);
         var active = TryInt(state, "active", 0);
         var window = state.TryGetProperty("window", out var w) ? w : default;
         var layout = state.TryGetProperty("layout", out var layoutValue) && layoutValue.ValueKind == JsonValueKind.Object ? ParseLegacyLayout(layoutValue) : null;
         var activeGroup = state.TryGetProperty("layout", out var legacyLayout) && legacyLayout.ValueKind == JsonValueKind.Object ? TryLong(legacyLayout, "focused", 0) : (long?)null;
-        return new(tabs, closed, Math.Clamp(active, 0, Math.Max(0, tabs.Count - 1)), TryDouble(window, "width", 1100), TryDouble(window, "height", 760), TryBool(window, "maximized"), TryBool(state, "wrap"), TryDouble(state, "font_size", 14), layout, activeGroup);
+        return new(tabs, closed, Math.Clamp(active, 0, Math.Max(0, tabs.Count - 1)), TryDouble(window, "width", 1100), TryDouble(window, "height", 760), TryBool(window, "maximized"), wrap, TryDouble(state, "font_size", 14), layout, activeGroup);
     }
+
+    private static List<SessionTab> ApplyLegacyLogDefaults(List<SessionTab> tabs, bool wrap) =>
+        tabs.Select(tab => tab.Log is { } log ? tab with { Log = log with { Encoding = tab.Encoding, WordWrap = wrap } } : tab).ToList();
 
     private static List<SessionTab> ParseTabs(JsonElement state, string property, string checkpoint, Dictionary<int, (string Ref, string? Hash)> drafts, string draftPrefix)
     {
@@ -389,8 +554,23 @@ internal sealed class StorageService
             var draft = drafts.TryGetValue(index, out var d) ? d : default;
             LogTabState? logState = null;
             if (item.TryGetProperty("log", out var log) && log.ValueKind == JsonValueKind.Object)
-                logState = new LogTabState(Offset: TryLong(log, "offset", 0), HiddenOffset: TryLong(log, "hidden", 0), FollowEnd: TryBool(log, "follow_end"), AutoRefresh: !log.TryGetProperty("auto_refresh", out var autoRefresh) || autoRefresh.ValueKind == JsonValueKind.True);
-            result.Add(new SessionTab(TryLong(item, "id", index + 1), file, encoding, start, Math.Max(0, end - start), TryBool(item, "reversed"), TryArrayDouble(item, "scroll", 0), TryArrayDouble(item, "scroll", 1), draft.Ref is null ? null : $"legacy/{checkpoint}/{draftPrefix}{index}.txt", draft.Hash, TryLongNullable(item, "log", "offset"), TryLongDirectNullable(item, "line_count"), TryLongDirectNullable(item, "last_worked_ms"), ending, Log: logState)
+            {
+                try
+                {
+                    logState = JsonSerializer.Deserialize(log, StorageJsonContext.Default.LogTabState);
+                }
+                catch (JsonException)
+                {
+                }
+
+                logState ??= new LogTabState(
+                    Offset: TryLong(log, "offset", 0),
+                    HiddenOffset: TryLong(log, "hidden", 0),
+                    FollowEnd: TryBool(log, "follow_end"),
+                    AutoRefresh: !log.TryGetProperty("auto_refresh", out var autoRefresh) || autoRefresh.ValueKind == JsonValueKind.True);
+                logState = logState with { Encoding = encoding, HiddenOffset = TryLong(log, "hidden", logState.HiddenOffset) };
+            }
+            result.Add(new SessionTab(TryLong(item, "id", index + 1), file, encoding, start, Math.Max(0, end - start), TryBool(item, "reversed"), ReadLegacyScroll(item, 0), ReadLegacyScroll(item, 1), draft.Ref is null ? null : $"legacy/{checkpoint}/{draftPrefix}{index}.txt", draft.Hash, TryLongNullable(item, "log", "offset"), TryLongDirectNullable(item, "line_count"), TryLongDirectNullable(item, "last_worked_ms"), ending, Log: logState)
             {
                 JsonValidationDisabled = TryBool(item, "json_validation_disabled"),
                 LegacyStamp = ReadLegacyStamp(fileValue),
@@ -460,12 +640,66 @@ internal sealed class StorageService
         foreach (var entry in json.RootElement.EnumerateArray().Take(MaxRecentFiles))
         {
             var filePath = TryString(entry, "path", ""); if (filePath.Length == 0) continue;
-            var enc = TryBool(entry, "windows_1251") ? TextEncodingKind.Windows1251 : TextEncodingKind.Utf8;
+            TextEncodingKind? enc = TryBool(entry, "windows_1251") ? TextEncodingKind.Windows1251 : null;
             var position = entry.TryGetProperty("position", out var p) ? p : default;
             var range = position.ValueKind == JsonValueKind.Object && position.TryGetProperty("selection", out var sel) ? sel : default;
-            results.Add(new(filePath, enc, TryBool(entry, "view_as_log"), TryInt(range, "start", 0), Math.Max(0, TryInt(range, "end", 0) - TryInt(range, "start", 0)), TryLongNullable(position, "log", "offset"), TryLongDirectNullable(entry, "line_count"), TryLongDirectNullable(entry, "last_worked_ms")));
+            var start = LegacyByteIndex(range, "start", 0);
+            var end = LegacyByteIndex(range, "end", start);
+            var length = Math.Max(0, end - start);
+            var log = ReadLegacyLogBookmark(position);
+            if (log is not null)
+            {
+                log = log with { Encoding = enc };
+            }
+
+            results.Add(new RecentFileEntry(
+                filePath,
+                enc,
+                TryBool(entry, "view_as_log"),
+                start,
+                length,
+                log?.Offset ?? TryLongNullable(position, "log", "offset"),
+                TryLongDirectNullable(entry, "line_count"),
+                TryLongDirectNullable(entry, "last_worked_ms"),
+                TryBool(position, "reversed"),
+                ReadLegacyScroll(position, 0),
+                ReadLegacyScroll(position, 1),
+                TryBool(position, "json_validation_disabled"),
+                log,
+                SelectionUsesUtf8: true));
         }
         return results;
+    }
+
+    private static LogTabState? ReadLegacyLogBookmark(JsonElement position)
+    {
+        if (position.ValueKind != JsonValueKind.Object || !position.TryGetProperty("log", out var log)
+            || log.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        try
+        {
+            var state = JsonSerializer.Deserialize(log, StorageJsonContext.Default.LogTabState);
+            return state is null ? null : state with { HiddenOffset = TryLong(log, "hidden", state.HiddenOffset) };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static int LegacyByteIndex(JsonElement range, string name, int fallback)
+    {
+        var start = Math.Clamp(TryLong(range, name, fallback), 0, int.MaxValue);
+        return (int)start;
+    }
+
+    private static double ReadLegacyScroll(JsonElement item, int index)
+    {
+        var offset = TryArrayDouble(item, "scroll", index);
+        return double.IsFinite(offset) ? Math.Max(0, -offset) : 0;
     }
 
     private static string TryString(JsonElement element, string name, string fallback) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? fallback : fallback;
