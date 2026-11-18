@@ -27,18 +27,18 @@ use crate::{
 // GPUI builds one layout entry per logical line even when wrapping is off.
 const MAX_EDITOR_LINES: usize = 50_000;
 const MAX_EDITOR_LINE_BYTES: usize = 64 * 1024;
-const MAX_EDITOR_DRAFT_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_EDITOR_DRAFT_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Default)]
 struct EditorBudget {
-    bytes: usize,
+    bytes: u64,
     breaks: usize,
     line_bytes: usize,
 }
 
 impl EditorBudget {
     fn accepts(&mut self, bytes: &[u8]) -> bool {
-        self.bytes += bytes.len();
+        self.bytes += bytes.len() as u64;
         if self.bytes > MAX_EDITOR_DRAFT_BYTES {
             return false;
         }

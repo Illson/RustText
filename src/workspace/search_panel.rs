@@ -13,7 +13,10 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use super::{Document, Workspace};
+use super::{
+    Document, Workspace,
+    draft_recovery::{MAX_EDITOR_DRAFT_BYTES, Stage},
+};
 use crate::{
     appearance,
     search::{
@@ -908,7 +911,6 @@ enum SearchRecoveryState {
     Queued(u64),
     Loading,
     Failed,
-    Preview,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -921,16 +923,28 @@ enum RecoverySearchAction {
 fn search_recovery_states(
     documents: &[Document],
 ) -> impl Iterator<Item = SearchRecoveryState> + '_ {
-    use super::draft_recovery::Stage;
-
     documents.iter().filter_map(|doc| {
-        doc.recovery.as_ref().map(|recovery| match &recovery.stage {
-            Stage::Queued => SearchRecoveryState::Queued(doc.id),
-            Stage::Loading(_) => SearchRecoveryState::Loading,
-            Stage::Failed(_) => SearchRecoveryState::Failed,
-            Stage::Preview => SearchRecoveryState::Preview,
-        })
+        let recovery = doc.recovery.as_ref()?;
+        let draft_bytes = recovery.draft.as_ref().map(crate::session::Draft::byte_len);
+        search_recovery_state(doc.id, &recovery.stage, draft_bytes)
     })
+}
+
+fn search_recovery_state(
+    tab: u64,
+    stage: &Stage,
+    draft_bytes: Option<u64>,
+) -> Option<SearchRecoveryState> {
+    // A draft beyond the byte limit will open as a read-only preview.
+    if draft_bytes.is_some_and(|bytes| bytes > MAX_EDITOR_DRAFT_BYTES) {
+        return None;
+    }
+    match stage {
+        Stage::Queued => Some(SearchRecoveryState::Queued(tab)),
+        Stage::Loading(_) => Some(SearchRecoveryState::Loading),
+        Stage::Failed(_) => Some(SearchRecoveryState::Failed),
+        Stage::Preview => None,
+    }
 }
 
 fn recovery_search_action(
@@ -944,7 +958,7 @@ fn recovery_search_action(
             SearchRecoveryState::Loading => loading = true,
             SearchRecoveryState::Queued(id) if queued.is_none() => queued = Some(id),
             SearchRecoveryState::Failed => incomplete_tabs += 1,
-            SearchRecoveryState::Queued(_) | SearchRecoveryState::Preview => {}
+            SearchRecoveryState::Queued(_) => {}
         }
     }
     if loading {
@@ -952,8 +966,6 @@ fn recovery_search_action(
     } else if let Some(id) = queued {
         RecoverySearchAction::Start(id)
     } else {
-        // Read-only previews behave like ordinary log tabs and stay outside the
-        // search scope. Failed restores make editor search explicitly incomplete.
         RecoverySearchAction::Ready { incomplete_tabs }
     }
 }

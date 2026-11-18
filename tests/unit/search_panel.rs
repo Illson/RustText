@@ -1,6 +1,7 @@
 use super::{
-    RecoverySearchAction, SearchRecoveryState, invalidate_document_highlights,
-    recovery_search_action, sync_all_highlights, visible_highlight_tabs,
+    MAX_EDITOR_DRAFT_BYTES, RecoverySearchAction, SearchRecoveryState, Stage,
+    invalidate_document_highlights, recovery_search_action, search_recovery_state,
+    sync_all_highlights, visible_highlight_tabs,
 };
 use crate::layout::{Axis, Layout};
 
@@ -75,12 +76,29 @@ fn all_tabs_search_waits_for_an_active_restore_before_starting_another() {
 
 #[test]
 fn all_tabs_search_reports_failed_restores_but_treats_log_previews_as_logs() {
+    let failed = search_recovery_state(2, &Stage::Failed("Read error".into()), None);
+    let preview = search_recovery_state(3, &Stage::Preview, None);
     assert_eq!(
-        recovery_search_action([SearchRecoveryState::Failed, SearchRecoveryState::Preview,]),
+        recovery_search_action([failed, preview].into_iter().flatten()),
         RecoverySearchAction::Ready { incomplete_tabs: 1 },
     );
     assert_eq!(
-        recovery_search_action([SearchRecoveryState::Preview]),
+        recovery_search_action(preview),
+        RecoverySearchAction::Ready { incomplete_tabs: 0 },
+    );
+}
+
+#[test]
+fn all_tabs_search_skips_oversized_drafts_before_loading_them() {
+    let oversized = search_recovery_state(2, &Stage::Queued, Some(512 * 1024 * 1024));
+    let eligible = search_recovery_state(3, &Stage::Queued, Some(MAX_EDITOR_DRAFT_BYTES));
+
+    assert_eq!(
+        recovery_search_action([oversized, eligible].into_iter().flatten()),
+        RecoverySearchAction::Start(3),
+    );
+    assert_eq!(
+        recovery_search_action(oversized),
         RecoverySearchAction::Ready { incomplete_tabs: 0 },
     );
 }
