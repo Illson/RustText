@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
@@ -73,9 +74,9 @@ internal sealed class LogView : UserControl, IDisposable
         Foreground = FocusTheme.Text,
         BorderBrush = FocusTheme.Border,
     };
-    private readonly TextBox _searchBox = new() { PlaceholderText = "Текст или регулярное выражение" };
-    private readonly CheckBox _regexBox = new() { Content = "Регулярное выражение" };
-    private readonly CheckBox _caseBox = new() { Content = "Учитывать регистр" };
+    private readonly TextBox _searchBox = new() { PlaceholderText = "Найти в логе" };
+    private readonly CheckBox _regexBox = new() { Content = ".*" };
+    private readonly CheckBox _caseBox = new() { Content = "Aa" };
     private readonly CheckBox _wholeWordBox = new() { Content = "Целое слово" };
     private readonly Button _pauseButton = new();
     private readonly Button _followButton = new();
@@ -89,7 +90,7 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly Button _revealButton = new() { Content = "Показать весь файл" };
     private readonly Button _trimButton = new() { Content = "Удалить начало…" };
     private readonly Button _cancelTrimButton = new() { Content = "Отменить обрезку", IsVisible = false };
-    private readonly Button _searchCloseButton = new() { Content = "Закрыть поиск" };
+    private readonly Button _searchCloseButton = new() { Content = "×" };
     private readonly Button _timeButton = new() { Content = "Ко времени" };
     private readonly Button _previousButton = new() { Content = "Назад" };
     private readonly Button _nextButton = new() { Content = "Дальше" };
@@ -415,6 +416,7 @@ internal sealed class LogView : UserControl, IDisposable
         var searchRow = new WrapPanel
         {
             Orientation = Orientation.Horizontal,
+            ItemSpacing = 4,
         };
         _searchBox.MinWidth = 180;
         _searchBox.FontSize = 12;
@@ -425,6 +427,10 @@ internal sealed class LogView : UserControl, IDisposable
         _regexBox.FontSize = 12;
         _caseBox.FontSize = 12;
         _wholeWordBox.FontSize = 12;
+        AutomationProperties.SetName(_regexBox, "Регулярное выражение");
+        ToolTip.SetTip(_regexBox, "Регулярное выражение");
+        AutomationProperties.SetName(_caseBox, "Учитывать регистр");
+        ToolTip.SetTip(_caseBox, "Учитывать регистр");
         searchRow.Children.Add(_searchBox);
         searchRow.Children.Add(_regexBox);
         searchRow.Children.Add(_caseBox);
@@ -435,7 +441,9 @@ internal sealed class LogView : UserControl, IDisposable
         SetButtonStyle(_searchButton, "focus-primary");
         SetButtonStyle(_moreButton, "focus-quiet");
         SetButtonStyle(_cancelSearchButton, "focus-quiet");
-        SetButtonStyle(_searchCloseButton, "focus-quiet");
+        SetButtonStyle(_searchCloseButton, "focus-icon");
+        AutomationProperties.SetName(_searchCloseButton, "Закрыть поиск");
+        ToolTip.SetTip(_searchCloseButton, "Закрыть поиск");
         searchRow.Children.Add(_searchButton);
         searchRow.Children.Add(_moreButton);
         searchRow.Children.Add(_cancelSearchButton);
@@ -448,6 +456,7 @@ internal sealed class LogView : UserControl, IDisposable
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
         };
+        root.SizeChanged += (_, e) => searchResults.MaxHeight = Math.Clamp(e.NewSize.Height / 5, 40, 90);
         _searchPanel.Children.Add(searchResults);
         Grid.SetRow(_searchPanel, 2);
         root.Children.Add(_searchPanel);
