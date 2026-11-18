@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use gpui_kit::{
@@ -20,10 +21,14 @@ use crate::{
 };
 
 const PAGE_SIZE: usize = 40;
+const MINUTE_MS: u64 = 60_000;
+const HOUR_MS: u64 = 60 * MINUTE_MS;
+const DAY_MS: u64 = 24 * HOUR_MS;
 
 pub(super) struct Home {
     query: Entity<InputState>,
     page: usize,
+    refresh: Option<(u64, Task<()>)>,
     _change: Subscription,
     pub(super) open: bool,
     pub(super) positions: HashMap<PathBuf, RecentPosition>,
@@ -46,6 +51,7 @@ impl Home {
         Self {
             query,
             page: 0,
+            refresh: None,
             _change: change,
             open: false,
             positions: HashMap::new(),
@@ -55,6 +61,33 @@ impl Home {
             close_pending: false,
             close_recorded: false,
         }
+    }
+
+    pub(super) fn stop_refresh(&mut self) {
+        self.refresh = None;
+    }
+
+    fn schedule_refresh(
+        &mut self,
+        deadline: Option<u64>,
+        now_ms: u64,
+        cx: &mut Context<Workspace>,
+    ) {
+        if self.refresh.as_ref().map(|(deadline, _)| *deadline) == deadline {
+            return;
+        }
+        self.refresh = deadline.map(|deadline| {
+            let delay = Duration::from_millis(deadline.saturating_sub(now_ms));
+            let executor = cx.background_executor().clone();
+            let task = cx.spawn(async move |this, cx| {
+                executor.timer(delay).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.home.stop_refresh();
+                    cx.notify();
+                });
+            });
+            (deadline, task)
+        });
     }
 }
 
@@ -237,7 +270,7 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn home_page(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn home_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let now_ms = now_millis();
         let query = self.home.query.read(cx).value().to_lowercase();
         let entries: Vec<_> = self
@@ -259,6 +292,13 @@ impl Workspace {
                 entry.is_draft && (query.is_empty() || entry.label.to_lowercase().contains(&query))
             })
             .collect();
+        let visible_entries = entries.iter().skip(start).take(PAGE_SIZE);
+        let timestamps = visible_entries
+            .clone()
+            .filter_map(|entry| entry.last_worked_ms)
+            .chain(drafts.iter().filter_map(|entry| entry.last_worked_ms));
+        self.home
+            .schedule_refresh(next_history_refresh(timestamps, now_ms), now_ms, cx);
         div()
             .size_full()
             .p_4()
@@ -329,45 +369,43 @@ impl Workspace {
                         })
                         .text_color(rgb(appearance::MUTED))
                     }))
-                    .children(entries.iter().skip(start).take(PAGE_SIZE).enumerate().map(
-                        |(index, entry)| {
-                            let entry = (*entry).clone();
-                            let path = display_path(&entry.path);
-                            let name = file_name(&entry.path);
-                            let meta = history_meta(entry.line_count, entry.last_worked_ms, now_ms);
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .min_w_0()
-                                .child(
-                                    Button::new(("home-file", start + index))
-                                        .small()
-                                        .ghost()
-                                        .label(name)
-                                        .tooltip(path.clone())
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.open_recent(entry.clone(), window, cx)
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_sm()
-                                        .text_color(rgb(appearance::MUTED))
-                                        .child(Label::new(path).truncate()),
-                                )
-                                .children((!meta.is_empty()).then(|| {
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_sm()
-                                        .text_color(rgb(appearance::MUTED))
-                                        .child(Label::new(meta))
-                                }))
-                        },
-                    ))
+                    .children(visible_entries.enumerate().map(|(index, entry)| {
+                        let entry = (*entry).clone();
+                        let path = display_path(&entry.path);
+                        let name = file_name(&entry.path);
+                        let meta = history_meta(entry.line_count, entry.last_worked_ms, now_ms);
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                Button::new(("home-file", start + index))
+                                    .small()
+                                    .ghost()
+                                    .label(name)
+                                    .tooltip(path.clone())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_recent(entry.clone(), window, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_sm()
+                                    .text_color(rgb(appearance::MUTED))
+                                    .child(Label::new(path).truncate()),
+                            )
+                            .children((!meta.is_empty()).then(|| {
+                                div()
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .text_color(rgb(appearance::MUTED))
+                                    .child(Label::new(meta))
+                            }))
+                    }))
                     .children(
                         (!drafts.is_empty()).then(|| Label::new("Закрытые черновики").text_lg()),
                     )
@@ -460,16 +498,30 @@ pub(super) fn history_meta(
 }
 
 pub(crate) fn format_last_worked(last_worked_ms: u64, now_ms: u64) -> String {
-    let seconds = now_ms.saturating_sub(last_worked_ms) / 1000;
-    if seconds < 60 {
+    let age = now_ms.saturating_sub(last_worked_ms);
+    if age < MINUTE_MS {
         "только что".to_owned()
-    } else if seconds < 3600 {
-        format!("{} мин назад", seconds / 60)
-    } else if seconds < 86_400 {
-        format!("{} ч назад", seconds / 3600)
+    } else if age < HOUR_MS {
+        format!("{} мин назад", age / MINUTE_MS)
+    } else if age < DAY_MS {
+        format!("{} ч назад", age / HOUR_MS)
     } else {
         format_local_datetime(last_worked_ms)
     }
+}
+
+fn next_history_refresh(timestamps: impl Iterator<Item = u64>, now_ms: u64) -> Option<u64> {
+    timestamps
+        .filter_map(|timestamp| {
+            let age = now_ms.saturating_sub(timestamp);
+            let interval = match age {
+                ..HOUR_MS => MINUTE_MS,
+                HOUR_MS..DAY_MS => HOUR_MS,
+                _ => return None,
+            };
+            Some(now_ms.saturating_add(interval - age % interval))
+        })
+        .min()
 }
 
 fn format_local_datetime(epoch_ms: u64) -> String {
