@@ -1,0 +1,57 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Windows Rust checks
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0-x86_64-pc-windows-msvc
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt --component clippy
+
+      # Добавленный шаг кеширования
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Test DirectWrite without Factory5
+        run: cargo test --locked -p gpui-pre-windows --lib direct_write::tests::build_14393_font_path_does_not_need_factory5 -- --exact
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build portable Windows executable
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Check portable Windows executable imports
+        run: ./tools/Check-ReleaseImports.ps1 -ExecutablePath target/x86_64-pc-windows-msvc/release/rusttext.exe

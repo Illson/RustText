@@ -1,4 +1,9 @@
 /target/
+/src/RustText/bin/
+/src/RustText/obj/
+/tests/RustText.Tests/bin/
+/tests/RustText.Tests/obj/
+/tests/RustText.Tests/TestResults/
 /prototype/avalonia/bin/
 /prototype/avalonia/obj/
 /prototype/avalonia.tests/bin/

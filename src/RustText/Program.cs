@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using Avalonia;
 using RustText.Demo.Platform;
@@ -61,6 +62,18 @@ internal static class Program
 
         try
         {
+            try
+            {
+                NativePayloadBootstrap.EnsureLoaded();
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or PlatformNotSupportedException
+                or System.ComponentModel.Win32Exception or DllNotFoundException or BadImageFormatException
+                or System.Security.SecurityException or CryptographicException)
+            {
+                Console.Error.WriteLine($"Не удалось подготовить графические библиотеки RustText. {error.Message}");
+                return 1;
+            }
+
             return AppBuilder.Configure<App>()
                 .UsePlatformDetect()
                 .StartWithClassicDesktopLifetime(args);
