@@ -800,8 +800,9 @@ impl Render for Workspace {
         let root = self.layout.root.clone();
         let showing_home = self.showing_home();
         let body = if showing_home {
-            self.home_page(window, cx)
+            self.home_page(cx)
         } else {
+            self.home.stop_refresh();
             self.group_tree(&root, window.viewport_size(), window, cx)
         };
         let json_banner = (!showing_home)

@@ -405,3 +405,28 @@ fn persists_line_count_and_last_worked_timestamp_with_legacy_compatibility() {
     assert_eq!(recent.entries()[0].line_count, Some(345));
     assert_eq!(recent.entries()[0].last_worked_ms, Some(1_700_000_000_000));
 }
+
+#[test]
+fn position_update_without_line_count_preserves_existing_history_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recent-files.json");
+    let file = dir.path().join("unavailable.txt");
+    let mut recent = RecentFiles {
+        path: Some(path),
+        ..RecentFiles::default()
+    };
+
+    let mut existing = RecentFile::new(file.clone(), TextEncoding::Utf8);
+    existing.line_count = Some(27);
+    existing.last_worked_ms = Some(1_700_000_000_000);
+    recent.record([existing]).unwrap();
+
+    let mut placeholder = RecentFile::new(file, TextEncoding::Utf8);
+    placeholder.position = Some(RecentPosition::default());
+    recent.update_entry_in_memory(&placeholder);
+    assert_eq!(recent.entries()[0].line_count, Some(27));
+    recent.record_positions(vec![placeholder]).unwrap();
+
+    recent.reload().unwrap();
+    assert_eq!(recent.entries()[0].line_count, Some(27));
+}

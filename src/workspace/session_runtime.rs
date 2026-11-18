@@ -68,6 +68,8 @@ impl Document {
             scroll,
             draft_revision: include_draft.then_some(self.revision),
             log: self.log.as_ref().map(|log| log.read(cx).bookmark()),
+            line_count: None,
+            last_worked_ms: None,
         };
         if !include_draft {
             return (tab, None, None);

@@ -25,6 +25,7 @@ pub(crate) use associations::register_for_current_user;
 pub(crate) use view::bind_keys;
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
@@ -66,10 +67,87 @@ struct Document {
     _subscriptions: [Subscription; 2],
 }
 
+impl Document {
+    fn history_line_count(&self, cx: &App) -> Option<u64> {
+        available_history_line_count(self.placeholder, || {
+            if let Some(log) = &self.log {
+                return log.read(cx).total_line_count();
+            }
+            let text = self
+                .saved_text
+                .as_ref()
+                .filter(|_| self.file.is_some())
+                .unwrap_or_else(|| self.editor.read(cx).text());
+            Some(home::text_line_count(text))
+        })
+    }
+}
+
+fn available_history_line_count(
+    placeholder: bool,
+    count: impl FnOnce() -> Option<u64>,
+) -> Option<u64> {
+    if placeholder { None } else { count() }
+}
+
 struct ClosedTab {
     tab: Tab,
     draft: Option<Rope>,
     digest: Option<crate::session::DraftDigest>,
+}
+
+struct ClosedTabEntry {
+    id: u64,
+    label: String,
+    line_count: Option<u64>,
+    last_worked_ms: Option<u64>,
+}
+
+fn closed_tab_entries<'a>(
+    closed: impl Iterator<Item = &'a ClosedTab> + 'a,
+    recent: &'a [RecentFile],
+    untitled_tab_limit: usize,
+) -> impl Iterator<Item = ClosedTabEntry> + 'a {
+    let mut recent_by_path = None;
+    closed.map(move |entry| {
+        let tab = &entry.tab;
+        let label = if let Some(file) = &tab.file {
+            home::history_file_label(&file.path)
+        } else {
+            entry.draft.as_ref().map_or_else(
+                || "Без имени".to_owned(),
+                |draft| untitled_tab_name_rope(draft, untitled_tab_limit),
+            )
+        };
+        let fallback = tab
+            .file
+            .as_ref()
+            .filter(|_| tab.line_count.is_none() || tab.last_worked_ms.is_none())
+            .and_then(|file| {
+                recent_by_path
+                    .get_or_insert_with(|| {
+                        // Keep the first match, as RecentFiles::entry does.
+                        recent
+                            .iter()
+                            .rev()
+                            .map(|entry| (entry.path.as_path(), entry))
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .get(file.path.as_path())
+                    .copied()
+            });
+        ClosedTabEntry {
+            id: tab.id,
+            label,
+            line_count: tab
+                .line_count
+                .or_else(|| fallback.and_then(|recent| recent.line_count))
+                .or_else(|| entry.draft.as_ref().map(home::text_line_count)),
+            last_worked_ms: tab
+                .last_worked_ms
+                .or_else(|| fallback.and_then(|recent| recent.last_worked_ms)),
+        }
+    })
 }
 
 pub(crate) struct Workspace {
@@ -447,7 +525,9 @@ impl Workspace {
         self.remember_activity(id, window, cx);
         let doc = self.documents.remove(index);
         self.layout.remove(id);
-        let (tab, draft, digest) = doc.session_snapshot_with_digest(doc.file.is_none(), cx);
+        let (mut tab, draft, digest) = doc.session_snapshot_with_digest(doc.file.is_none(), cx);
+        tab.line_count = doc.history_line_count(cx);
+        tab.last_worked_ms = Some(crate::recent_files::now_millis());
         if self.closed.len() == MAX_CLOSED_TABS {
             self.closed.remove(0);
         }
@@ -468,24 +548,6 @@ impl Workspace {
         if let Some(entry) = self.closed.last() {
             self.reopen_closed_tab(entry.tab.id, window, cx);
         }
-    }
-
-    fn closed_tab_entries(&self) -> Vec<(u64, String)> {
-        self.closed
-            .iter()
-            .rev()
-            .map(|entry| {
-                let label = if let Some(file) = &entry.tab.file {
-                    display_path(&file.path)
-                } else {
-                    entry.draft.as_ref().map_or_else(
-                        || "Без имени".to_owned(),
-                        |draft| untitled_tab_name_rope(draft, self.settings.untitled_tab_limit),
-                    )
-                };
-                (entry.tab.id, label)
-            })
-            .collect()
     }
 
     fn reopen_closed_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -623,3 +685,7 @@ fn recent_warning(error: std::io::Error) -> SharedString {
 fn settings_warning(error: std::io::Error) -> SharedString {
     format!("Настройки недоступны. {error}").into()
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/workspace_history.rs"]
+mod history_tests;
