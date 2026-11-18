@@ -2,7 +2,7 @@ use std::{path::Path, time::Duration};
 
 use gpui_kit::{
     base::input::{Diagnostic, DiagnosticSeverity},
-    component::input::Position,
+    component::input::{Position, Rope},
     *,
 };
 use serde::de::IgnoredAny;
@@ -42,6 +42,13 @@ pub(super) fn should_validate(path: Option<&Path>, mut source: impl Iterator<Ite
 
 fn validation_is_current(disabled: bool, generation: u64, expected_generation: u64) -> bool {
     !disabled && generation == expected_generation
+}
+
+pub(super) fn validate_rope(source: &Rope) -> Status {
+    if source.len() > MAX_JSON_BYTES {
+        return Status::TooLarge;
+    }
+    validate(&source.to_string())
 }
 
 pub(super) fn validate(source: &str) -> Status {
@@ -187,9 +194,13 @@ impl Workspace {
             let Some(snapshot) = snapshot else {
                 return;
             };
-            let result = validation_executor
-                .spawn(async move { validate(&snapshot.to_string()) })
-                .await;
+            let result = if snapshot.len() > MAX_JSON_BYTES {
+                Status::TooLarge
+            } else {
+                validation_executor
+                    .spawn(async move { validate_rope(&snapshot) })
+                    .await
+            };
             let _ = this.update(cx, |workspace, cx| {
                 let Some(doc) = workspace.documents.iter_mut().find(|doc| {
                     doc.id == id

@@ -31,6 +31,7 @@ fn queues_the_final_state_even_when_it_matches_the_last_completed_write() {
         last_saved: Some(capture(1080.0).state),
         revision: 0,
         in_flight: false,
+        pending_view: None,
     };
     assert!(writer.queue(capture(1080.0)).is_none());
 
@@ -41,4 +42,155 @@ fn queues_the_final_state_even_when_it_matches_the_last_completed_write() {
         .expect("superseding shutdown capture");
     assert_eq!(shutdown.capture.state.window.width, 1080.0);
     assert!(shutdown.revision > older.revision);
+}
+
+#[test]
+fn view_only_changes_wait_for_quiet_window_and_flush_on_shutdown() {
+    use super::{DraftDigest, VIEW_SAVE_QUIET};
+    use crate::session::Tab;
+    use crate::text_format::TextFormat;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Journal::open(dir.path().to_path_buf()).unwrap();
+    let mut base = capture(1080.0);
+    base.state.tabs.push(Tab {
+        json_validation_disabled: false,
+        id: 1,
+        file: None,
+        format: TextFormat::default(),
+        selection: 0..0,
+        reversed: false,
+        scroll: [0.0, 0.0],
+        draft_revision: Some(1),
+        log: None,
+    });
+    base.drafts
+        .push(Some(gpui_kit::component::input::Rope::from("text")));
+
+    let mut writer = SessionWriter {
+        journal: Arc::new(Mutex::new(journal)),
+        last_saved: Some(base.state.clone()),
+        revision: 0,
+        in_flight: false,
+        pending_view: None,
+    };
+
+    let t0 = Instant::now();
+    let mut scrolled = capture(1080.0);
+    scrolled.state = base.state.clone();
+    scrolled.drafts = base.drafts.clone();
+    scrolled.state.tabs[0].scroll = [0.0, -500.0];
+    scrolled.state.tabs[0].selection = 2..2;
+    let digests = vec![Some(DraftDigest::from_rope(
+        scrolled.drafts[0].as_ref().unwrap(),
+    ))];
+
+    // First observation of view-only change starts the quiet timer.
+    assert!(
+        writer
+            .queue_prepared(
+                Capture {
+                    state: scrolled.state.clone(),
+                    drafts: scrolled.drafts.clone(),
+                    closed_drafts: vec![],
+                },
+                digests.clone(),
+                vec![],
+                false,
+                t0,
+            )
+            .is_none()
+    );
+    // Still inside the quiet window.
+    assert!(
+        writer
+            .queue_prepared(
+                Capture {
+                    state: scrolled.state.clone(),
+                    drafts: scrolled.drafts.clone(),
+                    closed_drafts: vec![],
+                },
+                digests.clone(),
+                vec![],
+                false,
+                t0 + VIEW_SAVE_QUIET - Duration::from_millis(100),
+            )
+            .is_none()
+    );
+    // Continuous scrolling resets the timer.
+    let mut scrolled_further = scrolled.state.clone();
+    scrolled_further.tabs[0].scroll = [0.0, -900.0];
+    assert!(
+        writer
+            .queue_prepared(
+                Capture {
+                    state: scrolled_further.clone(),
+                    drafts: scrolled.drafts.clone(),
+                    closed_drafts: vec![],
+                },
+                digests.clone(),
+                vec![],
+                false,
+                t0 + VIEW_SAVE_QUIET,
+            )
+            .is_none()
+    );
+    // Once quiet elapses after the last change, the view write queues.
+    let queued = writer
+        .queue_prepared(
+            Capture {
+                state: scrolled_further.clone(),
+                drafts: scrolled.drafts.clone(),
+                closed_drafts: vec![],
+            },
+            digests.clone(),
+            vec![],
+            false,
+            t0 + VIEW_SAVE_QUIET + VIEW_SAVE_QUIET,
+        )
+        .expect("quiet window elapsed");
+    assert_eq!(queued.capture.state.tabs[0].scroll, [0.0, -900.0]);
+    writer.in_flight = false;
+    writer.last_saved = Some(scrolled_further.clone());
+
+    // Content change queues immediately without waiting for the quiet window.
+    let mut edited = scrolled_further.clone();
+    edited.tabs[0].draft_revision = Some(2);
+    assert!(
+        writer
+            .queue_prepared(
+                Capture {
+                    state: edited.clone(),
+                    drafts: scrolled.drafts.clone(),
+                    closed_drafts: vec![],
+                },
+                digests.clone(),
+                vec![],
+                false,
+                t0 + VIEW_SAVE_QUIET + VIEW_SAVE_QUIET + Duration::from_millis(10),
+            )
+            .is_some()
+    );
+    writer.in_flight = false;
+    writer.last_saved = Some(edited.clone());
+
+    // Shutdown flushes a fresh view-only change immediately.
+    let mut final_scroll = edited;
+    final_scroll.tabs[0].scroll = [0.0, -1200.0];
+    assert!(
+        writer
+            .queue_prepared(
+                Capture {
+                    state: final_scroll,
+                    drafts: scrolled.drafts,
+                    closed_drafts: vec![],
+                },
+                digests,
+                vec![],
+                true,
+                t0 + VIEW_SAVE_QUIET + VIEW_SAVE_QUIET + Duration::from_millis(20),
+            )
+            .is_some()
+    );
 }

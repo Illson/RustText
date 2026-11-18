@@ -21,6 +21,20 @@ fn untitled_tab_name_uses_first_line_up_to_char_limit_and_falls_back_when_empty(
     assert_eq!(untitled_tab_name("абвгдеёжзийкл", 5), "абвгд");
     let rope = Rope::from("Первая длинная строка\nВторая строка");
     assert_eq!(untitled_tab_name_rope(&rope, 10), "Первая дли");
+    let huge_spaces = format!("   {}   \nхвост", "а".repeat(1_200_000));
+    assert_eq!(
+        untitled_tab_name_rope(&Rope::from(huge_spaces.as_str()), 6),
+        "аааааа"
+    );
+    assert_eq!(
+        untitled_tab_name_rope(&Rope::from("   аб   \nвторая"), 10),
+        "аб"
+    );
+    assert_eq!(
+        untitled_tab_name_rope(&Rope::from("  аб   вг  "), 5),
+        "аб   "
+    );
+    assert_eq!(untitled_tab_name_rope(&Rope::from("  аб       "), 5), "аб");
 }
 
 #[test]

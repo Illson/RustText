@@ -292,3 +292,37 @@ fn unchanged_projection_does_no_caret_probes_and_geometry_or_edit_changes_invali
     next_generation.get(stamp, project);
     assert_eq!(probes.get(), stamp.len() + 2);
 }
+
+#[test]
+fn visible_display_row_range_keeps_row_precision_past_f32_cliff() {
+    let line_height = gpui_kit::px(22.5);
+    let viewport_height = gpui_kit::px(700.0);
+    let deep_scroll = -210_000_000.0;
+    let start_row = (210_000_000.0_f64 / 22.5).floor() as usize;
+
+    let base = super::visible_display_row_range(
+        deep_scroll,
+        gpui_kit::px(0.0),
+        viewport_height,
+        line_height,
+    );
+    assert_eq!(base.start, start_row);
+    assert!(base.end > base.start + 30);
+
+    // Small 4 px step at -210M px is lost in f32, but crosses the exact row boundary in f64.
+    let next_row_edge = -((start_row + 1) as f64) * 22.5;
+    let before = super::visible_display_row_range(
+        next_row_edge + 2.0,
+        gpui_kit::px(0.0),
+        viewport_height,
+        line_height,
+    );
+    let after = super::visible_display_row_range(
+        next_row_edge - 2.0,
+        gpui_kit::px(0.0),
+        viewport_height,
+        line_height,
+    );
+    assert_eq!(before.start, start_row);
+    assert_eq!(after.start, start_row + 1);
+}
