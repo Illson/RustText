@@ -2,14 +2,15 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="RustText.Demo.MainWindow"
         Title="RustText · Демо"
-        Width="820" Height="580" MinWidth="480" MinHeight="380"
+        Width="1080" Height="700" MinWidth="480" MinHeight="380"
         WindowStartupLocation="CenterScreen"
         Background="#111820" Foreground="#E9F0F6">
-    <Grid Margin="28,24" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="16">
+    <Grid Margin="28,24" RowDefinitions="Auto,Auto,Auto,*,Auto" RowSpacing="12">
         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
             <StackPanel Spacing="5">
                 <TextBlock Text="Журнал событий" FontSize="28" FontWeight="SemiBold" />
-                <TextBlock Text="Демонстрационные данные" Foreground="#A4B3C2" />
+                <TextBlock x:Name="FileLabel" Text="Демонстрационные данные"
+                           TextTrimming="CharacterEllipsis" Foreground="#A4B3C2" />
             </StackPanel>
             <Border Grid.Column="1" VerticalAlignment="Top"
                     Background="#192B39" CornerRadius="6" Padding="10,5">
@@ -17,12 +18,21 @@
             </Border>
         </Grid>
 
-        <TextBox x:Name="SearchBox" Grid.Row="1"
-                 AutomationProperties.Name="Фильтр журнала"
-                 PlaceholderText="Фильтр по тексту, например WARN" PlaceholderForeground="#A4B3C2"
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
+            <Button x:Name="OpenButton" Content="Открыть лог…" Click="OnOpenClicked" />
+            <Button x:Name="StartButton" Content="В начало" Click="OnStartClicked" IsEnabled="False" />
+            <Button x:Name="PreviousButton" Content="Назад" Click="OnPreviousClicked" IsEnabled="False" />
+            <Button x:Name="NextButton" Content="Дальше" Click="OnNextClicked" IsEnabled="False" />
+            <Button x:Name="MiddleButton" Content="50%" Click="OnMiddleClicked" IsEnabled="False"
+                    AutomationProperties.Name="К середине файла" ToolTip.Tip="К середине файла" />
+        </StackPanel>
+
+        <TextBox x:Name="SearchBox" Grid.Row="2"
+                 AutomationProperties.Name="Фильтр текущей страницы"
+                 PlaceholderText="Фильтр по текущей странице" PlaceholderForeground="#A4B3C2"
                  Background="#17212B" BorderBrush="#364756" />
 
-        <TextBox x:Name="LogBox" Grid.Row="2"
+        <TextBox x:Name="LogBox" Grid.Row="3"
                  AutomationProperties.Name="Строки журнала"
                  IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
@@ -31,6 +41,13 @@
                  FontFamily="Consolas, monospace" FontSize="14"
                  Padding="14,12" Background="#0C131A" BorderBrush="#364756" />
 
-        <TextBlock x:Name="CountLabel" Grid.Row="3" Foreground="#A4B3C2" />
+        <StackPanel Grid.Row="4" Spacing="4">
+            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14">
+                <TextBlock x:Name="CountLabel" Foreground="#A4B3C2" />
+                <TextBlock x:Name="PositionLabel" Grid.Column="1" Foreground="#A4B3C2"
+                           HorizontalAlignment="Right" TextTrimming="CharacterEllipsis" />
+            </Grid>
+            <TextBlock x:Name="NoticeLabel" IsVisible="False" TextWrapping="Wrap" />
+        </StackPanel>
     </Grid>
 </Window>
