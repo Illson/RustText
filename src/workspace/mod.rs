@@ -57,7 +57,7 @@ struct Document {
     json_status: Option<json_validation::Status>,
     json_validation_disabled: bool,
     json_validation_generation: u64,
-    restored_scroll: Option<[f32; 2]>,
+    restored_scroll: Option<[f64; 2]>,
     log: Option<Entity<LogViewer>>,
     _subscriptions: [Subscription; 2],
 }

@@ -23,6 +23,8 @@ pub(crate) struct ScrollbarMetrics {
     pub(crate) viewport: Bounds<Pixels>,
     pub(crate) content: Size<Pixels>,
     pub(crate) offset: Point<Pixels>,
+    pub(crate) content_height_f64: f64,
+    pub(crate) scroll_y_f64: f64,
 }
 
 impl ScrollbarMetrics {
@@ -31,6 +33,8 @@ impl ScrollbarMetrics {
             viewport: scroll.viewport_bounds(),
             content: scroll.content_size(),
             offset: scroll.offset(),
+            content_height_f64: scroll.content_height_f64(),
+            scroll_y_f64: scroll.scroll_y_f64(),
         }
     }
 }
@@ -248,6 +252,40 @@ fn drag_fraction(pointer_y: f32, grab_offset: f32, height: f32, thumb_height: f3
     ((pointer_y - grab_offset) / travel).clamp(0., 1.)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StripThumbLayout {
+    range_f64: f64,
+    thumb_height: f32,
+    thumb_top: f32,
+}
+
+fn strip_thumb_layout(
+    content_height_f64: f64,
+    scroll_y_f64: f64,
+    viewport_height: f32,
+) -> StripThumbLayout {
+    let height = viewport_height.max(1.);
+    let range_f64 = (content_height_f64 - f64::from(viewport_height)).max(0.0);
+    let thumb_height = ((f64::from(height) * f64::from(height))
+        / content_height_f64.max(f64::from(height))) as f32;
+    let thumb_height = thumb_height.clamp(24_f32.min(height), height);
+    let travel = (height - thumb_height).max(1.);
+    let fraction = if range_f64 > 0.0 {
+        (-scroll_y_f64 / range_f64).clamp(0.0, 1.0) as f32
+    } else {
+        0.
+    };
+    StripThumbLayout {
+        range_f64,
+        thumb_height,
+        thumb_top: fraction * travel,
+    }
+}
+
+fn seek_scroll_y(fraction: f32, range_f64: f64) -> f64 {
+    -range_f64 * f64::from(fraction.clamp(0., 1.))
+}
+
 fn render_strip(
     bounds: Bounds<Pixels>,
     metrics: Option<ScrollbarMetrics>,
@@ -259,19 +297,22 @@ fn render_strip(
         .map(|metrics| f32::from(metrics.viewport.size.height))
         .unwrap_or_else(|| f32::from(bounds.size.height))
         .max(1.);
-    let (range, thumb_height, thumb_top) = if let Some(metrics) = metrics {
-        let range = (metrics.content.height - metrics.viewport.size.height).max(px(0.));
-        let thumb_height = (height * height / f32::from(metrics.content.height).max(height))
-            .clamp(24_f32.min(height), height);
-        let travel = (height - thumb_height).max(1.);
-        let fraction = if range > px(0.) {
-            (-f32::from(metrics.offset.y) / f32::from(range)).clamp(0., 1.)
-        } else {
-            0.
-        };
-        (range, thumb_height, fraction * travel)
+    let StripThumbLayout {
+        range_f64,
+        thumb_height,
+        thumb_top,
+    } = if let Some(metrics) = metrics {
+        strip_thumb_layout(
+            metrics.content_height_f64,
+            metrics.scroll_y_f64,
+            f32::from(metrics.viewport.size.height),
+        )
     } else {
-        (px(0.), height, 0.)
+        StripThumbLayout {
+            range_f64: 0.0,
+            thumb_height: height,
+            thumb_top: 0.,
+        }
     };
     let handle = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -283,7 +324,7 @@ fn render_strip(
             let scroll_target = editor.clone();
             let scroll_hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
-                if !phase.capture() || !scroll_hitbox.is_hovered(window) || range <= px(0.) {
+                if !phase.capture() || !scroll_hitbox.is_hovered(window) || range_f64 <= 0.0 {
                     return;
                 }
                 let delta = event.delta.pixel_delta(px(20.));
@@ -291,11 +332,7 @@ fn render_strip(
                     return;
                 }
                 let _ = scroll_target.update(cx, |editor, cx| {
-                    let offset = editor.scroll_offset();
-                    let next_y = (offset.y + delta.y).clamp(-range, px(0.));
-                    if (next_y - offset.y).abs() > px(0.1) {
-                        editor.set_scroll_offset(point(offset.x, next_y), cx);
-                    }
+                    editor.scroll_by_y_f64(f64::from(f32::from(delta.y)), cx);
                 });
                 cx.stop_propagation();
             });
@@ -313,7 +350,7 @@ fn render_strip(
                     seek(
                         &target,
                         drag_fraction(pointer_y, grab_offset, height, thumb_height),
-                        range,
+                        range_f64,
                         cx,
                     );
                     cx.stop_propagation();
@@ -334,7 +371,7 @@ fn render_strip(
                     seek(
                         &target,
                         drag_fraction(pointer_y, grab_offset, height, thumb_height),
-                        range,
+                        range_f64,
                         cx,
                     );
                 }
@@ -371,10 +408,9 @@ fn render_strip(
         .child(handle)
 }
 
-fn seek(editor: &WeakEntity<EditorState>, fraction: f32, range: Pixels, cx: &mut App) {
+fn seek(editor: &WeakEntity<EditorState>, fraction: f32, range_f64: f64, cx: &mut App) {
     let _ = editor.update(cx, |editor, cx| {
-        let x = editor.scroll_offset().x;
-        editor.set_scroll_offset(point(x, px(-f32::from(range) * fraction.clamp(0., 1.))), cx);
+        editor.set_scroll_y_f64(seek_scroll_y(fraction, range_f64), cx);
     });
 }
 

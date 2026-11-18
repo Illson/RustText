@@ -1,4 +1,7 @@
-use super::{SAMPLE_BYTES, SAMPLES, drag_fraction, sample_file, sample_offset, thumb_grab_offset};
+use super::{
+    SAMPLE_BYTES, SAMPLES, drag_fraction, sample_file, sample_offset, seek_scroll_y,
+    strip_thumb_layout, thumb_grab_offset,
+};
 use crate::text_format::TextEncoding;
 
 #[test]
@@ -67,5 +70,34 @@ fn thumb_drag_preserves_grab_offset_and_track_click_centers_thumb() {
     assert_eq!(
         drag_fraction(120.0, thumb_grab_offset(120.0, 0.0, height), height, height),
         0.0
+    );
+}
+
+#[test]
+fn strip_layout_and_seek_stay_precise_past_f32_cliff() {
+    let content_height_f64 = 250_000_000.0;
+    let viewport_height = 700.0;
+    let scroll_y_f64 = -210_000_000.0;
+
+    let layout = strip_thumb_layout(content_height_f64, scroll_y_f64, viewport_height);
+    assert_eq!(layout.range_f64, content_height_f64 - 700.0);
+    assert_eq!(layout.thumb_height, 24.0);
+    let travel = viewport_height - layout.thumb_height;
+    let expected_fraction = (210_000_000.0 / (250_000_000.0 - 700.0)) as f32;
+    assert!((layout.thumb_top - expected_fraction * travel).abs() < 1e-3);
+
+    // Sub-ULP f32 delta (-4 px at -210M px) stays distinct in f64 before scroll_by_y_f64.
+    let delta = f64::from(f32::from(gpui_kit::px(-4.0)));
+    assert_eq!(delta, -4.0);
+    assert_eq!(scroll_y_f64 + delta, -210_000_004.0);
+
+    assert_eq!(seek_scroll_y(0.0, layout.range_f64), 0.0);
+    assert_eq!(
+        seek_scroll_y(0.5, layout.range_f64),
+        -(content_height_f64 - 700.0) * 0.5
+    );
+    assert_eq!(
+        seek_scroll_y(1.0, layout.range_f64),
+        -(content_height_f64 - 700.0)
     );
 }

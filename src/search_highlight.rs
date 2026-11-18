@@ -10,7 +10,7 @@ use std::{
 };
 
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext, Bounds, Entity, Pixels, Point, Subscription, Task, Window,
+    AnyWindowHandle, App, AppContext, Bounds, Entity, Pixels, Subscription, Task, Window,
     base::input::{RangeDecoration, RangeDecorationCollection, RangeDecorationStyle},
     component::input::{EditorState, InputEvent, RopeExt},
     px, rgb,
@@ -31,7 +31,7 @@ struct ProjectionStamp {
     owner: CapturedViewport,
     input: Bounds<Pixels>,
     text: Option<Bounds<Pixels>>,
-    scroll: Point<Pixels>,
+    scroll: (Pixels, f64),
     line_height: Option<Pixels>,
     display_rows: usize,
     wrap_rows: usize,
@@ -53,7 +53,7 @@ impl ViewportTracker {
             owner,
             input: editor.input_bounds(),
             text: editor.text_bounds(),
-            scroll: editor.scroll_offset(),
+            scroll: (editor.scroll_offset().x, editor.scroll_y_f64()),
             line_height: editor.line_height(),
             display_rows: editor.display_map().display_row_count(),
             wrap_rows: editor.display_map().wrap_row_count(),
@@ -108,6 +108,25 @@ impl<K: PartialEq> ProjectionCache<K> {
     }
 }
 
+fn visible_display_row_range(
+    scroll_y: f64,
+    input_top_delta: Pixels,
+    viewport_height: Pixels,
+    line_height: Pixels,
+) -> Range<usize> {
+    if line_height <= px(0.) {
+        return 0..0;
+    }
+    let vertical_scroll = -scroll_y;
+    let base_y = f64::from(f32::from(input_top_delta));
+    let height_f64 = f64::from(f32::from(line_height));
+    let first = ((vertical_scroll + base_y) / height_f64).floor().max(0.0) as usize;
+    let last = ((vertical_scroll + base_y + f64::from(f32::from(viewport_height))) / height_f64)
+        .ceil()
+        .max(0.0) as usize;
+    first..last.max(first)
+}
+
 fn visible_byte_ranges(editor: &EditorState, captured: Bounds<Pixels>) -> Vec<Range<usize>> {
     use gpui_kit::base::input::DisplayPoint;
     let input = editor.input_bounds();
@@ -122,13 +141,15 @@ fn visible_byte_ranges(editor: &EditorState, captured: Bounds<Pixels>) -> Vec<Ra
     if right <= left {
         return Vec::new();
     }
-    let first = ((input.top() - text_bounds.top()) / height).floor().max(0.) as usize;
-    let last = ((input.bottom() - text_bounds.top()) / height)
-        .ceil()
-        .max(0.) as usize;
+    let visible_rows = visible_display_row_range(
+        editor.scroll_y_f64(),
+        input.top() - text_bounds.top(),
+        input.size.height,
+        height,
+    );
     let count = editor.display_map().display_row_count();
     let mut ranges: Vec<Range<usize>> = Vec::new();
-    for row in first..last.min(count) {
+    for row in visible_rows.start..visible_rows.end.min(count) {
         let start_point = editor
             .display_map()
             .display_pos_to_buffer_pos(DisplayPoint::new(row, 0));

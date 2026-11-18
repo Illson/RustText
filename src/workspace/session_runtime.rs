@@ -28,13 +28,14 @@ impl Document {
         &mut self,
         selection: Range<usize>,
         reversed: bool,
-        scroll: [f32; 2],
+        scroll: [f64; 2],
         cx: &mut Context<Workspace>,
     ) {
         self.restored_scroll = Some(scroll);
         self.editor.update(cx, |editor, cx| {
             editor.set_selected_range_with_direction(selection, reversed, cx);
-            editor.set_scroll_offset(point(px(scroll[0]), px(scroll[1])), cx);
+            editor.set_scroll_offset(point(px(scroll[0] as f32), px(scroll[1] as f32)), cx);
+            editor.set_scroll_y_f64(scroll[1], cx);
         });
     }
 
@@ -44,7 +45,7 @@ impl Document {
         let scroll = if editor.line_height().is_none() {
             self.restored_scroll.unwrap_or([0., 0.])
         } else {
-            [offset.x.into(), offset.y.into()]
+            [f64::from(f32::from(offset.x)), editor.scroll_y_f64()]
         };
         let include_draft = include_draft && self.dirty;
         (

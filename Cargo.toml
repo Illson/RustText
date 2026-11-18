@@ -26,3 +26,6 @@ windows = { version = "0.62", features = ["Win32_Security", "Win32_Security_Auth
 
 [profile.dev]
 debug = 0
+
+[patch.crates-io]
+gpui-base = { git = "https://github.com/TheVSAKeeper/gpui-kit", rev = "d832f0d5daf3f60d2262880d482170cf974336c1" }

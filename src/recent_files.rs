@@ -28,7 +28,7 @@ pub(crate) struct RecentPosition {
     pub json_validation_disabled: bool,
     pub selection: Range<usize>,
     pub reversed: bool,
-    pub scroll: [f32; 2],
+    pub scroll: [f64; 2],
     pub log: Option<LogBookmark>,
 }
 

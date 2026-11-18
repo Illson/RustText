@@ -44,7 +44,7 @@ pub struct Tab {
     pub format: TextFormat,
     pub selection: Range<usize>,
     pub reversed: bool,
-    pub scroll: [f32; 2],
+    pub scroll: [f64; 2],
     pub draft_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<LogBookmark>,
