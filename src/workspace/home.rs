@@ -11,6 +11,7 @@ use gpui_kit::{
         input::{Input, InputEvent, InputState, Rope, RopeExt},
         label::Label,
     },
+    prelude::FluentBuilder as _,
     *,
 };
 
@@ -138,6 +139,13 @@ impl Workspace {
         let Some(doc) = self.documents.iter().find(|doc| doc.id == id) else {
             return;
         };
+        if doc
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.draft.is_some())
+        {
+            return;
+        }
         let Some(file) = &doc.file else { return };
         let (tab, _) = doc.session_snapshot(false, cx);
         let position = RecentPosition {
@@ -300,7 +308,7 @@ impl Workspace {
             .closed
             .iter()
             .rev()
-            .filter(|entry| entry.tab.file.is_none());
+            .filter(|entry| entry.tab.file.is_none() || entry.draft.is_some());
         let drafts: Vec<_> = closed_tab_entries(
             drafts,
             self.recent.entries(),
@@ -321,6 +329,9 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_3()
+            .when(self.loading_session, |page| {
+                page.child(Label::new("Восстановление сессии…").text_sm())
+            })
             .child(
                 div()
                     .flex()

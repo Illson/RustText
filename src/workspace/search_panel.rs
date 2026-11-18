@@ -13,7 +13,10 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use super::{Document, Workspace};
+use super::{
+    Document, Workspace,
+    draft_recovery::{MAX_EDITOR_DRAFT_BYTES, Stage},
+};
 use crate::{
     appearance,
     search::{
@@ -39,12 +42,16 @@ pub(super) struct SearchPanel {
     replacing: bool,
     visible_matches: Vec<SearchMatch>,
     match_revisions: Vec<(u64, u64)>,
+    incomplete_tabs: usize,
     match_highlight: Option<(u64, SearchHighlight)>,
     only_current: bool,
     all_highlights: Vec<(u64, SearchHighlight)>,
     request_generation: u64,
     message: SharedString,
     task: Option<Task<()>>,
+    // The restore poll is detached because dropping its Task handle cancels the
+    // future; the shared cancellation token still stops it on query changes.
+    preparing_all_tabs: bool,
     cancellation: Arc<AtomicBool>,
     _subscriptions: [Subscription; 2],
 }
@@ -96,12 +103,14 @@ impl SearchPanel {
             replacing: false,
             visible_matches: Vec::new(),
             match_revisions: Vec::new(),
+            incomplete_tabs: 0,
             match_highlight: None,
             only_current: true,
             all_highlights: Vec::new(),
             request_generation: 0,
             message: "Введите текст поиска".into(),
             task: None,
+            preparing_all_tabs: false,
             cancellation: Arc::new(AtomicBool::new(false)),
             _subscriptions: [query, replacement],
         }
@@ -131,7 +140,7 @@ impl SearchPanel {
         window: &Window,
         cx: &mut Context<Workspace>,
     ) -> impl IntoElement {
-        let controls_disabled = busy || self.task.is_some();
+        let controls_disabled = busy || self.task.is_some() || self.preparing_all_tabs;
         let replacements_disabled = controls_disabled || self.options.all_tabs || !can_replace;
         let query = self.query(cx);
         let panel_height = (f32::from(window.viewport_size().height) - 230.0).clamp(120.0, 190.0);
@@ -370,12 +379,14 @@ impl Workspace {
         );
         panel.cancellation.store(true, Ordering::Relaxed);
         panel.task = None;
+        panel.preparing_all_tabs = false;
         panel.cancellation = Arc::new(AtomicBool::new(false));
         panel.request_generation = panel.request_generation.wrapping_add(1);
         panel.last_hit = None;
         panel.resume = None;
         panel.visible_matches.clear();
         panel.match_revisions.clear();
+        panel.incomplete_tabs = 0;
     }
 
     pub(super) fn refresh_all_search_highlights(&mut self, cx: &mut Context<Self>) {
@@ -452,6 +463,9 @@ impl Workspace {
             log.update(cx, |viewer, cx| viewer.open_search(window, cx));
             return;
         }
+        if self.active_document().recovery.is_some() {
+            return;
+        }
         if self.search.is_none() {
             self.search = Some(SearchPanel::new(window, cx));
         }
@@ -501,6 +515,7 @@ impl Workspace {
         };
         panel.cancellation.store(true, Ordering::Relaxed);
         panel.task = None;
+        panel.preparing_all_tabs = false;
         panel.cancellation = Arc::new(AtomicBool::new(false));
         panel.last_hit = None;
         panel.clear_match_highlight(cx);
@@ -508,6 +523,7 @@ impl Workspace {
         panel.visible_matches.clear();
         panel.match_revisions.clear();
         panel.resume = None;
+        panel.incomplete_tabs = 0;
         panel.message = if panel.options.all_tabs {
             "Поиск по всем вкладкам. Замена доступна в текущей вкладке.".into()
         } else {
@@ -539,11 +555,35 @@ impl Workspace {
         };
         let origin_revision = active.revision;
         self.refresh_all_search_highlights(cx);
-        let panel = self.search.as_mut().expect("search panel is present");
-        let query = panel.query(cx);
-        if panel.task.is_some() || (command.replaces() && query.all_tabs) {
+        let query = self
+            .search
+            .as_ref()
+            .expect("search panel is present")
+            .query(cx);
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|panel| panel.task.is_some() || panel.preparing_all_tabs)
+            || (command.replaces() && query.all_tabs)
+        {
             return;
         }
+        if query.all_tabs && !query.text.is_empty() {
+            match recovery_search_action(search_recovery_states(&self.documents)) {
+                RecoverySearchAction::Start(_) | RecoverySearchAction::Wait => {
+                    self.wait_for_all_tabs(command, query, origin.tab, window, cx);
+                    return;
+                }
+                RecoverySearchAction::Ready { incomplete_tabs } => {
+                    if let Some(panel) = &mut self.search {
+                        panel.incomplete_tabs = incomplete_tabs;
+                    }
+                }
+            }
+        } else if let Some(panel) = &mut self.search {
+            panel.incomplete_tabs = 0;
+        }
+        let panel = self.search.as_mut().expect("search panel is present");
         if let Some((_, highlight)) = panel.match_highlight.take() {
             highlight.clear(cx);
         }
@@ -651,9 +691,98 @@ impl Workspace {
         cx.notify();
     }
 
+    fn wait_for_all_tabs(
+        &mut self,
+        command: Command,
+        query: Query,
+        origin_tab: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = &mut self.search else {
+            return;
+        };
+        panel.request_generation = panel.request_generation.wrapping_add(1);
+        let generation = panel.request_generation;
+        panel.cancellation.store(true, Ordering::Relaxed);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        panel.cancellation = cancellation.clone();
+        panel.preparing_all_tabs = true;
+        panel.incomplete_tabs = 0;
+        panel.last_hit = None;
+        panel.resume = None;
+        panel.visible_matches.clear();
+        panel.match_revisions.clear();
+        panel.clear_match_highlight(cx);
+        panel.message = "Загрузка вкладок для поиска…".into();
+
+        let executor = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let keep_waiting = this
+                    .update_in(cx, |this, window, cx| {
+                        let Some(panel) = &this.search else {
+                            return false;
+                        };
+                        if cancellation.load(Ordering::Relaxed)
+                            || panel.request_generation != generation
+                        {
+                            return false;
+                        }
+                        if panel.query(cx) != query
+                            || !panel.options.all_tabs
+                            || this.active != origin_tab
+                            || this.busy.is_some()
+                            || this.applying_update()
+                        {
+                            let Some(panel) = &mut this.search else {
+                                return false;
+                            };
+                            panel.preparing_all_tabs = false;
+                            panel.message =
+                                "Поиск отменён. Повторите его в текущей вкладке.".into();
+                            cx.notify();
+                            return false;
+                        }
+
+                        match recovery_search_action(search_recovery_states(&this.documents)) {
+                            RecoverySearchAction::Start(id) => {
+                                this.start_tab_restore(id, window, cx);
+                                true
+                            }
+                            RecoverySearchAction::Wait => true,
+                            RecoverySearchAction::Ready { .. } => {
+                                if let Some(panel) = &mut this.search {
+                                    panel.preparing_all_tabs = false;
+                                }
+                                this.run_search(command, window, cx);
+                                false
+                            }
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep_waiting {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_millis(150)).await;
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn search_message(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         if let Some(panel) = &mut self.search {
-            panel.message = message.into();
+            let message = message.into();
+            panel.message = if panel.options.all_tabs && panel.incomplete_tabs > 0 {
+                format!(
+                    "Неполный поиск. {message}. Недоступные вкладки: {}.",
+                    panel.incomplete_tabs
+                )
+                .into()
+            } else {
+                message
+            };
             cx.notify();
         }
     }
@@ -772,9 +901,73 @@ fn search_documents(
     all_tabs: bool,
     tab: u64,
 ) -> impl Iterator<Item = &Document> {
-    documents
-        .iter()
-        .filter(move |doc| doc.log.is_none() && (all_tabs || doc.id == tab))
+    documents.iter().filter(move |doc| {
+        doc.log.is_none() && doc.recovery.is_none() && (all_tabs || doc.id == tab)
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchRecoveryState {
+    Queued(u64),
+    Loading,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoverySearchAction {
+    Start(u64),
+    Wait,
+    Ready { incomplete_tabs: usize },
+}
+
+fn search_recovery_states(
+    documents: &[Document],
+) -> impl Iterator<Item = SearchRecoveryState> + '_ {
+    documents.iter().filter_map(|doc| {
+        let recovery = doc.recovery.as_ref()?;
+        let draft_bytes = recovery.draft.as_ref().map(crate::session::Draft::byte_len);
+        search_recovery_state(doc.id, &recovery.stage, draft_bytes)
+    })
+}
+
+fn search_recovery_state(
+    tab: u64,
+    stage: &Stage,
+    draft_bytes: Option<u64>,
+) -> Option<SearchRecoveryState> {
+    // A draft beyond the byte limit will open as a read-only preview.
+    if draft_bytes.is_some_and(|bytes| bytes > MAX_EDITOR_DRAFT_BYTES) {
+        return None;
+    }
+    match stage {
+        Stage::Queued => Some(SearchRecoveryState::Queued(tab)),
+        Stage::Loading(_) => Some(SearchRecoveryState::Loading),
+        Stage::Failed(_) => Some(SearchRecoveryState::Failed),
+        Stage::Preview => None,
+    }
+}
+
+fn recovery_search_action(
+    states: impl IntoIterator<Item = SearchRecoveryState>,
+) -> RecoverySearchAction {
+    let mut loading = false;
+    let mut queued = None;
+    let mut incomplete_tabs = 0;
+    for state in states {
+        match state {
+            SearchRecoveryState::Loading => loading = true,
+            SearchRecoveryState::Queued(id) if queued.is_none() => queued = Some(id),
+            SearchRecoveryState::Failed => incomplete_tabs += 1,
+            SearchRecoveryState::Queued(_) => {}
+        }
+    }
+    if loading {
+        RecoverySearchAction::Wait
+    } else if let Some(id) = queued {
+        RecoverySearchAction::Start(id)
+    } else {
+        RecoverySearchAction::Ready { incomplete_tabs }
+    }
 }
 
 fn command_button(

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use super::{LoadedDocument, OpenMode, read_document, reopen_existing_document};
+use super::{
+    LoadedDocument, OpenMode, can_reuse_log_document, read_document, reopen_existing_document,
+};
 use crate::{files::FileTarget, session::Tab, text_format::TextEncoding};
 
 fn closed_view(file: FileTarget) -> Tab {
@@ -43,11 +45,10 @@ fn replaces_clean_document_when_reopened_with_another_encoding() {
     let reopen = reopen_existing_document(
         false,
         false,
-        Some(&utf8.target),
-        &windows_1251.target,
-        utf8.format.encoding,
-        windows_1251.format.encoding,
+        Some((&utf8.target, utf8.format.encoding)),
+        (&windows_1251.target, windows_1251.format.encoding),
         Some(&closed),
+        None,
     );
     assert!(reopen.replace_text);
     let restore = reopen.restore.expect("closed tab view must be restored");
@@ -67,12 +68,73 @@ fn keeps_dirty_document_when_reopened_with_another_encoding() {
     let reopen = reopen_existing_document(
         true,
         false,
-        Some(&target),
-        &target,
-        TextEncoding::Windows1251,
-        TextEncoding::Utf8,
+        Some((&target, TextEncoding::Windows1251)),
+        (&target, TextEncoding::Utf8),
         Some(&closed),
+        None,
     );
     assert!(!reopen.replace_text);
     assert!(reopen.restore.is_none());
+}
+
+#[test]
+fn restores_pending_clean_document_view_when_opened_from_picker() {
+    let target = FileTarget {
+        path: PathBuf::from("same.json"),
+        version: None,
+    };
+    let mut pending = closed_view(target.clone());
+    pending.json_validation_disabled = true;
+
+    let reopen = reopen_existing_document(
+        false,
+        true,
+        Some((&target, TextEncoding::Utf8)),
+        (&target, TextEncoding::Utf8),
+        None,
+        Some(&pending),
+    );
+
+    assert!(reopen.replace_text);
+    let restore = reopen
+        .restore
+        .expect("pending clean document view must be preserved");
+    assert_eq!(restore.selection, 2..6);
+    assert!(restore.reversed);
+    assert_eq!(restore.scroll, [0., 200.]);
+    assert!(restore.json_validation_disabled);
+}
+
+#[test]
+fn reuses_same_disk_log_but_never_a_draft_preview() {
+    let path = PathBuf::from("large.log");
+
+    assert!(can_reuse_log_document(
+        Some(&path),
+        &path,
+        TextEncoding::Utf8Bom,
+        false,
+        false,
+    ));
+    assert!(can_reuse_log_document(
+        Some(&path),
+        &path,
+        TextEncoding::Utf16Le,
+        false,
+        false,
+    ));
+    assert!(!can_reuse_log_document(
+        Some(&path),
+        &path,
+        TextEncoding::Utf8,
+        false,
+        true,
+    ));
+    assert!(!can_reuse_log_document(
+        Some(&path),
+        &path,
+        TextEncoding::Windows1251,
+        false,
+        false,
+    ));
 }

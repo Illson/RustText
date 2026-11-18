@@ -59,11 +59,13 @@ impl LogViewer {
         let path = self.path.clone();
         let encoding = self.encoding_override;
         let index = self.index.clone();
+        let snapshot = self.retain_snapshot();
         let hidden = self.bookmark.hidden;
         let generation = self.generation;
         let observation_stamp = observation.stamp.clone();
 
         let job = cx.background_spawn(async move {
+            let _snapshot = snapshot;
             let mut reader = LogReader::open(path, encoding).map_err(|error| error.to_string())?;
             let mut file = reader
                 .file()
@@ -136,6 +138,7 @@ impl LogViewer {
             page: self.page.clone(),
         };
         let index = self.index.clone();
+        let snapshot = self.retain_snapshot();
         let rows = ((f32::from(window.viewport_size().height) - 150.0) / 23.0)
             .ceil()
             .clamp(12.0, 120.0) as usize
@@ -149,6 +152,7 @@ impl LogViewer {
         self.reading = true;
 
         let job = cx.background_spawn(async move {
+            let _snapshot = snapshot;
             read_page(
                 &path,
                 encoding,
@@ -252,7 +256,9 @@ impl LogViewer {
         let encoding = self.encoding;
         let hidden = self.bookmark.hidden;
         let size = self.bookmark.size;
+        let snapshot = self.retain_snapshot();
         let job = cx.background_spawn(async move {
+            let _snapshot = snapshot;
             crate::minimap::sample_file(&path, encoding, hidden, size)
         });
         cx.spawn_in(window, async move |this, cx| {

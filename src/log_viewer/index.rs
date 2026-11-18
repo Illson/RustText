@@ -31,12 +31,14 @@ impl LogViewer {
         let done = progress.done.clone();
         let cancel = progress.cancel.clone();
         let index = self.index.clone();
+        let snapshot = self.retain_snapshot();
         let scanned_before = index.scanned_to();
         done.store(index.scanned_to(), Ordering::Relaxed);
         self.indexing = Some(progress);
         let job = cx.background_spawn({
             let cancel = cancel.clone();
             async move {
+                let _snapshot = snapshot;
                 let mut reader = LogReader::open(path, encoding)?;
                 if FileIdentity::read(reader.file())? != identity
                     || reader.size() < index.scanned_to()

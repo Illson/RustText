@@ -1,16 +1,16 @@
 use std::{
     io,
     ops::Range,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use gpui_kit::{component::input::Rope, *};
+use gpui_kit::*;
 
-use super::{ClosedTab, Document, Workspace, disk_status::DiskStatus};
+use super::{ClosedTab, Document, Workspace};
 use crate::{
-    files,
-    session::{Capture, DraftDigest, Journal, Recovered, State, Tab, WindowSize},
+    session::{Capture, Draft, DraftDigest, Journal, Recovered, State, Tab, WindowSize},
     text_format::TextEncoding,
 };
 
@@ -40,7 +40,7 @@ impl Document {
         });
     }
 
-    pub(super) fn session_snapshot(&self, include_draft: bool, cx: &App) -> (Tab, Option<Rope>) {
+    pub(super) fn session_snapshot(&self, include_draft: bool, cx: &App) -> (Tab, Option<Draft>) {
         let (tab, draft, _) = self.session_snapshot_with_digest(include_draft, cx);
         (tab, draft)
     }
@@ -49,7 +49,15 @@ impl Document {
         &self,
         include_draft: bool,
         cx: &App,
-    ) -> (Tab, Option<Rope>, Option<DraftDigest>) {
+    ) -> (Tab, Option<Draft>, Option<DraftDigest>) {
+        if let Some(recovery) = &self.recovery {
+            let (mut tab, draft, digest) = recovery.snapshot(include_draft);
+            if let Some(viewer) = &self.log {
+                let offset = viewer.read(cx).bookmark().offset as usize;
+                tab.selection = offset..offset;
+            }
+            return (tab, draft, digest);
+        }
         let editor = self.editor.read(cx);
         let offset = editor.scroll_offset();
         let scroll = if editor.line_height().is_none() {
@@ -87,7 +95,7 @@ impl Document {
                 digest
             }
         };
-        (tab, Some(text.clone()), Some(digest))
+        (tab, Some(Draft::Memory(text.clone())), Some(digest))
     }
 }
 
@@ -181,28 +189,49 @@ impl PendingWrite {
 }
 
 impl Workspace {
-    pub(super) fn init_session(
+    pub(super) fn start_session_restore(
+        &self,
+        startup: Task<crate::session::Startup>,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let startup = startup.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.loading_session = false;
+                this.init_session(startup, window, cx);
+                if !paths.is_empty() {
+                    this.open_paths(paths, super::file_actions::OpenMode::NORMAL, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        self.start_disk_monitor(window, cx);
+    }
+
+    fn init_session(
         &mut self,
         startup: crate::session::Startup,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let repair_journal = startup.recovered.is_some() && startup.warning.is_some();
-        self.session_notice = startup.warning.map(Into::into);
+        let needs_checkpoint = startup.warning.is_some() || !self.documents.is_empty();
         if let Some(recovered) = startup.recovered {
             self.restore_session(recovered, window, cx);
         }
         if let Some(journal) = startup.journal {
             self.session = Some(SessionWriter {
                 journal: Arc::new(Mutex::new(journal)),
-                last_saved: (!repair_journal).then(|| self.capture_session(window, cx).0.state),
+                last_saved: (!needs_checkpoint).then(|| self.capture_session(window, cx).0.state),
                 revision: 0,
                 in_flight: false,
                 pending_view: None,
             });
             self.start_session_autosave(window, cx);
         }
-        self.start_disk_monitor(window, cx);
+        self.session_notice = startup.warning.map(Into::into);
     }
 
     fn restore_session(
@@ -231,10 +260,10 @@ impl Workspace {
             .closed
             .into_iter()
             .zip(closed_drafts)
-            .map(|(tab, draft)| {
-                let draft = draft.map(|text| Rope::from(text.as_str()));
-                let digest = draft.as_ref().map(DraftDigest::from_rope);
-                ClosedTab { tab, draft, digest }
+            .map(|(tab, draft)| ClosedTab {
+                tab,
+                draft,
+                digest: None,
             })
             .collect();
 
@@ -242,7 +271,7 @@ impl Workspace {
         let mut remap = std::collections::HashMap::new();
         for (index, (tab, draft)) in state.tabs.into_iter().zip(drafts).enumerate() {
             let saved_id = tab.id;
-            let id = self.restore_tab(tab, draft, window, cx);
+            let id = self.restore_tab(tab, draft, None, window, cx);
             remap.insert(saved_id, id);
             if index == state.active {
                 active = Some(id);
@@ -268,15 +297,14 @@ impl Workspace {
     pub(super) fn restore_tab(
         &mut self,
         tab: Tab,
-        draft: Option<String>,
+        draft: Option<Draft>,
+        digest: Option<DraftDigest>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> u64 {
-        let selection = tab.selection.clone();
-        let json_validation_disabled = tab.json_validation_disabled;
-        let reversed = tab.reversed;
-        let scroll = tab.scroll;
-        if let (Some(bookmark), Some(file)) = (tab.log.clone(), tab.file.clone()) {
+        if draft.is_none()
+            && let (Some(bookmark), Some(file)) = (tab.log.clone(), tab.file.clone())
+        {
             return self.insert_log(
                 file,
                 matches!(tab.format.encoding, TextEncoding::Windows1251),
@@ -285,62 +313,14 @@ impl Workspace {
                 cx,
             );
         }
-        let dirty = draft.is_some();
-        let fresh = tab.file.as_ref().map(|file| {
-            files::open(
-                &file.path,
-                matches!(tab.format.encoding, TextEncoding::Windows1251),
-            )
-        });
-        let mut file = tab.file;
-        let mut format = tab.format;
-        let mut placeholder = false;
-        let mut status = DiskStatus::Current;
-        let mut baseline = Some(Rope::new());
-        let text = match (draft, fresh) {
-            (Some(draft), Some(Ok(opened))) => {
-                if file.as_ref() == Some(&opened.target) {
-                    baseline = Some(Rope::from(opened.text.as_str()));
-                } else {
-                    status = DiskStatus::Changed;
-                    baseline = None;
-                }
-                draft
-            }
-            (Some(draft), Some(Err(error))) => {
-                status = DiskStatus::from_error(&error);
-                baseline = None;
-                draft
-            }
-            (Some(draft), None) => draft,
-            (None, Some(Ok(opened))) => {
-                file = Some(opened.target);
-                format = opened.format;
-                opened.text
-            }
-            (None, Some(Err(error))) => {
-                status = DiskStatus::from_error(&error);
-                placeholder = true;
-                String::new()
-            }
-            (None, None) => String::new(),
-        };
-
-        let id = self.insert_document(file, text, format, window, cx);
+        let id = self.insert_document(tab.file.clone(), String::new(), tab.format, window, cx);
         let doc = self.documents.last_mut().expect("restored tab exists");
-        doc.json_validation_disabled = json_validation_disabled;
-        doc.disk_status = status;
-        doc.placeholder = placeholder;
-        if placeholder {
-            doc.revision = doc.revision.wrapping_add(1);
+        doc.json_validation_disabled = tab.json_validation_disabled;
+        if tab.file.is_some() || draft.is_some() {
+            doc.begin_recovery(tab, draft, digest, self.settings.untitled_tab_limit);
+        } else {
+            doc.restore_view(tab.selection, tab.reversed, tab.scroll, cx);
         }
-        if dirty {
-            doc.saved_text = baseline;
-            doc.dirty = true;
-        }
-
-        doc.restore_view(selection, reversed, scroll, cx);
-        self.schedule_json_validation(id, cx);
         id
     }
 

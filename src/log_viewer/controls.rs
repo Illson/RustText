@@ -9,6 +9,7 @@ use gpui_kit::{
         label::Label,
         menu::{PopupMenu, PopupMenuItem},
     },
+    prelude::FluentBuilder as _,
     *,
 };
 
@@ -19,12 +20,19 @@ use super::{
 
 impl LogViewer {
     fn context_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = self
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.path.display().to_string());
-        let full_path = self.path.display().to_string();
+        let name = if self.immutable_snapshot {
+            "Восстановленный черновик".to_owned()
+        } else {
+            self.path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.path.display().to_string())
+        };
+        let full_path = if self.immutable_snapshot {
+            name.clone()
+        } else {
+            self.path.display().to_string()
+        };
         let auto_refresh = self.bookmark.auto_refresh;
         let follow_end = self.bookmark.follow_end;
 
@@ -65,56 +73,58 @@ impl LogViewer {
                     .text_color(rgb(crate::appearance::MUTED))
                     .child("ТОЛЬКО ЧТЕНИЕ"),
             )
-            .child(
-                Button::new("log-refresh")
-                    .small()
-                    .ghost()
-                    .label(if auto_refresh {
-                        "Пауза"
+            .when(!self.immutable_snapshot, |this| {
+                this.child(
+                    Button::new("log-refresh")
+                        .small()
+                        .ghost()
+                        .label(if auto_refresh {
+                            "Пауза"
+                        } else {
+                            "Продолжить"
+                        })
+                        .selected(auto_refresh)
+                        .tooltip(if auto_refresh {
+                            "Приостановить автообновление"
+                        } else {
+                            "Продолжить автообновление"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.bookmark.auto_refresh = !this.bookmark.auto_refresh;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("log-follow")
+                        .small()
+                        .ghost()
+                        .label("Следовать за концом")
+                        .selected(follow_end)
+                        .tooltip("Перемещать область просмотра при дописывании")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.bookmark.follow_end = !this.bookmark.follow_end;
+                            if this.bookmark.follow_end && this.bookmark.auto_refresh {
+                                this.navigate(Destination::End, window, cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Label::new(if auto_refresh {
+                        "Автообновление: вкл."
                     } else {
-                        "Продолжить"
+                        "Автообновление: пауза"
                     })
-                    .selected(auto_refresh)
-                    .tooltip(if auto_refresh {
-                        "Приостановить автообновление"
+                    .text_sm()
+                    .text_color(rgb(if auto_refresh {
+                        crate::appearance::SUCCESS
                     } else {
-                        "Продолжить автообновление"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.bookmark.auto_refresh = !this.bookmark.auto_refresh;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("log-follow")
-                    .small()
-                    .ghost()
-                    .label("Следовать за концом")
-                    .selected(follow_end)
-                    .tooltip("Перемещать область просмотра при дописывании")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.bookmark.follow_end = !this.bookmark.follow_end;
-                        if this.bookmark.follow_end && this.bookmark.auto_refresh {
-                            this.navigate(Destination::End, window, cx);
-                        }
-                        cx.notify();
-                    })),
-            )
+                        crate::appearance::MUTED
+                    }))
+                    .truncate(),
+                )
+            })
             .child(div().flex_1().min_w_0())
-            .child(
-                Label::new(if auto_refresh {
-                    "Автообновление: вкл."
-                } else {
-                    "Автообновление: пауза"
-                })
-                .text_sm()
-                .text_color(rgb(if auto_refresh {
-                    crate::appearance::SUCCESS
-                } else {
-                    crate::appearance::MUTED
-                }))
-                .truncate(),
-            )
     }
 
     pub(crate) fn tools_menu(
@@ -136,9 +146,13 @@ impl LogViewer {
         let hidden = self.bookmark.hidden > 0;
         let available = self.available();
 
-        menu = menu
-            .label("ЛОГ")
-            .item(
+        menu = menu.label(if self.immutable_snapshot {
+            "ЧЕРНОВИК"
+        } else {
+            "ЛОГ"
+        });
+        if !self.immutable_snapshot {
+            menu = menu.item(
                 PopupMenuItem::new("Обновить сейчас")
                     .disabled(self.writing_file() || self.preparing_trim)
                     .on_click(move |_, window, cx| {
@@ -146,52 +160,56 @@ impl LogViewer {
                             this.load_page(Destination::Restore, window, cx);
                         });
                     }),
-            )
-            .item(
-                PopupMenuItem::new(if indexing {
-                    "Отменить индексирование"
-                } else if index_paused {
-                    "Продолжить индексирование"
-                } else {
-                    "Индексировать поиск"
-                })
-                .disabled(
-                    self.writing_file()
-                        || self.preparing_trim
-                        || (!indexing && !index_paused && index_complete),
-                )
-                .on_click(move |_, window, cx| {
-                    let _ = index.update(cx, |this, cx| this.toggle_index(window, cx));
-                }),
-            )
-            .item(
-                PopupMenuItem::new("Отменить обрезку")
-                    .disabled(!can_cancel)
-                    .on_click(move |_, _, cx| {
-                        let _ = cancel.update(cx, |this, cx| this.cancel_trim(cx));
-                    }),
-            )
-            .separator()
-            .item(
-                PopupMenuItem::new("Скрыть начало…")
-                    .disabled(!available)
-                    .on_click(move |_, window, cx| {
-                        let _ = hide.update(cx, |this, cx| {
-                            this.open_boundary_dialog(false, window, cx);
-                        });
-                    }),
-            )
-            .item(
-                PopupMenuItem::new("Удалить начало…")
-                    .disabled(!available || self.writing_file() || self.preparing_trim)
-                    .on_click(move |_, window, cx| {
-                        let _ = trim.update(cx, |this, cx| {
-                            this.open_boundary_dialog(true, window, cx);
-                        });
-                    }),
             );
+        }
+        menu = menu.item(
+            PopupMenuItem::new(if indexing {
+                "Отменить индексирование"
+            } else if index_paused {
+                "Продолжить индексирование"
+            } else {
+                "Индексировать поиск"
+            })
+            .disabled(
+                self.writing_file()
+                    || self.preparing_trim
+                    || (!indexing && !index_paused && index_complete),
+            )
+            .on_click(move |_, window, cx| {
+                let _ = index.update(cx, |this, cx| this.toggle_index(window, cx));
+            }),
+        );
+        if !self.immutable_snapshot {
+            menu = menu
+                .item(
+                    PopupMenuItem::new("Отменить обрезку")
+                        .disabled(!can_cancel)
+                        .on_click(move |_, _, cx| {
+                            let _ = cancel.update(cx, |this, cx| this.cancel_trim(cx));
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Скрыть начало…")
+                        .disabled(!available)
+                        .on_click(move |_, window, cx| {
+                            let _ = hide.update(cx, |this, cx| {
+                                this.open_boundary_dialog(false, window, cx);
+                            });
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Удалить начало…")
+                        .disabled(!available || self.writing_file() || self.preparing_trim)
+                        .on_click(move |_, window, cx| {
+                            let _ = trim.update(cx, |this, cx| {
+                                this.open_boundary_dialog(true, window, cx);
+                            });
+                        }),
+                );
+        }
 
-        if hidden {
+        if hidden && !self.immutable_snapshot {
             menu = menu.item(
                 PopupMenuItem::new("Показать весь файл")
                     .disabled(!available)
@@ -205,6 +223,9 @@ impl LogViewer {
     }
 
     fn open_boundary_dialog(&mut self, remove: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.immutable_snapshot {
+            return;
+        }
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(self.trim_percentage.read(cx).value().to_string())

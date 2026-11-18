@@ -205,6 +205,7 @@ impl Workspace {
         if self.busy.is_none()
             && let Some(doc) = self.documents.iter().find(|doc| doc.id == self.active)
             && doc.log.is_none()
+            && doc.recovery.is_none()
         {
             go_to_line::open(doc.editor.clone(), window, cx);
         }
@@ -516,6 +517,9 @@ impl Workspace {
             .and_then(|active| self.documents.iter().find(|doc| doc.id == active));
         let body = doc
             .map(|doc| {
+                if let Some(recovery) = &doc.recovery {
+                    return self.restoring_tab(doc, recovery, cx);
+                }
                 if let Some(log) = &doc.log {
                     return log.clone().into_any_element();
                 }
@@ -646,8 +650,103 @@ impl Workspace {
                     .child(body),
             )
             .children(
-                doc.filter(|doc| doc.log.is_none())
+                doc.filter(|doc| doc.log.is_none() && doc.recovery.is_none())
                     .map(|doc| self.status(doc, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn restoring_tab(
+        &self,
+        doc: &Document,
+        recovery: &super::draft_recovery::Recovery,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use super::draft_recovery::Stage;
+
+        let id = doc.id;
+        let message = match &recovery.stage {
+            Stage::Queued => "Вкладка ожидает загрузки".into(),
+            Stage::Loading(progress) => progress.percent().map_or_else(
+                || "Загрузка вкладки…".into(),
+                |percent| format!("Восстановление черновика… {percent}%").into(),
+            ),
+            Stage::Failed(error) => error.clone(),
+            Stage::Preview => {
+                return div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_3()
+                            .px_3()
+                            .py_1()
+                            .child(Label::new("Большой черновик · только чтение").text_sm())
+                            .child(
+                                Button::new(("export-draft", id))
+                                    .small()
+                                    .outline()
+                                    .label("Сохранить копию…")
+                                    .disabled(self.busy.is_some())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.select(id, window, cx);
+                                        this.save(true, window, cx);
+                                    })),
+                            )
+                            .children(
+                                self.error
+                                    .clone()
+                                    .or_else(|| self.session_notice.clone())
+                                    .map(|message| Label::new(message).text_sm()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .children(doc.log.clone()),
+                    )
+                    .into_any_element();
+            }
+        };
+        let can_start = matches!(recovery.stage, Stage::Queued | Stage::Failed(_));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(Label::new(message))
+            .when(can_start, |element| {
+                let label = if matches!(recovery.stage, Stage::Failed(_)) {
+                    "Повторить"
+                } else {
+                    "Загрузить"
+                };
+                element.child(
+                    Button::new(("load-draft", id))
+                        .small()
+                        .outline()
+                        .label(label)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.select(id, window, cx);
+                        })),
+                )
+            })
+            .child(
+                Button::new(("cancel-draft", id))
+                    .small()
+                    .ghost()
+                    .label("Отменить загрузку")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.cancel_tab_restore(id, window, cx);
+                    })),
             )
             .into_any_element()
     }

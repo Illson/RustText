@@ -365,11 +365,13 @@ impl LogViewer {
         search.cancelled_at = None;
 
         let path = self.path.clone();
+        let snapshot = self.retain_snapshot();
         let hidden = self.bookmark.hidden;
         let encoding = self.encoding_override;
         let operation = cx.background_spawn({
             let cancel = cancel.clone();
             async move {
+                let _snapshot = snapshot;
                 let mut reader = LogReader::open(path, encoding)?;
                 reader.seek_timestamp_near(hidden, reference, &target, &cancel)
             }
@@ -451,10 +453,12 @@ impl LogViewer {
         search.progress = Some(progress);
 
         let path = self.path.clone();
+        let snapshot = self.retain_snapshot();
         let encoding = self.encoding_override;
         let operation = cx.background_spawn({
             let cancel = cancel.clone();
             async move {
+                let _snapshot = snapshot;
                 let limits = SearchLimits {
                     max_scanned_bytes: SEARCH_BATCH_BYTES,
                     preview_bytes: 300,

@@ -7,7 +7,7 @@ use crate::{
     files::{self, FileTarget, OpenedFile},
     log_file::LogBookmark,
     recent_files::RecentFile,
-    session::Tab,
+    session::{Draft, Tab},
     text_format::TextEncoding,
 };
 
@@ -43,7 +43,7 @@ impl OpenMode {
     }
 }
 
-enum LoadedDocument {
+pub(super) enum LoadedDocument {
     Text(OpenedFile),
     Log(FileTarget),
 }
@@ -56,22 +56,34 @@ struct ReopenExisting<'a> {
 fn reopen_existing_document<'a>(
     dirty: bool,
     placeholder: bool,
-    current_target: Option<&FileTarget>,
-    opened_target: &FileTarget,
-    current_encoding: TextEncoding,
-    opened_encoding: TextEncoding,
+    current: Option<(&FileTarget, TextEncoding)>,
+    opened: (&FileTarget, TextEncoding),
     restore: Option<&'a Tab>,
+    pending_restore: Option<&'a Tab>,
 ) -> ReopenExisting<'a> {
     ReopenExisting {
-        replace_text: !dirty
-            && (placeholder
-                || current_target != Some(opened_target)
-                || current_encoding != opened_encoding),
-        restore: if dirty { None } else { restore },
+        replace_text: !dirty && (placeholder || current != Some(opened)),
+        restore: if dirty {
+            None
+        } else {
+            restore.or(pending_restore)
+        },
     }
 }
 
-fn read_document(path: &Path, mode: OpenMode) -> std::io::Result<LoadedDocument> {
+fn can_reuse_log_document(
+    current_path: Option<&Path>,
+    opened_path: &Path,
+    current_encoding: TextEncoding,
+    windows_1251: bool,
+    is_draft_preview: bool,
+) -> bool {
+    !is_draft_preview
+        && current_path == Some(opened_path)
+        && matches!(current_encoding, TextEncoding::Windows1251) == windows_1251
+}
+
+pub(super) fn read_document(path: &Path, mode: OpenMode) -> std::io::Result<LoadedDocument> {
     let metadata = std::fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(std::io::Error::new(
@@ -95,7 +107,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy.is_some() {
+        if self.loading_session || self.busy.is_some() {
             return;
         }
         self.busy = Some("Выбор файла…");
@@ -184,7 +196,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if paths.is_empty() || self.busy.is_some() {
+        if paths.is_empty() || self.loading_session || self.busy.is_some() {
             return;
         }
 
@@ -277,14 +289,24 @@ impl Workspace {
                     .is_some_and(|file| file.path == opened.target.path)
         }) {
             let id = doc.id;
+            let pending_restore = doc
+                .recovery
+                .as_ref()
+                .filter(|recovery| recovery.draft.is_none())
+                .map(|recovery| recovery.tab.clone());
+            if pending_restore.is_some() {
+                if let Some(recovery) = &doc.recovery {
+                    recovery.cancel();
+                }
+                doc.recovery = None;
+            }
             let reopen = reopen_existing_document(
                 doc.dirty,
                 doc.placeholder,
-                doc.file.as_ref(),
-                &opened.target,
-                doc.format.encoding,
-                opened.format.encoding,
+                doc.file.as_ref().map(|file| (file, doc.format.encoding)),
+                (&opened.target, opened.format.encoding),
                 restore,
+                pending_restore.as_ref(),
             );
             if reopen.replace_text {
                 doc.editor
@@ -346,11 +368,16 @@ impl Workspace {
         recent.view_as_log = true;
         if let Some(doc) = self.documents.iter().find(|doc| {
             doc.log.is_some()
-                && doc
-                    .file
-                    .as_ref()
-                    .is_some_and(|file| file.path == target.path)
-                && matches!(doc.format.encoding, TextEncoding::Windows1251) == windows_1251
+                && can_reuse_log_document(
+                    doc.file.as_ref().map(|file| file.path.as_path()),
+                    &target.path,
+                    doc.format.encoding,
+                    windows_1251,
+                    doc.recovery.as_ref().is_some_and(|recovery| {
+                        recovery.draft.is_some()
+                            && matches!(recovery.stage, super::draft_recovery::Stage::Preview)
+                    }),
+                )
         }) {
             recent.line_count = doc
                 .log
@@ -393,17 +420,25 @@ impl Workspace {
         let Some(doc) = self.active_document_opt() else {
             return;
         };
-        if doc.log.is_some() {
+        let draft_copy = doc
+            .recovery
+            .as_ref()
+            .filter(|recovery| matches!(recovery.stage, super::draft_recovery::Stage::Preview))
+            .and_then(|recovery| recovery.draft.clone());
+        if doc.log.is_some() && draft_copy.is_none() {
             return;
         }
-        if doc.placeholder {
+        if doc.placeholder && draft_copy.is_none() {
             self.error = Some("Откройте исходный файл, когда он станет доступен.".into());
             cx.notify();
             return;
         }
         let id = doc.id;
 
-        if !save_as && let Some(file) = doc.file.clone() {
+        if draft_copy.is_none()
+            && !save_as
+            && let Some(file) = doc.file.clone()
+        {
             self.write_file(id, file, window, cx);
             return;
         }
@@ -436,7 +471,13 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 match target {
-                    Ok(Some(target)) => this.write_file(id, target, window, cx),
+                    Ok(Some(target)) => {
+                        if let Some(draft) = draft_copy {
+                            this.write_draft_copy(target, draft, window, cx);
+                        } else {
+                            this.write_file(id, target, window, cx);
+                        }
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         this.error = Some(format!("Не удалось выбрать файл. {error}").into())
@@ -445,6 +486,48 @@ impl Workspace {
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+    }
+
+    fn write_draft_copy(
+        &mut self,
+        target: FileTarget,
+        draft: Draft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(doc) = self.documents.iter().find(|doc| {
+            doc.file
+                .as_ref()
+                .is_some_and(|file| file.path == target.path)
+        }) {
+            self.error = Some(
+                format!(
+                    "Файл «{}» уже открыт. Выберите другой путь для копии.",
+                    doc.name
+                )
+                .into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.busy = Some("Сохранение копии черновика…");
+        let task = cx
+            .background_spawn(async move { files::save_with(target, |file| draft.write_to(file)) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.busy = None;
+                match result {
+                    Ok(_) => this.session_notice = Some("Копия черновика сохранена.".into()),
+                    Err(error) => {
+                        this.error =
+                            Some(format!("Не удалось сохранить копию черновика. {error}").into());
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }

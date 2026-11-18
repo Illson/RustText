@@ -100,12 +100,18 @@ impl Workspace {
     }
 
     fn file_menu_button(&self, cx: &Context<Self>) -> impl IntoElement {
-        let busy = self.busy.is_some() || self.applying_update();
+        let busy = self.loading_session || self.busy.is_some() || self.applying_update();
         let showing_home = self.showing_home();
         let doc = (!showing_home)
             .then(|| self.active_document_opt())
             .flatten();
-        let can_save = !busy && doc.is_some_and(|doc| doc.log.is_none() && !doc.placeholder);
+        let can_save = !busy
+            && doc.is_some_and(|doc| {
+                doc.log.is_none() && !doc.placeholder
+                    || doc.recovery.as_ref().is_some_and(|recovery| {
+                        matches!(recovery.stage, super::draft_recovery::Stage::Preview)
+                    })
+            });
         let workspace = cx.entity().downgrade();
         let focus = self.menu_focus(cx);
         Button::new("file-menu")

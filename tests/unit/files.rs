@@ -29,6 +29,27 @@ fn saves_new_file_and_allows_repeated_saves() {
 }
 
 #[test]
+fn interrupted_snapshot_export_keeps_the_destination_and_full_retry_writes_exact_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("copy.txt");
+    fs::write(&path, b"original").unwrap();
+    let target = FileTarget::from_picker(path.clone()).unwrap();
+    assert!(
+        save_with(target.clone(), |file| {
+            file.write_all(b"partial")?;
+            Err(io::Error::other("copy interrupted"))
+        })
+        .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+
+    let source = "Первая строка\n\nПоследняя строка 💡\n";
+    save_with(target, |file| file.write_all(source.as_bytes())).unwrap();
+    assert_eq!(fs::read(path).unwrap(), source.as_bytes());
+}
+
+#[test]
 fn rejects_files_above_the_regular_editor_limit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("oversize.txt");

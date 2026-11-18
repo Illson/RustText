@@ -164,7 +164,7 @@ impl TemplateGenerator {
 
 impl Workspace {
     pub(super) fn open_template_generator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_some() || self.applying_update() {
+        if self.loading_session || self.busy.is_some() || self.applying_update() {
             return;
         }
         if self.template_generator.is_none() {
@@ -424,6 +424,7 @@ impl Workspace {
             document.saved_text = Some(gpui_kit::component::input::Rope::new());
             document.dirty = dirty;
         }
+        self.schedule_json_validation(id, cx);
         self.select(id, window, cx);
     }
 }

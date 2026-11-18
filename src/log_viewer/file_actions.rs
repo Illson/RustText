@@ -49,7 +49,7 @@ impl LogViewer {
     }
 
     pub(super) fn can_cancel_trim(&self) -> bool {
-        self.preparation.is_some() || self.trimming.is_some()
+        !self.immutable_snapshot && (self.preparation.is_some() || self.trimming.is_some())
     }
 
     fn trim_percent(&mut self, cx: &mut Context<Self>) -> Option<u8> {
@@ -65,7 +65,7 @@ impl LogViewer {
     }
 
     pub(super) fn hide_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.available() {
+        if self.immutable_snapshot || !self.available() {
             return;
         }
         let Some(percent) = self.trim_percent(cx) else {
@@ -105,7 +105,7 @@ impl LogViewer {
     }
 
     pub(super) fn reveal_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.available() {
+        if !self.immutable_snapshot && self.available() {
             self.bookmark.hidden = 0;
             self.reset_search(cx);
             self.navigate(Destination::Start, window, cx);
@@ -113,7 +113,7 @@ impl LogViewer {
     }
 
     pub(super) fn confirm_trim(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.available() {
+        if self.immutable_snapshot || !self.available() {
             return;
         }
         let Some(percent) = self.trim_percent(cx) else {
