@@ -1,15 +1,20 @@
 using System.Collections.ObjectModel;
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using Avalonia.Automation;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Microsoft.Win32.SafeHandles;
 using RustText.Demo;
 
@@ -27,7 +32,14 @@ internal sealed record LogTabState(
     bool Regex = false,
     bool MatchCase = false,
     bool WholeWord = false,
-    string SearchText = "");
+    string SearchText = "",
+    LogFileIdentity? Identity = null,
+    long Size = 0,
+    LogFingerprint? Fingerprint = null);
+
+internal sealed record LogFileIdentity(ulong Volume, int[] Id);
+internal sealed record LogSystemTime(long SecsSinceEpoch, uint NanosSinceEpoch);
+internal sealed record LogFingerprint(LogSystemTime? Modified, int[] Digest);
 
 internal sealed class LogView : UserControl, IDisposable
 {
@@ -86,6 +98,23 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly TextBlock _positionLabel = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBlock _statusLabel = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _countLabel = new();
+    private readonly TextBlock _lineNumberLabel = new() { TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly TextBlock _lineGutterText = new()
+    {
+        FontFamily = new FontFamily("Consolas, monospace"),
+        FontSize = 14,
+        TextAlignment = TextAlignment.Right,
+        TextWrapping = TextWrapping.NoWrap,
+        Foreground = Brushes.Gray,
+    };
+    private readonly ScrollViewer _lineGutterScrollViewer = new()
+    {
+        Width = 96,
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+        IsHitTestVisible = false,
+    };
+    private ScrollViewer? _logScrollViewer;
     private readonly TextBlock _indexLabel = new();
     private readonly ListBox _minimapList = new() { Width = 110 };
     private readonly StackPanel _searchPanel = new() { Spacing = 7, IsVisible = false };
@@ -98,6 +127,7 @@ internal sealed class LogView : UserControl, IDisposable
     private CancellationTokenSource? _trimCancellation;
     private LogPage? _page;
     private FileStamp _fileStamp;
+    private byte[]? _observedDigest;
     private long _hiddenOffset;
     private long _searchOffset;
     private long _indexedTo;
@@ -113,8 +143,12 @@ internal sealed class LogView : UserControl, IDisposable
     private bool _searchHasMore;
     private bool _indexBuilding;
     private bool _minimapLoading;
+    private bool _minimapDragging;
+    private double? _pendingMinimapRatio;
     private string _lastSearchText = string.Empty;
     private long _dataGeneration;
+    private int[] _displayRowStarts = [];
+    private long?[] _displaySourceLineNumbers = [];
 
     public LogView(string path, TextEncodingKind? encoding = null, LogTabState? state = null)
     {
@@ -125,19 +159,22 @@ internal sealed class LogView : UserControl, IDisposable
         var effectiveEncoding = LogDataReader.DetectEncoding(_file, _encodingOverride);
         _reader = new LogDataReader(_file, effectiveEncoding);
         _fileStamp = FileStamp.Read(_path, _file);
-        var savedHiddenOffset = Math.Clamp(state?.HiddenOffset ?? 0, 0, _file.Length);
+        _observedDigest = TryReadObservedDigest(_fileStamp.Length);
+        var bookmarkRestorable = CanRestoreBookmark(state);
+        var restoreState = bookmarkRestorable ? state : state is null ? null : state with { Offset = 0, HiddenOffset = 0 };
+        var savedHiddenOffset = Math.Clamp(restoreState?.HiddenOffset ?? 0, 0, _file.Length);
         _hiddenOffset = savedHiddenOffset == _file.Length
             ? savedHiddenOffset
             : _reader.AlignToNextLine(savedHiddenOffset);
         _wordWrap = state?.WordWrap ?? false;
-        _followEnd = state?.FollowEnd ?? false;
-        _autoRefresh = state?.AutoRefresh ?? true;
-        _indexPaused = state?.IndexPaused ?? false;
-        _searchBox.Text = state?.SearchText ?? string.Empty;
-        _regexBox.IsChecked = state?.Regex ?? false;
-        _caseBox.IsChecked = state?.MatchCase ?? false;
-        _wholeWordBox.IsChecked = state?.WholeWord ?? false;
-        _searchPanel.IsVisible = state?.SearchVisible ?? false;
+        _followEnd = restoreState?.FollowEnd ?? false;
+        _autoRefresh = restoreState?.AutoRefresh ?? true;
+        _indexPaused = restoreState?.IndexPaused ?? false;
+        _searchBox.Text = restoreState?.SearchText ?? string.Empty;
+        _regexBox.IsChecked = restoreState?.Regex ?? false;
+        _caseBox.IsChecked = restoreState?.MatchCase ?? false;
+        _wholeWordBox.IsChecked = restoreState?.WholeWord ?? false;
+        _searchPanel.IsVisible = restoreState?.SearchVisible ?? false;
         _refreshTimer = new DispatcherTimer { Interval = RefreshInterval };
         _refreshTimer.Tick += OnRefreshTimerTick;
 
@@ -147,9 +184,10 @@ internal sealed class LogView : UserControl, IDisposable
         _fileLabel.Text = System.IO.Path.GetFileName(_path);
         ToolTip.SetTip(_fileLabel, _path);
         ConfigureInteractions();
+        _logText.LayoutUpdated += OnLogTextLayoutUpdated;
         RefreshButtons();
 
-        _ = LoadPageAsync(Math.Max(_hiddenOffset, state?.Offset ?? _hiddenOffset), saveHistory: false);
+        _ = LoadPageAsync(Math.Max(_hiddenOffset, restoreState?.Offset ?? _hiddenOffset), saveHistory: false, allowFollowEnd: bookmarkRestorable);
         LoadMinimapSamples();
         StartIndexIfNeeded();
         if (_autoRefresh)
@@ -174,19 +212,123 @@ internal sealed class LogView : UserControl, IDisposable
         }
     }
 
-    public LogTabState CaptureState() => new(
-        _encodingOverride,
-        _page?.StartOffset ?? _hiddenOffset,
-        _hiddenOffset,
-        _wordWrap,
-        _followEnd,
-        _autoRefresh,
-        _indexPaused,
-        _searchPanel.IsVisible,
-        _regexBox.IsChecked == true,
-        _caseBox.IsChecked == true,
-        _wholeWordBox.IsChecked == true,
-        _searchBox.Text ?? string.Empty);
+    public LogTabState CaptureState()
+    {
+        var (identity, size, fingerprint) = CaptureBookmarkProof();
+        return new LogTabState(
+            _encodingOverride,
+            _page?.StartOffset ?? _hiddenOffset,
+            _hiddenOffset,
+            _wordWrap,
+            _followEnd,
+            _autoRefresh,
+            _indexPaused,
+            _searchPanel.IsVisible,
+            _regexBox.IsChecked == true,
+            _caseBox.IsChecked == true,
+            _wholeWordBox.IsChecked == true,
+            _searchBox.Text ?? string.Empty,
+            identity,
+            size,
+            fingerprint);
+    }
+
+    private bool CanRestoreBookmark(LogTabState? state)
+    {
+        if (state is null)
+        {
+            return true;
+        }
+
+        var atStart = state.Offset == 0 && state.HiddenOffset == 0;
+        if (state.Identity is null)
+        {
+            return atStart;
+        }
+
+        var currentIdentity = ReadFileIdentity(_file.SafeFileHandle);
+        if (state.Size < 0 || currentIdentity is null || !IdentityEquals(state.Identity, currentIdentity) || _file.Length < state.Size)
+        {
+            return false;
+        }
+        if (state.Fingerprint is null)
+        {
+            return atStart;
+        }
+
+        if (_file.Length == state.Size && state.Fingerprint.Modified is { } modified
+            && GetFileModifiedTime(_file.SafeFileHandle) is { } currentModified
+            && (modified.SecsSinceEpoch != currentModified.SecsSinceEpoch
+                || modified.NanosSinceEpoch != currentModified.NanosSinceEpoch))
+        {
+            return false;
+        }
+
+        try
+        {
+            var digest = _reader.ComputeBookmarkDigest(state.Size).Select(value => (int)value);
+            return digest.SequenceEqual(state.Fingerprint.Digest);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    private (LogFileIdentity? Identity, long Size, LogFingerprint? Fingerprint) CaptureBookmarkProof()
+    {
+        try
+        {
+            var size = _file.Length;
+            var modified = GetFileModifiedTime(_file.SafeFileHandle);
+            var digest = _reader.ComputeBookmarkDigest(size).Select(value => (int)value).ToArray();
+            return (ReadFileIdentity(_file.SafeFileHandle), size, new LogFingerprint(modified, digest));
+        }
+        catch (IOException)
+        {
+            return (ReadFileIdentity(_file.SafeFileHandle), _file.Length, null);
+        }
+    }
+
+    private static bool IdentityEquals(LogFileIdentity expected, LogFileIdentity actual) =>
+        expected.Volume == actual.Volume && expected.Id.AsSpan().SequenceEqual(actual.Id);
+
+    private static LogFileIdentity? ReadFileIdentity(SafeFileHandle handle)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        var native = default(NativeFileIdInfo);
+        if (!GetFileInformationByHandleEx(handle, 18, ref native, (uint)Marshal.SizeOf<NativeFileIdInfo>()))
+        {
+            return null;
+        }
+
+        var id = new byte[16];
+        BinaryPrimitives.WriteUInt64LittleEndian(id.AsSpan(0, 8), native.Id.Low);
+        BinaryPrimitives.WriteUInt64LittleEndian(id.AsSpan(8, 8), native.Id.High);
+        return new LogFileIdentity(native.Volume, id.Select(value => (int)value).ToArray());
+    }
+
+    private static LogSystemTime? GetFileModifiedTime(SafeFileHandle handle)
+    {
+        if (!GetFileInformationByHandle(handle, out var information))
+        {
+            return null;
+        }
+
+        var modifiedUtc = ToDateTime(information.LastWriteTime);
+        var ticks = modifiedUtc.Ticks - DateTime.UnixEpoch.Ticks;
+        if (ticks < 0)
+        {
+            return null;
+        }
+        var seconds = ticks / TimeSpan.TicksPerSecond;
+        var nanos = (uint)(ticks % TimeSpan.TicksPerSecond * 100);
+        return new LogSystemTime(seconds, nanos);
+    }
 
     public void SetTextSize(double value) => _logText.FontSize = value;
 
@@ -221,35 +363,36 @@ internal sealed class LogView : UserControl, IDisposable
     private async Task OpenSearchHitAsync(SearchResult hit)
     {
         _activeSearchResult = _searchResults.IndexOf(hit);
-        await NavigateAsync(hit.Offset, true);
-        if (_page?.Rows.FirstOrDefault() is not { } row || row.StartOffset != hit.Offset)
+        var end = hit.MatchIndex + hit.MatchLength;
+        if (_page?.Rows.FirstOrDefault()?.StartOffset != hit.Offset)
         {
-            return;
+            await LoadPageAsync(hit.Offset, saveHistory: true, allowFollowEnd: false);
         }
 
-        var pattern = _lastSearchText;
-        var index = row.Text.IndexOf(pattern, _caseBox.IsChecked == true
-            ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
-        var length = pattern.Length;
-        if (_regexBox.IsChecked == true)
+        if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && end > FirstDisplayedLineLength())
         {
-            try
-            {
-                var match = Regex.Match(row.Text, pattern, _caseBox.IsChecked == true
-                    ? RegexOptions.CultureInvariant : RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
-                    TimeSpan.FromMilliseconds(40));
-                index = match.Success ? match.Index : -1;
-                length = match.Length;
-            }
-            catch (ArgumentException) { return; }
-            catch (RegexMatchTimeoutException) { return; }
+            await LoadPageAsync(hit.Offset, saveHistory: false, allowFollowEnd: false,
+                maxPageBytes: MaximumSearchLineBytes);
         }
 
-        if (index >= 0 && length > 0)
+        if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && hit.MatchLength > 0
+            && hit.MatchIndex >= 0 && end <= FirstDisplayedLineLength())
         {
-            _logText.SelectionStart = index;
-            _logText.SelectionEnd = index + length;
+            _logText.CaretIndex = end;
+            _logText.SelectionStart = hit.MatchIndex;
+            _logText.SelectionEnd = end;
         }
+    }
+
+    private int FirstDisplayedLineLength()
+    {
+        var rows = _page!.Rows;
+        var length = rows[0].Text.Length;
+        for (var index = 1; index < rows.Count && rows[index].ContinuesLine; index++)
+        {
+            length += rows[index].Text.Length;
+        }
+        return length;
     }
 
     public void FocusSearch()
@@ -322,12 +465,24 @@ internal sealed class LogView : UserControl, IDisposable
 
         var content = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
             ColumnSpacing = 8
         };
         Grid.SetRow(content, 2);
+        _lineGutterScrollViewer.Content = new Border
+        {
+            Padding = new Thickness(0, 12),
+            Child = _lineGutterText,
+        };
+        AutomationProperties.SetName(_lineGutterScrollViewer, "Номера строк лога");
+        AutomationProperties.SetAutomationId(_lineGutterScrollViewer, "LogLineNumbers");
+        Grid.SetColumn(_lineGutterScrollViewer, 0);
+        content.Children.Add(_lineGutterScrollViewer);
+        Grid.SetColumn(_logText, 1);
         content.Children.Add(_logText);
         _minimapList.ItemsSource = _miniSamples;
+        AutomationProperties.SetName(_minimapList, "Прокрутка лога");
+        AutomationProperties.SetAutomationId(_minimapList, "LogMinimap");
         _minimapList.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<MiniSample>((sample, _) =>
         {
             if (sample is null)
@@ -345,15 +500,17 @@ internal sealed class LogView : UserControl, IDisposable
             button.Click += async (_, _) => await NavigateAsync(sample.Offset, true);
             return button;
         });
-        Grid.SetColumn(_minimapList, 1);
+        Grid.SetColumn(_minimapList, 2);
         content.Children.Add(_minimapList);
         root.Children.Add(content);
 
         var footer = new StackPanel { Spacing = 6, Margin = new Thickness(0, 8, 0, 0) };
         Grid.SetRow(footer, 3);
-        var statusRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
+        var statusRow = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 12 };
         statusRow.Children.Add(_countLabel);
-        Grid.SetColumn(_positionLabel, 1);
+        Grid.SetColumn(_lineNumberLabel, 1);
+        statusRow.Children.Add(_lineNumberLabel);
+        Grid.SetColumn(_positionLabel, 2);
         statusRow.Children.Add(_positionLabel);
         footer.Children.Add(statusRow);
         footer.Children.Add(_indexLabel);
@@ -370,6 +527,8 @@ internal sealed class LogView : UserControl, IDisposable
         searchRow.Children.Add(_searchCloseButton);
         _searchPanel.Children.Add(searchRow);
         _searchPanel.Children.Add(_searchResultButtons);
+        AutomationProperties.SetName(_searchBox, "Поиск по логу");
+        AutomationProperties.SetAutomationId(_searchBox, "LogSearch");
         footer.Children.Add(_searchPanel);
         root.Children.Add(footer);
         return root;
@@ -447,10 +606,66 @@ internal sealed class LogView : UserControl, IDisposable
             }
         };
         _minimapList.SelectionChanged += (_, _) => _minimapList.SelectedItem = null;
+        _minimapList.AddHandler(InputElement.PointerPressedEvent, OnMinimapPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+        _minimapList.PointerMoved += OnMinimapPointerMoved;
+        _minimapList.PointerReleased += OnMinimapPointerReleased;
+        _minimapList.AddHandler(InputElement.PointerWheelChangedEvent, OnMinimapPointerWheelChanged, RoutingStrategies.Tunnel, handledEventsToo: true);
         WordWrap = _wordWrap;
     }
 
-    private async Task LoadPageAsync(long offset, bool saveHistory = true)
+    private void OnMinimapPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(_minimapList).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        _minimapDragging = true;
+        e.Pointer.Capture(_minimapList);
+        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimapList).Y));
+        e.Handled = true;
+    }
+
+    private void OnMinimapPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_minimapDragging)
+        {
+            return;
+        }
+
+        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimapList).Y));
+        e.Handled = true;
+    }
+
+    private void OnMinimapPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (!_minimapDragging)
+        {
+            return;
+        }
+
+        _minimapDragging = false;
+        e.Pointer.Capture(null);
+        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimapList).Y));
+        e.Handled = true;
+    }
+
+    private void OnMinimapPointerWheelChanged(object? sender, PointerWheelEventArgs e)
+    {
+        if (_page is not { } page || e.Delta.Y == 0)
+        {
+            return;
+        }
+
+        var pageBytes = Math.Max(1, page.NextOffset - page.StartOffset);
+        var next = Math.Clamp(page.StartOffset - (long)Math.Sign(e.Delta.Y) * pageBytes, _hiddenOffset, _file.Length);
+        var range = Math.Max(1, _file.Length - _hiddenOffset);
+        _ = NavigateMinimapToRatioAsync((next - _hiddenOffset) / (double)range);
+        e.Handled = true;
+    }
+
+    private async Task LoadPageAsync(long offset, bool saveHistory = true, bool allowFollowEnd = true,
+        int maxPageBytes = LogDataReader.DefaultPageBytes)
     {
         if (_closed || _busy)
         {
@@ -463,7 +678,8 @@ internal sealed class LogView : UserControl, IDisposable
         try
         {
             var requested = Math.Clamp(offset, _hiddenOffset, _file.Length);
-            var page = await Task.Run(() => _reader.ReadPage(requested, cancellationToken: _closing.Token), _closing.Token);
+            var page = await Task.Run(() => _reader.ReadPage(requested, maxPageBytes: maxPageBytes,
+                cancellationToken: _closing.Token), _closing.Token);
             if (_closed)
             {
                 return;
@@ -479,12 +695,28 @@ internal sealed class LogView : UserControl, IDisposable
             }
 
             _page = page;
-            _logText.Text = string.Join(Environment.NewLine, page.Rows.Select(row => row.Text));
+            var displayText = new StringBuilder();
+            for (var index = 0; index < page.Rows.Count; index++)
+            {
+                var row = page.Rows[index];
+                if (index > 0 && !row.ContinuesLine)
+                {
+                    displayText.Append(Environment.NewLine);
+                }
+                displayText.Append(row.Text);
+            }
+            _logText.Text = displayText.ToString();
+            UpdatePageLineNumbers(page);
             _positionLabel.Text = $"Байты [{page.StartOffset:N0}, {page.NextOffset:N0}) / {page.FileLength:N0}";
-            _countLabel.Text = $"Строки · {page.Rows.Count} · {_reader.Encoding}";
+            var firstLine = page.Rows.Count > 0 ? FindLineNumber(page.Rows[0].StartOffset) : FindLineNumber(page.StartOffset);
+            var lastLine = page.Rows.Count > 0 ? FindLineNumber(page.Rows[^1].StartOffset) : firstLine;
+            _lineNumberLabel.Text = firstLine is { } first && lastLine is { } last
+                ? $"Строки {first:N0}–{last:N0}"
+                : "Строки индексируются";
+            _countLabel.Text = $"Записей на странице · {page.Rows.Count} · {_reader.Encoding}";
             _statusLabel.Text = page.WasTruncated ? "Файл изменился во время чтения. Позиция пересчитана по открытом файлу." : string.Empty;
             _statusLabel.IsVisible = !string.IsNullOrEmpty(_statusLabel.Text);
-            if (_followEnd && page.HasMore)
+            if (allowFollowEnd && _followEnd && page.HasMore)
             {
                 loadFollowEnd = true;
             }
@@ -510,7 +742,46 @@ internal sealed class LogView : UserControl, IDisposable
             {
                 _ = NavigateAsync(_reader.GetEndOffset(_closing.Token), saveHistory: false);
             }
+            else if (_pendingMinimapRatio is { } ratio && !_closed)
+            {
+                _pendingMinimapRatio = null;
+                _ = NavigateMinimapToRatioAsync(ratio);
+            }
         }
+    }
+
+    private async Task NavigateMinimapToRatioAsync(double ratio)
+    {
+        ratio = Math.Clamp(ratio, 0, 1);
+        if (_busy)
+        {
+            _pendingMinimapRatio = ratio;
+            return;
+        }
+
+        var length = _file.Length;
+        var available = Math.Max(0, length - _hiddenOffset);
+        var target = ratio >= 1
+            ? _reader.GetEndOffset(_closing.Token)
+            : _hiddenOffset + (long)(available * ratio);
+        try
+        {
+            var aligned = await Task.Run(() => _reader.AlignToNextLine(target, _closing.Token), _closing.Token);
+            await LoadPageAsync(Math.Max(_hiddenOffset, aligned), saveHistory: true, allowFollowEnd: false);
+        }
+        catch (OperationCanceledException) when (_closing.IsCancellationRequested)
+        {
+        }
+        catch (IOException error)
+        {
+            SetStatus($"Переход по миникарте остановлен. {error.Message}");
+        }
+    }
+
+    private double MinimapRatioAt(double y)
+    {
+        var height = _minimapList.Bounds.Height;
+        return height <= 0 ? 0 : Math.Clamp(y / height, 0, 1);
     }
 
     private async Task NavigateAsync(long offset, bool saveHistory)
@@ -573,6 +844,7 @@ internal sealed class LogView : UserControl, IDisposable
         _searchCancellation?.Dispose();
         _searchCancellation = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
         var token = _searchCancellation.Token;
+        var generation = _dataGeneration;
         if (!continueSearch || !string.Equals(query, _lastSearchText, StringComparison.Ordinal))
         {
             _searchOffset = Math.Max(_hiddenOffset, _page?.StartOffset ?? _hiddenOffset);
@@ -590,7 +862,7 @@ internal sealed class LogView : UserControl, IDisposable
         try
         {
             var result = await Task.Run(() => SearchFile(query, regex, caseSensitive, wholeWord, startOffset, token), token);
-            if (_closed)
+            if (_closed || token.IsCancellationRequested || generation != _dataGeneration)
             {
                 return;
             }
@@ -663,9 +935,13 @@ internal sealed class LogView : UserControl, IDisposable
                 var startsWithinLine = row.ContinuesLine && pendingLine.Length > 0 || IsContinuationAt(row.StartOffset);
                 if (!startsWithinLine)
                 {
-                    if (!skippingOversizedLine && pendingLine.Length > 0 && Matches(pendingLine.ToString(), query, expression, matchCase, wholeWord))
+                    var pendingText = pendingLine.ToString();
+                    var match = !skippingOversizedLine && pendingLine.Length > 0
+                        ? FindMatch(pendingText, query, expression, matchCase, wholeWord)
+                        : null;
+                    if (match is { } previousMatch)
                     {
-                        results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingLine.ToString())));
+                        results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingText), previousMatch.Index, previousMatch.Length));
                         if (results.Count >= SearchResultsPerPage)
                         {
                             nextOffset = row.StartOffset;
@@ -686,9 +962,10 @@ internal sealed class LogView : UserControl, IDisposable
                     continue;
                 }
                 pendingLine.Append(row.Text);
-                if (!row.ContinuesLine && !IsContinuationAt(row.EndOffset) && Matches(pendingLine.ToString(), query, expression, matchCase, wholeWord))
+                if (!row.ContinuesLine && !IsContinuationAt(row.EndOffset)
+                    && FindMatch(pendingLine.ToString(), query, expression, matchCase, wholeWord) is { } currentMatch)
                 {
-                    results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingLine.ToString())));
+                    results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingLine.ToString()), currentMatch.Index, currentMatch.Length));
                     pendingLine.Clear();
                     if (results.Count >= SearchResultsPerPage)
                     {
@@ -710,20 +987,22 @@ internal sealed class LogView : UserControl, IDisposable
             }
         }
 
-        if (cursor >= pageEnd && !skippingOversizedLine && pendingLine.Length > 0 && Matches(pendingLine.ToString(), query, expression, matchCase, wholeWord))
+        if (cursor >= pageEnd && !skippingOversizedLine && pendingLine.Length > 0
+            && FindMatch(pendingLine.ToString(), query, expression, matchCase, wholeWord) is { } finalMatch)
         {
-            results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingLine.ToString())));
+            results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingLine.ToString()), finalMatch.Index, finalMatch.Length));
         }
 
         var resultNextOffset = results.Count == SearchResultsPerPage ? nextOffset : cursor;
         return new SearchPage(results, resultNextOffset, resultNextOffset < _file.Length, notice);
     }
 
-    private bool Matches(string text, string query, Regex? expression, bool matchCase, bool wholeWord)
+    private static MatchSpan? FindMatch(string text, string query, Regex? expression, bool matchCase, bool wholeWord)
     {
         if (expression is not null)
         {
-            return expression.IsMatch(text);
+            var match = expression.Match(text);
+            return match.Success ? new MatchSpan(match.Index, match.Length) : null;
         }
         var comparison = matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
         var found = text.IndexOf(query, comparison);
@@ -731,11 +1010,11 @@ internal sealed class LogView : UserControl, IDisposable
         {
             if (!wholeWord || IsWordBoundary(text, found - 1) && IsWordBoundary(text, found + query.Length))
             {
-                return true;
+                return new MatchSpan(found, query.Length);
             }
             found = text.IndexOf(query, found + 1, comparison);
         }
-        return false;
+        return null;
     }
 
     private bool IsContinuationAt(long offset)
@@ -868,8 +1147,11 @@ internal sealed class LogView : UserControl, IDisposable
             return;
         }
 
-        var confirm = await ShowConfirmationAsync($"Файл будет обрезан физически до байта {_hiddenOffset:N0}. Рядом будет создана резервная копия. Продолжить?");
-        if (!confirm)
+        var boundary = _hiddenOffset;
+        var expected = _fileStamp;
+        var preambleLength = _reader.PreambleLength;
+        var confirm = await ShowConfirmationAsync($"Файл будет обрезан физически до байта {boundary:N0}. Рядом будет создана резервная копия. Продолжить?");
+        if (!confirm || _closed || _busy)
         {
             return;
         }
@@ -882,15 +1164,7 @@ internal sealed class LogView : UserControl, IDisposable
         var generation = ++_trimGeneration;
         try
         {
-            var backup = await Task.Run(() => TrimFile(
-                _path,
-                _hiddenOffset,
-                _reader.PreambleLength,
-                _fileStamp.Length,
-                _fileStamp.LastWriteUtc,
-                _fileStamp.CreationUtc,
-                _fileStamp.Identity,
-                token), token);
+            var backup = await Task.Run(() => TrimFile(_path, boundary, preambleLength, expected, token), token);
             if (_closed || generation != _trimGeneration)
             {
                 return;
@@ -898,13 +1172,10 @@ internal sealed class LogView : UserControl, IDisposable
 
             ResetFileHandle();
             SetStatus($"Начало удалено. Резервная копия: {backup}");
-            _hiddenOffset = 0;
-            _previousOffsets.Clear();
-            _lineIndex.Clear();
-            _indexedTo = 0;
-            _indexedLineCount = 0;
             _busy = false;
             await LoadPageAsync(0, saveHistory: false);
+            StartIndexIfNeeded();
+            LoadMinimapSamples();
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -964,12 +1235,10 @@ internal sealed class LogView : UserControl, IDisposable
         string path,
         long boundary,
         long preambleLength,
-        long expectedLength,
-        DateTime expectedLastWriteUtc,
-        DateTime expectedCreationUtc,
-        string expectedIdentity,
+        FileStamp expected,
         CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
         var directory = System.IO.Path.GetDirectoryName(path) ?? throw new IOException("Не удалось определить папку файла.");
         var fileName = System.IO.Path.GetFileName(path);
         var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture);
@@ -979,11 +1248,8 @@ internal sealed class LogView : UserControl, IDisposable
         try
         {
             using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            var initialInfo = new FileInfo(path);
-            if (boundary < 0 || boundary > source.Length || source.Length != expectedLength
-                || initialInfo.LastWriteTimeUtc != expectedLastWriteUtc
-                || initialInfo.CreationTimeUtc != expectedCreationUtc
-                || ReadFileStamp(path, source).Identity != expectedIdentity)
+            if (boundary <= 0 || boundary < preambleLength || boundary > source.Length
+                || source.Length != expected.Length || ReadFileStamp(path, source) != expected)
             {
                 throw new IOException("Файл изменился до обрезки.");
             }
@@ -1011,15 +1277,7 @@ internal sealed class LogView : UserControl, IDisposable
                 target.Flush(flushToDisk: true);
             }
 
-            token.ThrowIfCancellationRequested();
-            var finalInfo = new FileInfo(path);
-            if (finalInfo.Length != expectedLength || finalInfo.LastWriteTimeUtc != expectedLastWriteUtc
-                || finalInfo.CreationTimeUtc != expectedCreationUtc
-                || ReadFileStamp(path, source).Identity != expectedIdentity)
-            {
-                throw new IOException("Файл изменился во время обрезки. Исходник оставлен без изменений, резервная копия сохранена.");
-            }
-            File.Replace(temp, path, destinationBackupFileName: null);
+            CommitTrim(path, temp, source, expected, token);
             return backup;
         }
         catch
@@ -1034,6 +1292,16 @@ internal sealed class LogView : UserControl, IDisposable
             }
             throw;
         }
+    }
+
+    private static void CommitTrim(string path, string staged, FileStream source, FileStamp expected, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (ReadFileStamp(path, source) != expected)
+        {
+            throw new IOException("Файл изменился во время обрезки. Исходник оставлен без изменений, резервная копия сохранена.");
+        }
+        File.Replace(staged, path, destinationBackupFileName: null);
     }
 
     private static void CopyWithCancellation(Stream source, Stream target, CancellationToken token)
@@ -1063,17 +1331,45 @@ internal sealed class LogView : UserControl, IDisposable
 
     private void ResetFileHandle()
     {
-        _dataGeneration++;
-        _indexCancellation?.Cancel();
-        _searchCancellation?.Cancel();
         var replacement = LogDataReader.Open(_path);
         var encoding = LogDataReader.DetectEncoding(replacement, _encodingOverride);
         var reader = new LogDataReader(replacement, encoding);
+        _dataGeneration++;
+        _indexCancellation?.Cancel();
+        _searchCancellation?.Cancel();
         var previous = _file;
         _file = replacement;
         _reader = reader;
         _fileStamp = FileStamp.Read(_path, replacement);
+        _observedDigest = TryReadObservedDigest(_fileStamp.Length);
         previous.Dispose();
+
+        _previousOffsets.Clear();
+        _hiddenOffset = 0;
+        _lineIndex.Clear();
+        _indexedTo = 0;
+        _indexedLineCount = 0;
+        _indexLabel.Text = "";
+        _skippedSearchLines.Clear();
+        _searchResults.Clear();
+        _searchResultButtons.Children.Clear();
+        _searchOffset = 0;
+        _searchHasMore = false;
+        _activeSearchResult = -1;
+        _lastSearchText = "";
+        _logText.SelectionStart = _logText.SelectionEnd = 0;
+    }
+
+    private byte[]? TryReadObservedDigest(long size)
+    {
+        try
+        {
+            return _reader.ComputeBookmarkDigest(size);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
@@ -1086,50 +1382,31 @@ internal sealed class LogView : UserControl, IDisposable
         try
         {
             var now = FileStamp.Read(_path, _file);
-            if (now.Identity != _fileStamp.Identity || now.Length < _fileStamp.Length)
+            if (now == _fileStamp)
             {
-                _previousOffsets.Clear();
-                _hiddenOffset = 0;
-                _lineIndex.Clear();
-                _indexedLineCount = 0;
-                _indexedTo = 0;
-                _indexCancellation?.Cancel();
-                _searchCancellation?.Cancel();
+                return;
+            }
+
+            var grew = now.Length > _fileStamp.Length;
+            var previousContent = grew && now.Identity == _fileStamp.Identity
+                ? TryReadObservedDigest(_fileStamp.Length) : null;
+            var appended = _observedDigest is { } expected && previousContent is not null
+                && expected.AsSpan().SequenceEqual(previousContent);
+            if (appended)
+            {
+                _fileStamp = now;
+                _observedDigest = TryReadObservedDigest(now.Length);
+                var offset = _followEnd ? _reader.GetEndOffset(_closing.Token) : _page?.StartOffset ?? _hiddenOffset;
+                await LoadPageAsync(offset, saveHistory: false);
+            }
+            else
+            {
                 ResetFileHandle();
-                _fileStamp = now;
-                SetStatus("Файл был заменён или очищен. Позиция и индекс сброшены.");
+                SetStatus("Файл был заменён, очищен или перезаписан. Позиция и индекс сброшены.");
                 await LoadPageAsync(0, saveHistory: false);
-                StartIndexIfNeeded();
-                LoadMinimapSamples();
             }
-            else if (now.Length > _fileStamp.Length)
-            {
-                _fileStamp = now;
-                if (_followEnd)
-                {
-                    await LoadPageAsync(_reader.GetEndOffset(_closing.Token), saveHistory: false);
-                }
-                else if (_page is { } page)
-                {
-                    await LoadPageAsync(page.StartOffset, saveHistory: false);
-                }
-                StartIndexIfNeeded();
-                LoadMinimapSamples();
-            }
-            else if (now.LastWriteUtc != _fileStamp.LastWriteUtc)
-            {
-                _hiddenOffset = 0;
-                _previousOffsets.Clear();
-                _lineIndex.Clear();
-                _indexedTo = 0;
-                _indexedLineCount = 0;
-                ResetFileHandle();
-                _fileStamp = now;
-                SetStatus("Файл был перезаписан. Позиция и индекс сброшены.");
-                await LoadPageAsync(0, saveHistory: false);
-                StartIndexIfNeeded();
-                LoadMinimapSamples();
-            }
+            StartIndexIfNeeded();
+            LoadMinimapSamples();
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
@@ -1170,8 +1447,17 @@ internal sealed class LogView : UserControl, IDisposable
         _ = Task.Run(() => BuildIndex(startOffset, startLine, token), token).ContinueWith(task => Dispatcher.UIThread.Post(() =>
         {
             _indexBuilding = false;
-            if (_closed || generation != _dataGeneration)
+            if (_closed)
             {
+                return;
+            }
+            if (generation != _dataGeneration)
+            {
+                if (!_indexPaused)
+                {
+                    StartIndexIfNeeded();
+                }
+                RefreshButtons();
                 return;
             }
             if (task.Status == TaskStatus.RanToCompletion)
@@ -1180,6 +1466,10 @@ internal sealed class LogView : UserControl, IDisposable
                 _indexedLineCount = task.Result.LineCount;
                 _lineIndex.AddRange(task.Result.Entries);
                 _indexLabel.Text = $"Индекс: {_indexedLineCount:N0} строк до {_indexedTo:N0} байт";
+                if (_page is { } page)
+                {
+                    UpdatePageLineNumbers(page);
+                }
                 if (_indexedTo < _file.Length && !_indexPaused)
                 {
                     StartIndexIfNeeded();
@@ -1227,16 +1517,36 @@ internal sealed class LogView : UserControl, IDisposable
 
     private long? FindLineNumber(long offset)
     {
+        if (offset < 0 || (offset > 128 * 1024 && offset > _indexedTo))
+        {
+            return null;
+        }
+
         var entry = _lineIndex.LastOrDefault(value => value.Offset <= offset);
+        if (entry is null && _hiddenOffset == 0 && offset <= 128 * 1024)
+        {
+            entry = new IndexEntry(_reader.PreambleLength, 1);
+        }
         if (entry is null)
         {
             return null;
         }
 
         var lineNumber = entry.LineNumber;
+        if (offset == entry.Offset)
+        {
+            return lineNumber;
+        }
         var cursor = entry.Offset;
+        // A sparse checkpoint may be far away in bytes when a log contains very long rows.
+        // Keep this UI lookup bounded even when the background index has already passed offset.
+        var scanLimit = Math.Min(offset, entry.Offset + 16L * 1024 * 1024);
         while (cursor < offset)
         {
+            if (cursor >= scanLimit && offset > scanLimit)
+            {
+                return null;
+            }
             var page = _reader.ReadPage(cursor, cancellationToken: _closing.Token);
             if (page.Rows.Count == 0 || page.NextOffset <= cursor)
             {
@@ -1244,14 +1554,128 @@ internal sealed class LogView : UserControl, IDisposable
             }
             foreach (var row in page.Rows)
             {
-                if (row.StartOffset > entry.Offset && row.StartOffset < offset && !IsContinuationAt(row.StartOffset))
+                if (row.StartOffset > entry.Offset && row.StartOffset <= offset && !IsContinuationAt(row.StartOffset))
                 {
                     lineNumber++;
                 }
             }
             cursor = page.NextOffset;
         }
-        return lineNumber;
+        if (cursor == offset && offset < _file.Length && !IsContinuationAt(offset))
+        {
+            lineNumber++;
+        }
+        return cursor >= offset ? lineNumber : null;
+    }
+
+    private void UpdatePageLineNumbers(LogPage page)
+    {
+        _displayRowStarts = new int[page.Rows.Count];
+        _displaySourceLineNumbers = new long?[page.Rows.Count];
+        var textOffset = 0;
+        for (var index = 0; index < page.Rows.Count; index++)
+        {
+            _displayRowStarts[index] = textOffset;
+            textOffset += page.Rows[index].Text.Length;
+            if (index + 1 < page.Rows.Count && !page.Rows[index + 1].ContinuesLine)
+            {
+                textOffset += Environment.NewLine.Length;
+            }
+        }
+
+        if (page.Rows.Count > 0)
+        {
+            var lineNumber = FindLineNumber(page.Rows[0].StartOffset);
+            for (var index = 0; index < page.Rows.Count; index++)
+            {
+                var isContinuation = index > 0 && IsContinuationAt(page.Rows[index].StartOffset);
+                if (index > 0 && !isContinuation && lineNumber.HasValue)
+                {
+                    lineNumber++;
+                }
+                _displaySourceLineNumbers[index] = isContinuation ? null : lineNumber;
+            }
+        }
+
+        var firstLine = _displaySourceLineNumbers.FirstOrDefault(value => value.HasValue);
+        var lastLine = _displaySourceLineNumbers.LastOrDefault(value => value.HasValue);
+        _lineNumberLabel.Text = firstLine is { } first && lastLine is { } last
+            ? $"Строки {first:N0}–{last:N0}"
+            : "Строки индексируются";
+        UpdateLineGutterText();
+    }
+
+    private void OnLogTextLayoutUpdated(object? sender, EventArgs e)
+    {
+        AttachLogScrollViewer();
+        UpdateLineGutterText();
+    }
+
+    private void AttachLogScrollViewer()
+    {
+        var scrollViewer = _logText.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
+        if (ReferenceEquals(scrollViewer, _logScrollViewer))
+        {
+            return;
+        }
+        if (_logScrollViewer is not null)
+        {
+            _logScrollViewer.ScrollChanged -= OnLogScrollChanged;
+        }
+        _logScrollViewer = scrollViewer;
+        if (_logScrollViewer is not null)
+        {
+            _logScrollViewer.ScrollChanged += OnLogScrollChanged;
+            _lineGutterScrollViewer.Offset = new Vector(0, _logScrollViewer.Offset.Y);
+        }
+    }
+
+    private void OnLogScrollChanged(object? sender, ScrollChangedEventArgs e)
+    {
+        if (_logScrollViewer is { } scrollViewer)
+        {
+            _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
+        }
+    }
+
+    private void UpdateLineGutterText()
+    {
+        if (_displaySourceLineNumbers.Length == 0)
+        {
+            _lineGutterText.Text = string.Empty;
+            return;
+        }
+
+        var values = new List<string>();
+        var layout = _logText.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault()?.TextLayout;
+        if (layout is not null && layout.TextLines.Count > 0)
+        {
+            var text = _logText.Text ?? string.Empty;
+            var rowIndex = 0;
+            foreach (var visualLine in layout.TextLines)
+            {
+                var start = Math.Clamp(visualLine.FirstTextSourceIndex, 0, text.Length);
+                while (rowIndex + 1 < _displayRowStarts.Length && _displayRowStarts[rowIndex + 1] <= start)
+                {
+                    rowIndex++;
+                }
+
+                var startsLogicalRow = start == _displayRowStarts[rowIndex];
+                values.Add(startsLogicalRow
+                    ? _displaySourceLineNumbers[rowIndex]?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"
+                    : string.Empty);
+            }
+        }
+        else
+        {
+            values.AddRange(_displaySourceLineNumbers.Select(value => value?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"));
+        }
+
+        _lineGutterText.Text = string.Join(Environment.NewLine, values);
+        if (_logScrollViewer is { } scrollViewer)
+        {
+            _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
+        }
     }
 
     private async void LoadMinimapSamples()
@@ -1289,6 +1713,10 @@ internal sealed class LogView : UserControl, IDisposable
         finally
         {
             _minimapLoading = false;
+            if (!_closed && generation != _dataGeneration)
+            {
+                Dispatcher.UIThread.Post(LoadMinimapSamples);
+            }
         }
     }
 
@@ -1402,6 +1830,24 @@ internal sealed class LogView : UserControl, IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation information);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int informationClass, ref NativeFileIdInfo information, uint bufferSize);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeFileIdInfo
+    {
+        public ulong Volume;
+        public FileId128 Id;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Size = 16)]
+    private struct FileId128
+    {
+        public ulong Low;
+        public ulong High;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct Win32FileTime
     {
@@ -1424,7 +1870,8 @@ internal sealed class LogView : UserControl, IDisposable
         public uint FileIndexLow;
     }
 
-    private sealed record SearchResult(long Offset, long? LineNumber, string Preview);
+    private readonly record struct MatchSpan(int Index, int Length);
+    private sealed record SearchResult(long Offset, long? LineNumber, string Preview, int MatchIndex, int MatchLength);
     private sealed record SearchPage(IReadOnlyList<SearchResult> Results, long NextOffset, bool HasMore, string? Message);
     private sealed record IndexEntry(long Offset, long LineNumber);
     private sealed record IndexBuildResult(long EndOffset, long LineCount, IReadOnlyList<IndexEntry> Entries);

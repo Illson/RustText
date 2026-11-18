@@ -2,7 +2,19 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Styles>
-        <FluentTheme />
+        <FluentTheme>
+            <FluentTheme.Palettes>
+                <ColorPaletteResources x:Key="Dark" RegionColor="#131B23" Accent="#609CCD"
+                                       BaseHigh="#E9F0F6" BaseMedium="#A9BBC9"
+                                       BaseLow="#2B3A48" BaseMediumLow="#4C6171"
+                                       ChromeLow="#17212A" ChromeMediumLow="#253440"
+                                       ListLow="#233744" ListMedium="#365776" />
+            </FluentTheme.Palettes>
+        </FluentTheme>
+        <Style Selector="Window">
+            <Setter Property="Background" Value="#131B23" />
+            <Setter Property="Foreground" Value="#E9F0F6" />
+        </Style>
         <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
     </Application.Styles>
 </Application>

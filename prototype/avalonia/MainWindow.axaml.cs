@@ -95,12 +95,13 @@ public partial class MainWindow : Window
         ToolTip.SetTip(add, "Новая вкладка");
         var restore = Button("↶", () => Run(RestoreLastClosedAsync));
         ToolTip.SetTip(restore, "Восстановить закрытую вкладку");
-        var across = Button("⇆", () => SplitGroup(group, Orientation.Horizontal));
-        ToolTip.SetTip(across, "Разделить рядом");
-        var below = Button("⇅", () => SplitGroup(group, Orientation.Vertical));
-        ToolTip.SetTip(below, "Разделить снизу");
+        var across = Button("│", () => SplitGroup(group, Orientation.Horizontal));
+        ToolTip.SetTip(across, "Разделить слева и справа");
+        var below = Button("─", () => SplitGroup(group, Orientation.Vertical));
+        ToolTip.SetTip(below, "Разделить сверху и снизу");
+        group.CloseButton = Button("Закрыть группу", () => CloseGroup(group));
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3 };
-        foreach (var button in new[] { add, restore, across, below })
+        foreach (var button in new[] { add, restore, across, below, group.CloseButton })
         {
             tools.Children.Add(button);
         }
@@ -287,6 +288,57 @@ public partial class MainWindow : Window
         return node;
     }
 
+    private void CloseGroup(Group group)
+    {
+        var parent = FindParentGroup(_root, group);
+        if (group.Axis is not null || parent is not { First: { } first, Second: { } second })
+        {
+            return;
+        }
+
+        var closingFirst = ReferenceEquals(group, first);
+        var sibling = closingFirst ? second : first;
+        var neighbor = closingFirst ? Groups(sibling).First() : Groups(sibling).Last();
+        var keepActive = ReferenceEquals(_active, group);
+        var selected = keepActive ? SelectedIn(group) ?? SelectedIn(neighbor) : SelectedIn(neighbor);
+        if (keepActive)
+        {
+            _active = neighbor;
+        }
+
+        var tabsByItem = _tabs.Values.Where(tab => ReferenceEquals(tab.Group, group)).ToDictionary(tab => tab.Item);
+        var insertion = closingFirst ? 0 : neighbor.Tabs.Items.Count;
+        foreach (var item in group.Tabs.Items.OfType<TabItem>().ToArray())
+        {
+            var tab = tabsByItem[item];
+            group.Tabs.Items.Remove(item);
+            tab.Group = neighbor;
+            neighbor.Tabs.Items.Insert(insertion++, item);
+        }
+
+        _root = ReplaceGroup(_root, parent, sibling);
+        ShowGroups();
+        if (selected is not null)
+        {
+            neighbor.Tabs.SelectedItem = selected.Item;
+        }
+        if (SelectedIn(_active) is { } active)
+        {
+            ActivateTab(active);
+        }
+    }
+
+    private static Group? FindParentGroup(Group node, Group child)
+    {
+        if (node is not { First: { } first, Second: { } second })
+        {
+            return null;
+        }
+
+        return ReferenceEquals(first, child) || ReferenceEquals(second, child) ? node
+            : FindParentGroup(first, child) ?? FindParentGroup(second, child);
+    }
+
     private void ShowGroups()
     {
         _refreshHome = null;
@@ -298,6 +350,10 @@ public partial class MainWindow : Window
         }
 
         _splitGrids.Clear();
+        foreach (var group in Groups())
+        {
+            group.CloseButton.IsEnabled = !ReferenceEquals(group, _root);
+        }
         WorkspaceHost.Content = BuildGroupView(_root);
     }
 
@@ -552,6 +608,7 @@ public partial class MainWindow : Window
         public long Id { get; } = id;
         public Grid View { get; } = new();
         public TabControl Tabs { get; } = new();
+        public Button CloseButton { get; set; } = null!;
         public Orientation? Axis { get; init; }
         public Group? First { get; set; }
         public Group? Second { get; set; }

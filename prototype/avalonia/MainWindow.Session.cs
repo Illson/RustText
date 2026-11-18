@@ -160,7 +160,8 @@ public partial class MainWindow
             LastWorkedMs: tab.LastWorked.ToUnixTimeMilliseconds(), LineEnding: tab.Ending,
             LineEndingMap: lineEndings, Stamp: tab.Stamp, Log: log)
         {
-            JsonValidationDisabled = tab.JsonDisabled
+            JsonValidationDisabled = tab.JsonDisabled,
+            UntitledName = tab.Path is null ? UntitledName(tab) : null
         };
     }
 
@@ -195,7 +196,21 @@ public partial class MainWindow
             var fingerprint = CheckpointFingerprint(session, tabs);
             if (_closing || _lastCheckpoint != fingerprint)
             {
-                await _storage.SaveSessionAsync(session, drafts);
+                var committed = await _storage.SaveSessionAsync(session, drafts);
+                for (var i = 0; i < tabs.Length; i++)
+                {
+                    var captured = session.Tabs[i];
+                    if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = committed.Tabs[i];
+                    if (ReferenceEquals(tabs[i].Recovery, captured)) tabs[i].Recovery = committed.Tabs[i];
+                }
+
+                var capturedClosed = session.ClosedTabs ?? [];
+                for (var i = 0; i < Math.Min(capturedClosed.Count, committed.ClosedTabs?.Count ?? 0); i++)
+                {
+                    var closedIndex = _closedTabs.FindIndex(item => ReferenceEquals(item, capturedClosed[i]));
+                    if (closedIndex >= 0) _closedTabs[closedIndex] = committed.ClosedTabs![i];
+                }
+
                 _lastCheckpoint = fingerprint;
             }
         }
@@ -280,6 +295,12 @@ public partial class MainWindow
         try
         {
             var token = source.Token;
+            var previousDeferred = saved;
+            saved = await _storage.ResolveCurrentDraftAsync(saved, token);
+            if (ReferenceEquals(tab.Deferred, previousDeferred))
+            {
+                tab.Deferred = saved;
+            }
             if ((saved.Log is not null || saved.LogOffset is not null) && saved.Path is { } logPath)
             {
                 AttachLog(tab, logPath, saved.Encoding,
@@ -392,7 +413,7 @@ public partial class MainWindow
 
     private const long LineGeneratorThreshold = 8L * 1024 * 1024;
 
-    private static int Utf8IndexToUtf16(string text, long byteOffset)
+    internal static int Utf8IndexToUtf16(string text, long byteOffset)
     {
         var index = 0;
         foreach (var rune in text.EnumerateRunes())
@@ -437,12 +458,20 @@ public partial class MainWindow
         AttachLog(tab, draftPath, TextEncodingKind.Utf8);
         tab.Recovery = saved;
         var panel = new DockPanel();
-        var copy = Button("Сохранить копию…", () => Run(() => SaveDraftCopyAsync(draftPath)));
+        var copy = Button("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab)));
         Avalonia.Controls.DockPanel.SetDock(copy, Dock.Top);
         tab.Item.Content = null;
         panel.Children.Add(copy);
         panel.Children.Add(tab.Log!);
         tab.Item.Content = panel;
+    }
+
+    private async Task SaveCurrentDraftCopyAsync(WorkTab tab)
+    {
+        if (tab.Recovery is not { } recovery) return;
+        var current = await _storage.ResolveCurrentDraftAsync(recovery, _lifetime.Token);
+        if (ReferenceEquals(tab.Recovery, recovery)) tab.Recovery = current;
+        if (_storage.GetDraftPath(current) is { } path) await SaveDraftCopyAsync(path);
     }
 
     private async Task RememberClosedAsync(WorkTab tab)
@@ -560,8 +589,14 @@ public partial class MainWindow
         }
 
         var editor = tab.Editor;
+        var log = tab.Log?.CaptureState();
         var entry = new RecentFileEntry(path, tab.Encoding, tab.IsLog, editor?.SelectionStart ?? 0,
-            editor?.SelectionLength ?? 0, tab.Log?.CaptureState().Offset, editor?.Document.LineCount);
+            editor?.SelectionLength ?? 0, log?.Offset, editor?.Document.LineCount,
+            Reversed: editor is not null && editor.CaretOffset < editor.SelectionStart + editor.SelectionLength,
+            ScrollX: editor?.HorizontalOffset ?? 0,
+            ScrollY: editor?.VerticalOffset ?? 0,
+            JsonValidationDisabled: tab.JsonDisabled,
+            Log: log);
         await _storage.AddRecentAsync(entry, _lifetime.Token);
         _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
         RefreshHistoryMenus();
@@ -572,14 +607,31 @@ public partial class MainWindow
         await OpenPathAsync(entry.Path, entry.ViewAsLog, entry.Encoding);
         if (ActiveTab is { } tab)
         {
-            if (tab.Editor is not null)
+            if (tab.Log is not null)
             {
-                SelectText(tab, entry.SelectionStart, entry.SelectionLength);
+                var log = (entry.Log ?? new LogTabState(entry.Encoding, entry.LogOffset ?? 0)) with
+                {
+                    Encoding = entry.Encoding,
+                    WordWrap = _wordWrap
+                };
+                AttachLog(tab, entry.Path, entry.Encoding, log);
             }
-            else if (entry.LogOffset is { } offset && offset > 0)
+            else if (tab.Editor is not null)
             {
-                AttachLog(tab, entry.Path, entry.Encoding,
-                    new LogTabState(entry.Encoding, offset, WordWrap: _wordWrap));
+                tab.JsonDisabled = entry.JsonValidationDisabled;
+                ScheduleJsonValidation(tab);
+                RestoreEditorView(tab, new SessionTab(
+                    tab.Id,
+                    entry.Path,
+                    entry.Encoding ?? tab.Encoding,
+                    entry.SelectionStart,
+                    entry.SelectionLength,
+                    entry.Reversed,
+                    entry.ScrollX,
+                    entry.ScrollY)
+                {
+                    SelectionUsesUtf8 = entry.SelectionUsesUtf8
+                });
             }
         }
     }
@@ -706,11 +758,47 @@ public partial class MainWindow
             closed.Items.Clear();
             foreach (var item in _closedTabs)
             {
-                var name = item.Path is { } path ? Path.GetFileName(path) : "Без имени";
+                var name = ClosedTabDisplayName(item);
                 closed.Items.Add(Command(name + DescribeWork(item.LineCount, item.LastWorkedMs),
                     () => Run(() => RestoreClosedAsync(item))));
             }
         }
+    }
+
+    private string ClosedTabDisplayName(SessionTab tab)
+    {
+        if (tab.Path is { } path)
+        {
+            return Path.GetFileName(path);
+        }
+
+        var line = tab.UntitledName;
+        if (string.IsNullOrWhiteSpace(line) && tab.DraftRef is not null && _storage.GetDraftPath(tab) is { } draftPath)
+        {
+            try
+            {
+                using var reader = new StreamReader(draftPath, new UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: false);
+                var buffer = new char[1600];
+                var count = reader.Read(buffer, 0, buffer.Length);
+                line = new string(buffer, 0, count).Split(['\r', '\n'], 2)[0].Trim();
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return "Без имени";
+        }
+
+        var builder = new StringBuilder();
+        foreach (var rune in line.EnumerateRunes().Take(_titleLimit))
+        {
+            builder.Append(rune);
+        }
+
+        return builder.Length == 0 ? "Без имени" : builder.ToString();
     }
 
     private static string DescribeWork(long? lines, long? stamp)

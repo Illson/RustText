@@ -19,6 +19,8 @@ concurrency:
 jobs:
   rust:
     name: Windows Rust checks
+    # The Avalonia comparison branch uses the already released Rust executable.
+    if: github.head_ref != 'codex/dotnet-avalonia-aot' && github.ref_name != 'codex/dotnet-avalonia-aot'
     runs-on: windows-2025
     timeout-minutes: 35
     env:
@@ -55,3 +57,36 @@ jobs:
 
       - name: Check portable Windows executable imports
         run: ./tools/Check-ReleaseImports.ps1 -ExecutablePath target/x86_64-pc-windows-msvc/release/rusttext.exe
+
+  avalonia:
+    name: Windows .NET checks
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: prototype/avalonia
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: prototype/avalonia/global.json
+
+      - name: Build Debug
+        run: dotnet build RustText.Demo.csproj -c Debug --nologo
+
+      - name: Run .NET regression tests
+        run: dotnet test ../avalonia.tests/RustText.Tests.csproj -c Debug --nologo
+
+      - name: Publish Native AOT and check runtime files
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'rusttext-avalonia'
+          dotnet publish RustText.Demo.csproj -c Release -r win-x64 -o $output --nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($file in 'rusttext.exe','av_libglesv2.dll','libHarfBuzzSharp.dll','libSkiaSharp.dll') {
+            if (-not (Test-Path -LiteralPath (Join-Path $output $file) -PathType Leaf)) {
+              throw "Missing Native AOT runtime file: $file"
+            }
+          }

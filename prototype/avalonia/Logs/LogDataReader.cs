@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
 using RustText.Demo;
 
@@ -12,7 +13,7 @@ internal sealed class LogDataReader
     private const int MaximumFrameBytes = 64 * 1024;
     private const int DefaultPageSize = 80;
     private const int DefaultFrameBytes = 16 * 1024;
-    private const int DefaultPageBytes = 128 * 1024;
+    internal const int DefaultPageBytes = 128 * 1024;
 
     private readonly FileStream _file;
     private readonly Encoding _decoder;
@@ -29,6 +30,28 @@ internal sealed class LogDataReader
 
     public TextEncodingKind Encoding { get; }
     public long PreambleLength => _bomLength;
+
+    public byte[] ComputeBookmarkDigest(long witnessedSize)
+    {
+        var length = _file.Length;
+        if (witnessedSize < 0 || witnessedSize > length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(witnessedSize));
+        }
+
+        var count = (int)Math.Min(witnessedSize, 256);
+        var head = ReadWindow(_file.SafeFileHandle, 0, count, CancellationToken.None);
+        var tail = ReadWindow(_file.SafeFileHandle, witnessedSize - count, count, CancellationToken.None);
+        if (head.Length != count || tail.Length != count)
+        {
+            throw new EndOfStreamException("Файл изменился при проверке закладки лога.");
+        }
+
+        var witness = new byte[count * 2];
+        head.CopyTo(witness, 0);
+        tail.CopyTo(witness, count);
+        return SHA256.HashData(witness);
+    }
 
     public bool IsNewlineBefore(long offset) => IsNewlineBefore(_file.SafeFileHandle, offset);
 
@@ -102,15 +125,27 @@ internal sealed class LogDataReader
             }
 
             var frame = bytes.AsSpan(position, frameLimit);
-            var newlineIndex = FindNewline(frame);
-            var terminated = newlineIndex >= 0;
-            var textByteCount = terminated ? newlineIndex : frameLimit;
-            var consumedBytes = terminated ? newlineIndex + _codeUnitBytes : frameLimit;
+            var lineEnding = FindLineEnding(frame);
+            var terminated = lineEnding.Index >= 0;
+            var textByteCount = terminated ? lineEnding.Index : frameLimit;
+            var consumedBytes = terminated ? lineEnding.Index + lineEnding.Length : frameLimit;
             var wasTruncated = false;
+
+            // A CR at the final code unit of a frame is already a valid
+            // terminator, but when its LF lies in lookahead, consume both so
+            // CRLF is never split across pages.
+            if (terminated && lineEnding.Length == _codeUnitBytes
+                && IsCarriageReturn(frame.Slice(lineEnding.Index, _codeUnitBytes))
+                && TryGetLineEndingAt(bytes, position + frameLimit, bytes.Length, out var followingEnding)
+                && followingEnding == _codeUnitBytes
+                && IsLineFeed(bytes.AsSpan(position + frameLimit, _codeUnitBytes)))
+            {
+                consumedBytes += _codeUnitBytes;
+            }
 
             if (!terminated)
             {
-                var followingIsLineEnd = IsLineEndingAt(bytes, position + frameLimit, bytes.Length);
+                var followingIsLineEnd = TryGetLineEndingAt(bytes, position + frameLimit, bytes.Length, out var followingEndingBytes);
                 var hasFollowingContent = position + frameLimit < observedLength - readOffset
                     && !followingIsLineEnd;
                 if (hasFollowingContent)
@@ -125,12 +160,8 @@ internal sealed class LogDataReader
                 else if (followingIsLineEnd)
                 {
                     terminated = true;
+                    consumedBytes += followingEndingBytes;
                 }
-            }
-
-            if (terminated && textByteCount >= _codeUnitBytes && IsCarriageReturn(bytes.AsSpan(position + textByteCount - _codeUnitBytes, _codeUnitBytes)))
-            {
-                textByteCount -= _codeUnitBytes;
             }
 
             if (consumedBytes <= 0)
@@ -198,12 +229,12 @@ internal sealed class LogDataReader
             return aligned;
         }
 
-        var scanLength = (int)Math.Min(MidpointScanBytes, length - aligned);
+        var scanLength = (int)Math.Min((long)MidpointScanBytes + LookaheadBytes, length - aligned);
         var scan = ReadWindow(_file.SafeFileHandle, aligned, scanLength, cancellationToken);
-        var newlineIndex = FindNewline(scan);
-        if (newlineIndex >= 0)
+        var lineEnding = FindLineEnding(scan);
+        if (lineEnding.Index >= 0)
         {
-            var afterLine = aligned + newlineIndex + _codeUnitBytes;
+            var afterLine = aligned + lineEnding.Index + lineEnding.Length;
             return afterLine < length ? afterLine : 0;
         }
 
@@ -226,21 +257,41 @@ internal sealed class LogDataReader
 
         var pageStart = bytes.Length;
         var searchIndex = bytes.Length - _codeUnitBytes;
-        if (searchIndex >= 0 && IsLineFeed(bytes.AsSpan(searchIndex, _codeUnitBytes)))
+        if (searchIndex >= 0 && IsLineEndingCodeUnit(bytes.AsSpan(searchIndex, _codeUnitBytes)))
         {
-            searchIndex -= _codeUnitBytes;
+            if (IsLineFeed(bytes.AsSpan(searchIndex, _codeUnitBytes))
+                && searchIndex >= _codeUnitBytes
+                && IsCarriageReturn(bytes.AsSpan(searchIndex - _codeUnitBytes, _codeUnitBytes)))
+            {
+                searchIndex -= _codeUnitBytes * 2;
+            }
+            else
+            {
+                searchIndex -= _codeUnitBytes;
+            }
         }
 
         var renderedRows = 0;
         for (var index = searchIndex; index >= 0; index -= _codeUnitBytes)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!IsLineFeed(bytes.AsSpan(index, _codeUnitBytes)))
+            if (!IsLineEndingCodeUnit(bytes.AsSpan(index, _codeUnitBytes)))
             {
                 continue;
             }
 
-            var lineStart = index + _codeUnitBytes;
+            if (IsLineFeed(bytes.AsSpan(index, _codeUnitBytes)) && index >= _codeUnitBytes
+                && IsCarriageReturn(bytes.AsSpan(index - _codeUnitBytes, _codeUnitBytes)))
+            {
+                continue;
+            }
+
+            var endingBytes = IsCarriageReturn(bytes.AsSpan(index, _codeUnitBytes))
+                && index + _codeUnitBytes < bytes.Length
+                && IsLineFeed(bytes.AsSpan(index + _codeUnitBytes, _codeUnitBytes))
+                    ? _codeUnitBytes * 2
+                    : _codeUnitBytes;
+            var lineStart = index + endingBytes;
             renderedRows += TailFrameCount(pageStart - lineStart);
             if (renderedRows > DefaultPageSize)
             {
@@ -248,6 +299,7 @@ internal sealed class LogDataReader
             }
 
             pageStart = lineStart;
+            index -= endingBytes - _codeUnitBytes;
             if (renderedRows == DefaultPageSize)
             {
                 return aligned + pageStart;
@@ -273,21 +325,53 @@ internal sealed class LogDataReader
             FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.RandomAccess);
     }
 
-    private int FindNewline(ReadOnlySpan<byte> bytes)
+    private (int Index, int Length) FindLineEnding(ReadOnlySpan<byte> bytes)
     {
-        if (_codeUnitBytes == 1)
+        for (var index = 0; index + _codeUnitBytes <= bytes.Length; index += _codeUnitBytes)
         {
-            return bytes.IndexOf((byte)'\n');
-        }
-
-        for (var index = 0; index + 1 < bytes.Length; index += 2)
-        {
-            if (IsLineFeed(bytes[index..(index + 2)]))
+            var codeUnit = bytes.Slice(index, _codeUnitBytes);
+            if (IsLineFeed(codeUnit))
             {
-                return index;
+                return (index, _codeUnitBytes);
+            }
+            if (IsCarriageReturn(codeUnit))
+            {
+                var length = index + _codeUnitBytes * 2 <= bytes.Length
+                    && IsLineFeed(bytes.Slice(index + _codeUnitBytes, _codeUnitBytes))
+                        ? _codeUnitBytes * 2
+                        : _codeUnitBytes;
+                return (index, length);
             }
         }
-        return -1;
+        return (-1, 0);
+    }
+
+    private bool TryGetLineEndingAt(byte[] bytes, int offset, int availableLength, out int endingLength)
+    {
+        endingLength = 0;
+        if (offset < 0 || offset + _codeUnitBytes > availableLength)
+        {
+            return false;
+        }
+
+        var codeUnit = bytes.AsSpan(offset, _codeUnitBytes);
+        if (IsLineFeed(codeUnit))
+        {
+            endingLength = _codeUnitBytes;
+            return true;
+        }
+        if (!IsCarriageReturn(codeUnit))
+        {
+            return false;
+        }
+
+        endingLength = _codeUnitBytes;
+        if (offset + _codeUnitBytes * 2 <= availableLength
+            && IsLineFeed(bytes.AsSpan(offset + _codeUnitBytes, _codeUnitBytes)))
+        {
+            endingLength += _codeUnitBytes;
+        }
+        return true;
     }
 
     private int CompleteUtf8PrefixLength(ReadOnlySpan<byte> bytes)
@@ -369,7 +453,14 @@ internal sealed class LogDataReader
         {
             return false;
         }
-        return IsLineFeed(bytes.AsSpan(localOffset - _codeUnitBytes, _codeUnitBytes));
+        var previous = bytes.AsSpan(localOffset - _codeUnitBytes, _codeUnitBytes);
+        if (IsLineFeed(previous))
+        {
+            return true;
+        }
+        return IsCarriageReturn(previous)
+            && (localOffset + _codeUnitBytes > bytes.Length
+                || !IsLineFeed(bytes.AsSpan(localOffset, _codeUnitBytes)));
     }
 
     private bool IsNewlineBefore(SafeFileHandle handle, long offset)
@@ -380,7 +471,22 @@ internal sealed class LogDataReader
         }
         Span<byte> bytes = stackalloc byte[2];
         var read = RandomAccess.Read(handle, bytes[.._codeUnitBytes], offset - _codeUnitBytes);
-        return read == _codeUnitBytes && IsLineFeed(bytes[.._codeUnitBytes]);
+        if (read != _codeUnitBytes)
+        {
+            return false;
+        }
+        var previous = bytes[.._codeUnitBytes];
+        if (IsLineFeed(previous))
+        {
+            return true;
+        }
+        if (!IsCarriageReturn(previous))
+        {
+            return false;
+        }
+
+        read = RandomAccess.Read(handle, bytes[.._codeUnitBytes], offset);
+        return read != _codeUnitBytes || !IsLineFeed(bytes[.._codeUnitBytes]);
     }
 
     private bool IsLineFeed(ReadOnlySpan<byte> bytes) => _codeUnitBytes == 1
@@ -395,20 +501,7 @@ internal sealed class LogDataReader
             ? bytes.Length >= 2 && bytes[0] == (byte)'\r' && bytes[1] == 0
             : bytes.Length >= 2 && bytes[0] == 0 && bytes[1] == (byte)'\r';
 
-    private bool IsLineEndingAt(byte[] bytes, int offset, int availableLength)
-    {
-        if (offset + _codeUnitBytes > availableLength)
-        {
-            return false;
-        }
-        if (IsLineFeed(bytes.AsSpan(offset, _codeUnitBytes)))
-        {
-            return true;
-        }
-        return IsCarriageReturn(bytes.AsSpan(offset, _codeUnitBytes))
-            && offset + _codeUnitBytes * 2 <= availableLength
-            && IsLineFeed(bytes.AsSpan(offset + _codeUnitBytes, _codeUnitBytes));
-    }
+    private bool IsLineEndingCodeUnit(ReadOnlySpan<byte> bytes) => IsLineFeed(bytes) || IsCarriageReturn(bytes);
 
     private static bool IsUtf8Continuation(byte value) => value is >= 0x80 and <= 0xBF;
 

@@ -2,8 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="RustText.Demo.MainWindow"
         Icon="avares://rusttext/Assets/rusttext.ico" Title="RustText" Width="1080" Height="700" MinWidth="650" MinHeight="360"
-        WindowStartupLocation="CenterScreen"
-        Background="#131B23" Foreground="#E9F0F6">
+        WindowStartupLocation="CenterScreen">
     <Grid RowDefinitions="Auto,*,Auto,Auto">
         <Border BorderBrush="#31404D" BorderThickness="0,0,0,1" Background="#17212A">
             <DockPanel>

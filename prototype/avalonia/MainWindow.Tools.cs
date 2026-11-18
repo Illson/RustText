@@ -408,7 +408,7 @@ public partial class MainWindow
         return body;
     }
 
-    private static Window Dialog(string title, Control body, double width = 430) => new()
+    internal static Window Dialog(string title, Control body, double width = 430) => new()
     {
         Title = title,
         Width = width,

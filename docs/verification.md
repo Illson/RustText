@@ -75,7 +75,44 @@
 - **Проводник.** На временном файле проверено разрешение пути с пробелами и кириллицей через Windows Shell. Проверены преобразование расширенных путей диска и UNC и отказ для путей устройств. В отдельном файле реестра дважды записали ассоциации и команды меню для `.txt`, `.log`, `.json`, `.xml`. Windows разобрала сформированные команды на путь к EXE и путь к файлу. Запись о выбранном приложении сохранилась. Выделение файла в открытом Проводнике и запуск из его меню на интерактивном рабочем столе остаются для ручной проверки.
 - **Обновление.** Локальный пакет прошёл проверку SHA-256. При неверной контрольной сумме временный каталог был удалён. Установщик заменил комплект из EXE и трёх DLL файлами из итогового ZIP и запустил новую копию. При намеренно быстром завершении новой копии восстановлены исходные SHA-256 всех четырёх файлов и запущена прежняя копия. Оба сценария использовали отдельные копии программы и неактивные рабочие столы. Проверены подготовка пакета и режим установщика. В диалог обновления и к серверу выпусков тест не обращался.
 
-В исходной версии номера строк лога видны в поле слева от текста. В порте абсолютные номера отображаются в результатах поиска после индексирования, а основное поле показывает счётчик строк текущей страницы и диапазон байтов. Отдельно остаются проверки позиции значка рабочего стола, вывода других окон на передний план и полного сценария на Windows Server 2016 по RDP.
+На этой стадии переноса абсолютные номера были в результатах поиска и отсутствовали слева от текста лога. Отдельно оставались проверки позиции значка рабочего стола, вывода других окон на передний план и полного сценария на Windows Server 2016 по RDP.
+
+### Регрессии паритета RustText 0.2.2
+
+Автоматические проверки запускаются из корня репозитория.
+
+```powershell
+dotnet test prototype/avalonia.tests/RustText.Tests.csproj -c Debug
+```
+
+Тесты используют временные каталоги и виртуальные окна Avalonia. Старый профиль Rust проверяется на синтетических данных того же формата. Профиль пользователя, ассоциации Windows и открытые окна остаются вне этих сценариев.
+
+Один и тот же JSON снят в редакторе до изменений и после. На снимке настроек кадр открытого дочернего окна расположен поверх кадра его владельца. [JSON до](images/avalonia-parity/json-before.png) · [JSON после](images/avalonia-parity/json-after.png) · [Настройки поверх редактора](images/avalonia-parity/settings-dialog.png)
+
+| Сценарий | Регрессионные проверки |
+| --- | --- |
+| Черновики и история | `ClosedHistoryAndDeferredDraftSurviveFourChangedSessions`, `LegacyDrafts_LowercaseShaAndClosedTabs_SurviveFourSaves`, `OversizedDraft_RemainsAvailableAsStreamedPreviewFile`, `CorruptLatestDraft_FallsBackToPreviousIntactSession` |
+| Перечитывание файла | `ReloadKeepsNewTypingAndUndo`, `ReloadCompletionDoesNotReopenClosedTab` |
+| Дописывание, ротация и обрезка | `AppendToLargeLogAfterMinimapRenderedUpdatesFollowingPage`, `ShortLogRefreshesTheSamePageWithoutFollowingTail`, `SameSizeRotationRereadsTheFirstPage`, `TruncateAndRegrowClearsHiddenBoundaryAndOldHits`, `LogBookmarkRestoresAppendedFileAndResetsAfterRewrite`, `PhysicalTrimKeepsBomAndCreatesByteCompleteBackup`, `CancelledTrimLeavesTheLogAndDirectoryUnchanged`, `ReplacementAfterStagingIsNeverOverwritten` |
+| Недавние файлы Rust | `LegacyRecentImport_KeepsMoreThanOneHundredAndMapsRustPositionAndBookmark`, `Utf8IndexToUtf16_MapsRustByteOffsetsAcrossMultibyteRunes` |
+| Версии и различия | `SaveBoundary_CapturesOriginalAndCommittedVersions`, `LegacyRustSnapshots_AreListedAndReadWithoutChangingTheirProfile`, `TotalQuota_PrunesOldHistoryAcrossFilesAndRejectsOversizedLatestSet`, `VersionDialog_DiffUsesUnsavedTextAndRestoreRemainsUndoable` |
+| Разделение и закрытие групп | `SplitButtonsAndClosingNestedGroupsPreserveDraftOrderAndActiveTabAfterRestart`, `ClosingLeftGroupKeepsTabsInVisualOrder` |
+| Миникарты и номера строк | `TextMinimapClickDragAndWheelKeepCaretAndSelection`, `MinimapWheelTrackAndDragNavigateLiveAcrossLog` |
+| Подсветка и дочерние окна | `JsonTokensDistinguishKeysValuesAndEscapedQuotes`, `AnonymousJsonKeepsHighlightingWithValidationSelectionAndSearch`, `DialogUsesTheWorkspacePalette`. Фон дополнительно сверили в версиях файла, сравнении списков, генераторе и подтверждении обрезки. |
+| Строки, поиск и конец лога | `ReadPage_RecognizesLfCrLfAndBareCr`, `ReadPage_ConsumesCrLfSplitAtFrameBoundary`, `SearchNavigatesAndHighlightsLongLineHitsWithF3InBothDirections`, `SearchFindsCompletedAppendedUtf8AndNullBytesRemainReadable`, `GetEndOffset_1000CrDelimitedRowsReturnsLastEighty`, `NulInTextStartupDoesNotPreventOpeningAnotherFile` |
+
+Номера рядом с логом появляются по мере готовности фонового индекса. При переходе в ещё не индексированную область текст открывается сразу.
+
+Локально прошли 57 тестов и публикация .NET 11 Native AOT для Windows x64. ZIP распаковали, сверили четыре файла и подтвердили нативный заголовок x64 без CLR. В Debug и в распакованной AOT-сборке на отдельном неактивном рабочем столе открыли 20 ГиБ, перешли к середине и к концу, переместили миникарту с удержанием кнопки и отменили поиск. После штатного выхода и повторного запуска восстановилась позиция 10 737 418 240. При AOT сохранились два известных сообщения Avalonia о DirectComposition. [Avalonia #22817](https://github.com/AvaloniaUI/Avalonia/issues/22817)
+
+Для замера использовали ту же физически выделенную фикстуру в 21 474 836 480 байт и готовый RustText 0.2.2. После прогрева выполнили шесть пар запусков с чередованием порядка и отдельным профилем на каждый запуск. Пиковый рабочий набор измеряли до двух секунд после первой отрисовки.
+
+| Метрика, медиана (мин.–макс.) | Rust 0.2.2 | Avalonia Native AOT |
+| --- | ---: | ---: |
+| От запуска процесса до первых строк | 397,0 мс (367,4–448,0) | 418,0 мс (404,9–477,3) |
+| Пиковый рабочий набор | 102,80 МиБ (102,02–103,17) | 110,31 МиБ (109,46–110,37) |
+
+Поиск пропускает отдельные строки длиннее 1 МиБ. Проверки этого прогона выполнены на Windows 11. Интерактивное выделение файла в Проводнике, системные ассоциации и Windows Server 2016 по RDP остаются отдельными сценариями.
 
 ### Время Release-сборки
 

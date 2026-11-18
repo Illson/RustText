@@ -3,6 +3,8 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
+using Avalonia.Media.Immutable;
+using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Document;
 using AvaloniaEdit.Rendering;
@@ -11,9 +13,9 @@ namespace RustText.Demo.Editor;
 
 internal sealed class DocumentMinimap : Control
 {
-    private static readonly IBrush BackgroundBrush = new SolidColorBrush(Color.Parse("#17212A"));
-    private static readonly IBrush LineBrush = new SolidColorBrush(Color.Parse("#516775"));
-    private static readonly IBrush ViewBrush = new SolidColorBrush(Color.Parse("#314D66"));
+    private static readonly IBrush BackgroundBrush = new ImmutableSolidColorBrush(Color.Parse("#17212A"));
+    private static readonly IBrush LineBrush = new ImmutableSolidColorBrush(Color.Parse("#516775"));
+    private static readonly IBrush ViewBrush = new ImmutableSolidColorBrush(Color.Parse("#314D66"));
     private readonly TextEditor _editor;
     private bool _dragging;
 
@@ -21,6 +23,7 @@ internal sealed class DocumentMinimap : Control
     {
         _editor = editor;
         Width = 55;
+        Cursor = new Cursor(StandardCursorType.Arrow);
         _editor.TextChanged += (_, _) => InvalidateVisual();
         _editor.TextArea.TextView.VisualLinesChanged += (_, _) => InvalidateVisual();
         ToolTip.SetTip(this, "Перейти к области документа");
@@ -37,11 +40,14 @@ internal sealed class DocumentMinimap : Control
         context.FillRectangle(BackgroundBrush, new Rect(Bounds.Size));
         var count = document.LineCount;
         var rows = Math.Clamp((int)(Bounds.Height / 3), 1, 160);
-        var view = _editor.TextArea.TextView;
-        var first = view.VisualLinesValid ? view.VisualLines.FirstOrDefault()?.FirstDocumentLine.LineNumber : null;
-        var current = Math.Clamp((first ?? _editor.TextArea.Caret.Line) - 1, 0, count - 1);
-        var viewY = Bounds.Height * current / Math.Max(count, 1);
-        context.FillRectangle(ViewBrush, new Rect(0, viewY, Bounds.Width, Math.Min(18, Bounds.Height - viewY)));
+        if (FindScrollViewer() is { } scroll && scroll.Extent.Height > 0)
+        {
+            var height = Math.Clamp(Bounds.Height * scroll.Viewport.Height / scroll.Extent.Height,
+                Math.Min(10, Bounds.Height), Bounds.Height);
+            var maximum = scroll.Extent.Height - scroll.Viewport.Height;
+            var fraction = maximum > 0 ? Math.Clamp(scroll.Offset.Y / maximum, 0, 1) : 0;
+            context.FillRectangle(ViewBrush, new Rect(0, fraction * (Bounds.Height - height), Bounds.Width, height));
+        }
         for (var row = 0; row < rows; row++)
         {
             var line = document.GetLineByNumber(1 + (int)((long)row * count / rows));
@@ -86,21 +92,36 @@ internal sealed class DocumentMinimap : Control
         _dragging = false;
     }
 
-    private void Jump(PointerEventArgs e)
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
-        if (Bounds.Height > 0 && _editor.Document is { } document)
+        base.OnPointerWheelChanged(e);
+        if (FindScrollViewer() is { } scroll)
         {
-            var fraction = Math.Clamp(e.GetPosition(this).Y / Bounds.Height, 0, 1);
-            _editor.ScrollToLine(1 + (int)(fraction * (document.LineCount - 1)));
+            ScrollTo(scroll, scroll.Offset.Y - e.Delta.Y * _editor.FontSize * 3);
             e.Handled = true;
         }
     }
+
+    private void Jump(PointerEventArgs e)
+    {
+        if (Bounds.Height > 0 && FindScrollViewer() is { } scroll)
+        {
+            var fraction = Math.Clamp(e.GetPosition(this).Y / Bounds.Height, 0, 1);
+            ScrollTo(scroll, fraction * Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height));
+            e.Handled = true;
+        }
+    }
+
+    private ScrollViewer? FindScrollViewer() => _editor.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
+
+    private static void ScrollTo(ScrollViewer scroll, double y) => scroll.SetCurrentValue(
+        ScrollViewer.OffsetProperty, new Vector(scroll.Offset.X, y));
 }
 
 internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
 {
-    private static readonly IBrush Brush = new SolidColorBrush(Color.Parse("#665528"));
-    private static readonly IBrush CurrentBrush = new SolidColorBrush(Color.Parse("#366187"));
+    private static readonly IBrush Brush = new ImmutableSolidColorBrush(Color.Parse("#665528"));
+    private static readonly IBrush CurrentBrush = new ImmutableSolidColorBrush(Color.Parse("#366187"));
     public Regex? Pattern { get; set; }
     public bool OnlyCurrent { get; set; }
     public (int Offset, int Length)? Current { get; set; }

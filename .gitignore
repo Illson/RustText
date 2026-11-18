@@ -1,3 +1,6 @@
 /target/
 /prototype/avalonia/bin/
 /prototype/avalonia/obj/
+/prototype/avalonia.tests/bin/
+/prototype/avalonia.tests/obj/
+/prototype/avalonia.tests/TestResults/
