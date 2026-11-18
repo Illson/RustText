@@ -405,3 +405,278 @@ fn commits_keep_only_the_newest_hundred_closed_tabs() {
     assert_eq!(recovered.state.closed.last().unwrap().id, 100);
     assert_eq!(recovered.closed_drafts.len(), MAX_CLOSED_TABS);
 }
+
+fn file_identity(path: &Path) -> crate::log_file::FileIdentity {
+    crate::log_file::FileIdentity::read(&File::open(path).unwrap()).unwrap()
+}
+
+#[test]
+fn reuses_unchanged_draft_from_non_adjacent_checkpoint_via_hard_link() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut journal = Journal::open(directory).unwrap();
+
+    let snapshot = |cursor: usize| {
+        let mut s = capture("unchanged open draft");
+        let mut closed_tab = s.state.tabs[0].clone();
+        closed_tab.id = 2;
+        s.state.closed.push(closed_tab);
+        s.closed_drafts
+            .push(Some(Rope::from("unchanged closed draft")));
+        s.state.tabs[0].selection = cursor..cursor;
+        s
+    };
+
+    journal.commit(1, snapshot(1)).unwrap();
+    journal.commit(2, snapshot(2)).unwrap();
+    let open_id_1 = file_identity(&journal.record_path(1).join("draft-0.txt"));
+    let open_id_2 = file_identity(&journal.record_path(2).join("draft-0.txt"));
+    let closed_id_1 = file_identity(&journal.record_path(1).join("closed-draft-0.txt"));
+    let closed_id_2 = file_identity(&journal.record_path(2).join("closed-draft-0.txt"));
+    assert_ne!(open_id_1, open_id_2);
+    assert_ne!(closed_id_1, closed_id_2);
+
+    journal.commit(3, snapshot(3)).unwrap();
+    let open_id_3 = file_identity(&journal.record_path(3).join("draft-0.txt"));
+    let closed_id_3 = file_identity(&journal.record_path(3).join("closed-draft-0.txt"));
+    assert_eq!(open_id_3, open_id_1);
+    assert_ne!(open_id_3, open_id_2);
+    assert_eq!(closed_id_3, closed_id_1);
+    assert_ne!(closed_id_3, closed_id_2);
+}
+
+#[test]
+fn restores_previous_checkpoint_after_corrupting_hardlinked_draft() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut journal = Journal::open(directory.clone()).unwrap();
+
+    let snapshot = |cursor: usize| {
+        let mut s = capture("open draft text");
+        s.state.tabs[0].selection = cursor..cursor;
+        s
+    };
+    journal.commit(1, snapshot(1)).unwrap();
+    journal.commit(2, snapshot(2)).unwrap();
+    journal.commit(3, snapshot(3)).unwrap();
+
+    let path_3 = journal.record_path(3).join("draft-0.txt");
+    let mut bytes = fs::read(&path_3).unwrap();
+    bytes[0] = b'!';
+    fs::write(&path_3, bytes).unwrap();
+    drop(journal);
+
+    let mut reopened = Journal::open(directory).unwrap();
+    let (recovered, warning) = reopened.restore();
+    assert!(warning.is_some());
+    let recovered = recovered.unwrap();
+    assert_eq!(recovered.state.tabs[0].selection, 2..2);
+    assert_eq!(recovered.drafts, [Some("open draft text".into())]);
+}
+
+#[test]
+fn corrupted_donor_before_commit_falls_back_to_fresh_write() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut journal = Journal::open(directory.clone()).unwrap();
+
+    let snapshot = |cursor: usize| {
+        let mut s = capture("fresh draft text");
+        s.state.tabs[0].selection = cursor..cursor;
+        s
+    };
+    journal.commit(1, snapshot(1)).unwrap();
+    journal.commit(2, snapshot(2)).unwrap();
+
+    let donor_path = journal.record_path(1).join("draft-0.txt");
+    fs::write(&donor_path, "corrupted donor!").unwrap();
+
+    journal.commit(3, snapshot(3)).unwrap();
+    drop(journal);
+
+    let mut reopened = Journal::open(directory).unwrap();
+    let (recovered, warning) = reopened.restore();
+    assert!(warning.is_none());
+    assert_eq!(recovered.unwrap().drafts, [Some("fresh draft text".into())]);
+}
+
+#[test]
+fn reuses_draft_when_moving_between_open_and_closed_tabs_and_cleans_pending_dirs() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    fs::create_dir(directory.join(".pending-orphan")).unwrap();
+
+    let mut journal = Journal::open(directory.clone()).unwrap();
+    assert!(!directory.join(".pending-orphan").exists());
+
+    journal.commit(1, capture("moved text")).unwrap();
+    let open_id_1 = file_identity(&journal.record_path(1).join("draft-0.txt"));
+    journal.commit(2, capture("moved text")).unwrap();
+
+    let mut closed = capture("other");
+    closed.state.closed.push(Tab {
+        json_validation_disabled: false,
+        id: 2,
+        file: None,
+        format: TextFormat::default(),
+        selection: 0..0,
+        reversed: false,
+        scroll: [0., 0.],
+        draft_revision: Some(1),
+        log: None,
+    });
+    closed.closed_drafts.push(Some(Rope::from("moved text")));
+    journal.commit(3, closed).unwrap();
+
+    let closed_id_3 = file_identity(&journal.record_path(3).join("closed-draft-0.txt"));
+    assert_eq!(closed_id_3, open_id_1);
+}
+
+#[test]
+fn reopened_journal_verifies_older_untrusted_donor_before_linking() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    {
+        let mut journal = Journal::open(directory.clone()).unwrap();
+        journal.commit(1, capture("trusted text")).unwrap();
+        journal.commit(2, capture("trusted text")).unwrap();
+    }
+
+    fs::write(
+        directory
+            .join(format!("{RECORD_PREFIX}{:020}", 1))
+            .join("draft-0.txt"),
+        "tampered!!!!",
+    )
+    .unwrap();
+
+    let mut reopened = Journal::open(directory).unwrap();
+    let (_, warning) = reopened.restore();
+    assert!(warning.is_none());
+
+    let mut next = capture("trusted text");
+    next.state.tabs[0].selection = 1..1;
+    reopened.commit(3, next).unwrap();
+
+    let (recovered, warning) = reopened.restore();
+    assert!(warning.is_none());
+    assert_eq!(recovered.unwrap().drafts, [Some("trusted text".into())]);
+}
+
+#[test]
+fn rollback_excludes_donors_sharing_file_id_with_restored_previous() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut journal = Journal::open(directory.clone()).unwrap();
+
+    let snapshot = |cursor: usize| {
+        let mut s = capture("shared fallback draft");
+        s.state.tabs[0].selection = cursor..cursor;
+        s
+    };
+
+    journal.commit(1, snapshot(1)).unwrap();
+    journal.commit(2, snapshot(2)).unwrap();
+    journal.commit(3, snapshot(3)).unwrap();
+    journal.commit(4, snapshot(4)).unwrap();
+
+    // Simulate an unpruned checkpoint-1 whose draft shares the physical file
+    // with checkpoint-3 while checkpoint-4 is corrupt.
+    let dir_1 = journal.record_path(1);
+    let dir_3 = journal.record_path(3);
+    fs::create_dir_all(&dir_1).unwrap();
+    fs::copy(dir_3.join("manifest.json"), dir_1.join("manifest.json")).unwrap();
+    fs::hard_link(dir_3.join("draft-0.txt"), dir_1.join("draft-0.txt")).unwrap();
+    let id_3 = file_identity(&dir_3.join("draft-0.txt"));
+
+    let path_4 = journal.record_path(4).join("draft-0.txt");
+    let mut bytes_4 = fs::read(&path_4).unwrap();
+    bytes_4[0] = b'!';
+    fs::write(&path_4, bytes_4).unwrap();
+    drop(journal);
+
+    let mut reopened = Journal::open(directory.clone()).unwrap();
+    let (recovered, warning) = reopened.restore();
+    assert!(warning.is_some());
+    assert_eq!(recovered.unwrap().state.tabs[0].selection, 3..3);
+
+    reopened.commit(5, snapshot(5)).unwrap();
+    let id_5 = file_identity(&reopened.record_path(5).join("draft-0.txt"));
+    assert_ne!(id_5, id_3);
+
+    let path_5 = reopened.record_path(5).join("draft-0.txt");
+    let mut bytes_5 = fs::read(&path_5).unwrap();
+    bytes_5[0] = b'?';
+    fs::write(&path_5, bytes_5).unwrap();
+    drop(reopened);
+
+    let mut verify = Journal::open(directory).unwrap();
+    let (fallback, warning) = verify.restore();
+    assert!(warning.is_some());
+    let fallback = fallback.unwrap();
+    assert_eq!(fallback.state.tabs[0].selection, 3..3);
+    assert_eq!(fallback.drafts, [Some("shared fallback draft".into())]);
+}
+
+#[test]
+fn large_donor_tampered_with_same_size_and_preserved_mtime_is_rejected() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut journal = Journal::open(directory).unwrap();
+
+    let large_text = "A".repeat(1_500_000);
+    let snapshot = |cursor: usize| {
+        let mut s = capture(&large_text);
+        s.state.tabs[0].selection = cursor..cursor;
+        s
+    };
+
+    journal.commit(1, snapshot(1)).unwrap();
+    journal.commit(2, snapshot(2)).unwrap();
+
+    let donor_path = journal.record_path(1).join("draft-0.txt");
+    let donor_id = file_identity(&donor_path);
+    let original_modified = fs::metadata(&donor_path).unwrap().modified().unwrap();
+    let mut tampered = large_text.as_bytes().to_vec();
+    tampered[0] = b'Z';
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&donor_path)
+            .unwrap();
+        file.write_all(&tampered).unwrap();
+        file.set_modified(original_modified).unwrap();
+    }
+
+    journal.commit(3, snapshot(3)).unwrap();
+    let path_3 = journal.record_path(3).join("draft-0.txt");
+    assert_ne!(file_identity(&path_3), donor_id);
+    assert_eq!(fs::read_to_string(&path_3).unwrap(), large_text);
+}
+
+#[test]
+fn open_writer_on_donor_falls_back_to_fresh_write() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut journal = Journal::open(directory).unwrap();
+
+    let snapshot = |cursor: usize| {
+        let mut s = capture("writer locked draft");
+        s.state.tabs[0].selection = cursor..cursor;
+        s
+    };
+
+    journal.commit(1, snapshot(1)).unwrap();
+    journal.commit(2, snapshot(2)).unwrap();
+
+    let donor_path = journal.record_path(1).join("draft-0.txt");
+    let donor_id = file_identity(&donor_path);
+    let writer = OpenOptions::new().write(true).open(&donor_path).unwrap();
+
+    journal.commit(3, snapshot(3)).unwrap();
+    drop(writer);
+    let path_3 = journal.record_path(3).join("draft-0.txt");
+    assert_ne!(file_identity(&path_3), donor_id);
+    assert_eq!(fs::read_to_string(&path_3).unwrap(), "writer locked draft");
+}

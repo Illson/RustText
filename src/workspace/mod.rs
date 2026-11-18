@@ -52,6 +52,7 @@ struct Document {
     saved_text: Option<Rope>,
     dirty: bool,
     revision: u64,
+    draft_digest_cache: std::cell::RefCell<Option<(u64, crate::session::DraftDigest)>>,
     disk_status: disk_status::DiskStatus,
     placeholder: bool,
     json_status: Option<json_validation::Status>,
@@ -65,6 +66,7 @@ struct Document {
 struct ClosedTab {
     tab: Tab,
     draft: Option<Rope>,
+    digest: Option<crate::session::DraftDigest>,
 }
 
 pub(crate) struct Workspace {
@@ -265,6 +267,7 @@ impl Workspace {
             saved_text: Some(saved_text),
             dirty: false,
             revision: 0,
+            draft_digest_cache: std::cell::RefCell::new(None),
             disk_status: disk_status::DiskStatus::Current,
             placeholder: false,
             json_status: json_enabled.then_some(json_validation::Status::Checking),
@@ -442,11 +445,11 @@ impl Workspace {
         self.remember_activity(id, window, cx);
         let doc = self.documents.remove(index);
         self.layout.remove(id);
-        let (tab, draft) = doc.session_snapshot(doc.file.is_none(), cx);
+        let (tab, draft, digest) = doc.session_snapshot_with_digest(doc.file.is_none(), cx);
         if self.closed.len() == MAX_CLOSED_TABS {
             self.closed.remove(0);
         }
-        self.closed.push(ClosedTab { tab, draft });
+        self.closed.push(ClosedTab { tab, draft, digest });
 
         self.clear_search(cx);
         if let Some(next) = self.layout.active() {
@@ -497,7 +500,7 @@ impl Workspace {
             let tab = tab.clone();
             self.open_closed_file(recent, tab, window, cx);
         } else {
-            let ClosedTab { tab, draft } = self.closed.remove(index);
+            let ClosedTab { tab, draft, .. } = self.closed.remove(index);
             let id = self.restore_tab(tab, draft.map(|draft| draft.to_string()), window, cx);
             self.select(id, window, cx);
         }

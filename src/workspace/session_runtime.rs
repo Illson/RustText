@@ -10,11 +10,12 @@ use gpui_kit::{component::input::Rope, *};
 use super::{ClosedTab, Document, Workspace, disk_status::DiskStatus};
 use crate::{
     files,
-    session::{Capture, Journal, Recovered, State, Tab, WindowSize},
+    session::{Capture, DraftDigest, Journal, Recovered, State, Tab, WindowSize},
     text_format::TextEncoding,
 };
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+const VIEW_SAVE_QUIET: Duration = Duration::from_secs(5);
 const CLOSING_SESSION: &str = "Сохранение сессии…";
 
 #[derive(Clone, Copy)]
@@ -40,6 +41,15 @@ impl Document {
     }
 
     pub(super) fn session_snapshot(&self, include_draft: bool, cx: &App) -> (Tab, Option<Rope>) {
+        let (tab, draft, _) = self.session_snapshot_with_digest(include_draft, cx);
+        (tab, draft)
+    }
+
+    pub(super) fn session_snapshot_with_digest(
+        &self,
+        include_draft: bool,
+        cx: &App,
+    ) -> (Tab, Option<Rope>, Option<DraftDigest>) {
         let editor = self.editor.read(cx);
         let offset = editor.scroll_offset();
         let scroll = if editor.line_height().is_none() {
@@ -48,20 +58,34 @@ impl Document {
             [f64::from(f32::from(offset.x)), editor.scroll_y_f64()]
         };
         let include_draft = include_draft && self.dirty;
-        (
-            Tab {
-                json_validation_disabled: self.json_validation_disabled,
-                id: self.id,
-                file: self.file.clone(),
-                format: self.format,
-                selection: editor.selected_range(),
-                reversed: editor.is_selection_reversed(),
-                scroll,
-                draft_revision: include_draft.then_some(self.revision),
-                log: self.log.as_ref().map(|log| log.read(cx).bookmark()),
-            },
-            include_draft.then(|| editor.text().clone()),
-        )
+        let tab = Tab {
+            json_validation_disabled: self.json_validation_disabled,
+            id: self.id,
+            file: self.file.clone(),
+            format: self.format,
+            selection: editor.selected_range(),
+            reversed: editor.is_selection_reversed(),
+            scroll,
+            draft_revision: include_draft.then_some(self.revision),
+            log: self.log.as_ref().map(|log| log.read(cx).bookmark()),
+        };
+        if !include_draft {
+            return (tab, None, None);
+        }
+        let text = editor.text();
+        let digest = {
+            let mut cache = self.draft_digest_cache.borrow_mut();
+            if let Some((revision, digest)) = *cache
+                && revision == self.revision
+            {
+                digest
+            } else {
+                let digest = DraftDigest::from_rope(text);
+                *cache = Some((self.revision, digest));
+                digest
+            }
+        };
+        (tab, Some(text.clone()), Some(digest))
     }
 }
 
@@ -70,12 +94,50 @@ pub(super) struct SessionWriter {
     last_saved: Option<State>,
     in_flight: bool,
     revision: u64,
+    pending_view: Option<(State, Instant)>,
 }
 
 impl SessionWriter {
+    #[cfg(test)]
     fn queue(&mut self, capture: Capture) -> Option<PendingWrite> {
-        if !self.in_flight && self.last_saved.as_ref() == Some(&capture.state) {
+        self.queue_prepared(capture, Vec::new(), Vec::new(), true, Instant::now())
+    }
+
+    fn queue_prepared(
+        &mut self,
+        capture: Capture,
+        draft_digests: Vec<Option<DraftDigest>>,
+        closed_draft_digests: Vec<Option<DraftDigest>>,
+        immediate: bool,
+        now: Instant,
+    ) -> Option<PendingWrite> {
+        if !immediate && self.in_flight {
             return None;
+        }
+        if !self.in_flight && self.last_saved.as_ref() == Some(&capture.state) {
+            self.pending_view = None;
+            return None;
+        }
+        let content_changed = self
+            .last_saved
+            .as_ref()
+            .is_none_or(|saved| saved.has_content_or_structure_change(&capture.state));
+        if !immediate && !content_changed {
+            match &self.pending_view {
+                Some((pending_state, since))
+                    if *pending_state == capture.state
+                        && now.duration_since(*since) >= VIEW_SAVE_QUIET =>
+                {
+                    self.pending_view = None;
+                }
+                Some((pending_state, _)) if *pending_state == capture.state => return None,
+                _ => {
+                    self.pending_view = Some((capture.state, now));
+                    return None;
+                }
+            }
+        } else {
+            self.pending_view = None;
         }
         self.revision += 1;
         self.in_flight = true;
@@ -83,6 +145,8 @@ impl SessionWriter {
             journal: self.journal.clone(),
             revision: self.revision,
             capture,
+            draft_digests,
+            closed_draft_digests,
         })
     }
 }
@@ -91,6 +155,8 @@ struct PendingWrite {
     journal: Arc<Mutex<Journal>>,
     revision: u64,
     capture: Capture,
+    draft_digests: Vec<Option<DraftDigest>>,
+    closed_draft_digests: Vec<Option<DraftDigest>>,
 }
 
 impl PendingWrite {
@@ -100,7 +166,14 @@ impl PendingWrite {
             .journal
             .lock()
             .map_err(|_| io::Error::other("Журнал сессии недоступен"))
-            .and_then(|mut journal| journal.commit(self.revision, self.capture));
+            .and_then(|mut journal| {
+                journal.commit_prepared(
+                    self.revision,
+                    self.capture,
+                    self.draft_digests,
+                    self.closed_draft_digests,
+                )
+            });
         (self.revision, state, result)
     }
 }
@@ -120,9 +193,10 @@ impl Workspace {
         if let Some(journal) = startup.journal {
             self.session = Some(SessionWriter {
                 journal: Arc::new(Mutex::new(journal)),
-                last_saved: (!repair_journal).then(|| self.capture_session(window, cx).state),
+                last_saved: (!repair_journal).then(|| self.capture_session(window, cx).0.state),
                 revision: 0,
                 in_flight: false,
+                pending_view: None,
             });
             self.start_session_autosave(window, cx);
         }
@@ -155,9 +229,10 @@ impl Workspace {
             .closed
             .into_iter()
             .zip(closed_drafts)
-            .map(|(tab, draft)| ClosedTab {
-                tab,
-                draft: draft.map(|text| Rope::from(text.as_str())),
+            .map(|(tab, draft)| {
+                let draft = draft.map(|text| Rope::from(text.as_str()));
+                let digest = draft.as_ref().map(DraftDigest::from_rope);
+                ClosedTab { tab, draft, digest }
             })
             .collect();
 
@@ -282,7 +357,7 @@ impl Workspace {
                     if this.busy == Some(CLOSING_SESSION) {
                         return None;
                     }
-                    this.prepare_session_write(window, cx)
+                    this.prepare_session_write(false, window, cx)
                 }) else {
                     break;
                 };
@@ -304,7 +379,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(pending) = self.prepare_session_write(window, cx) else {
+        let Some(pending) = self.prepare_session_write(true, window, cx) else {
             return match after {
                 AfterShutdown::Close => true,
                 AfterShutdown::InstallUpdate => {
@@ -364,10 +439,21 @@ impl Workspace {
         .detach();
     }
 
-    fn prepare_session_write(&mut self, window: &Window, cx: &App) -> Option<PendingWrite> {
+    fn prepare_session_write(
+        &mut self,
+        immediate: bool,
+        window: &Window,
+        cx: &App,
+    ) -> Option<PendingWrite> {
         self.session.as_ref()?;
-        let capture = self.capture_session(window, cx);
-        self.session.as_mut()?.queue(capture)
+        let (capture, draft_digests, closed_draft_digests) = self.capture_session(window, cx);
+        self.session.as_mut()?.queue_prepared(
+            capture,
+            draft_digests,
+            closed_draft_digests,
+            immediate,
+            Instant::now(),
+        )
     }
 
     fn session_write_finished(
@@ -397,40 +483,55 @@ impl Workspace {
         }
     }
 
-    fn capture_session(&self, window: &Window, cx: &App) -> Capture {
+    fn capture_session(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> (Capture, Vec<Option<DraftDigest>>, Vec<Option<DraftDigest>>) {
         let bounds = window.window_bounds();
         let size = bounds.get_bounds().size;
-        let (tabs, drafts) = self
-            .documents
-            .iter()
-            .map(|doc| doc.session_snapshot(true, cx))
-            .unzip();
-        let (closed, closed_drafts) = self
-            .closed
-            .iter()
-            .map(|entry| (entry.tab.clone(), entry.draft.clone()))
-            .unzip();
-        Capture {
-            state: State {
-                layout: Some(self.layout.clone()),
-                tabs,
-                closed,
-                active: self
-                    .documents
-                    .iter()
-                    .position(|doc| doc.id == self.active)
-                    .unwrap_or(0),
-                window: WindowSize {
-                    width: size.width.into(),
-                    height: size.height.into(),
-                    maximized: matches!(bounds, WindowBounds::Maximized(_)),
-                },
-                wrap: self.wrap,
-                font_size: self.font_size,
-            },
-            drafts,
-            closed_drafts,
+        let mut tabs = Vec::with_capacity(self.documents.len());
+        let mut drafts = Vec::with_capacity(self.documents.len());
+        let mut draft_digests = Vec::with_capacity(self.documents.len());
+        for doc in &self.documents {
+            let (tab, draft, digest) = doc.session_snapshot_with_digest(true, cx);
+            tabs.push(tab);
+            drafts.push(draft);
+            draft_digests.push(digest);
         }
+        let mut closed = Vec::with_capacity(self.closed.len());
+        let mut closed_drafts = Vec::with_capacity(self.closed.len());
+        let mut closed_draft_digests = Vec::with_capacity(self.closed.len());
+        for entry in &self.closed {
+            closed.push(entry.tab.clone());
+            closed_drafts.push(entry.draft.clone());
+            closed_draft_digests.push(entry.digest);
+        }
+        (
+            Capture {
+                state: State {
+                    layout: Some(self.layout.clone()),
+                    tabs,
+                    closed,
+                    active: self
+                        .documents
+                        .iter()
+                        .position(|doc| doc.id == self.active)
+                        .unwrap_or(0),
+                    window: WindowSize {
+                        width: size.width.into(),
+                        height: size.height.into(),
+                        maximized: matches!(bounds, WindowBounds::Maximized(_)),
+                    },
+                    wrap: self.wrap,
+                    font_size: self.font_size,
+                },
+                drafts,
+                closed_drafts,
+            },
+            draft_digests,
+            closed_draft_digests,
+        )
     }
 }
 

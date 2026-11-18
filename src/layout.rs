@@ -46,6 +46,27 @@ impl Default for Layout {
 }
 
 impl Node {
+    fn same_structure(&self, other: &Self) -> bool {
+        if self.id != other.id {
+            return false;
+        }
+        let group_eq = match (&self.group, &other.group) {
+            (Some(left), Some(right)) => left.documents == right.documents,
+            (None, None) => true,
+            _ => false,
+        };
+        let split_eq = match (&self.split, &other.split) {
+            (Some(left), Some(right)) => {
+                left.axis == right.axis
+                    && left.first.same_structure(&right.first)
+                    && left.second.same_structure(&right.second)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        group_eq && split_eq
+    }
+
     fn leaf(id: u64, documents: Vec<u64>, active: Option<u64>) -> Self {
         Self {
             id,
@@ -102,6 +123,10 @@ impl Node {
 }
 
 impl Layout {
+    pub fn same_structure(&self, other: &Self) -> bool {
+        self.root.same_structure(&other.root)
+    }
+
     pub fn new(documents: Vec<u64>, active: Option<u64>) -> Self {
         let mut layout = Self {
             root: Node::leaf(1, documents.clone(), active),
