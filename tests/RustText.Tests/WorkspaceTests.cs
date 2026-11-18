@@ -53,6 +53,48 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task InactiveTabHoverChangesOnlyHoveredSurface() => HeadlessTests.RunAsync(async profile =>
+    {
+        var firstPath = Path.Combine(profile, "first.txt");
+        var secondPath = Path.Combine(profile, "second.txt");
+        await File.WriteAllTextAsync(firstPath, "first document");
+        await File.WriteAllTextAsync(secondPath, "second document");
+        var window = await OpenWorkspaceAsync(firstPath, secondPath);
+        try
+        {
+            var group = Read<object>(ActiveTab(window), "Group");
+            var tabs = Read<TabControl>(group, "Tabs");
+            var items = tabs.Items.OfType<TabItem>().ToArray();
+            Assert.Equal(2, items.Length);
+            var selected = items[0];
+            var inactive = items[1];
+            tabs.SelectedItem = selected;
+            window.MouseMove(new Point(-10, -10));
+            await Task.Delay(30);
+
+            var selectedSurface = TabSurface(selected);
+            var inactiveSurface = TabSurface(inactive);
+            var selectedBackground = SolidColor(selectedSurface.Background);
+            var selectedAccent = SolidColor(selectedSurface.BorderBrush);
+            var inactiveBackground = SolidColor(inactiveSurface.Background);
+            var hoverPoint = inactiveSurface.TranslatePoint(
+                new Point(inactiveSurface.Bounds.Width / 2, inactiveSurface.Bounds.Height / 2), window)
+                ?? throw new InvalidOperationException("Inactive tab surface is not attached.");
+
+            window.MouseMove(hoverPoint);
+            await Task.Delay(30);
+
+            Assert.NotEqual(inactiveBackground, SolidColor(inactiveSurface.Background));
+            Assert.Equal(selectedBackground, SolidColor(selectedSurface.Background));
+            Assert.Equal(selectedAccent, SolidColor(selectedSurface.BorderBrush));
+            Assert.Same(selected, tabs.SelectedItem);
+        }
+        finally
+        {
+            await CloseAsync(window);
+        }
+    });
+    [Fact]
     public Task ReloadCompletionDoesNotReopenClosedTab() => HeadlessTests.RunAsync(async profile =>
     {
         var first = Path.Combine(profile, "active.txt");
@@ -340,7 +382,8 @@ public sealed class WorkspaceTests
         {
             var dialogTask = CallAsync(main, "ShowSettingsAsync");
             var dialog = Assert.Single(main.OwnedWindows);
-            Assert.Equal(((ISolidColorBrush)main.Background!).Color, ((ISolidColorBrush)dialog.Background!).Color);
+            Assert.Equal(SolidColor(FocusTheme.Editor), SolidColor(main.Background));
+            Assert.Equal(SolidColor(FocusTheme.Panel), SolidColor(dialog.Background));
             Assert.Equal(((ISolidColorBrush)main.Foreground!).Color, ((ISolidColorBrush)dialog.Foreground!).Color);
             Assert.NotEqual(Colors.Black, ((ISolidColorBrush)dialog.Background!).Color);
             dialog.Close();
@@ -351,6 +394,9 @@ public sealed class WorkspaceTests
             await CloseAsync(main);
         }
     });
+
+    private static Border TabSurface(TabItem item) => Assert.Single(item.GetVisualDescendants().OfType<Border>(), border => border.Name == "TabSurface");
+    private static Color SolidColor(IBrush? brush) => Assert.IsAssignableFrom<ISolidColorBrush>(brush).Color;
 
     private static async Task<MainWindow> OpenWorkspaceAsync(params string[] paths)
     {
@@ -374,8 +420,12 @@ public sealed class WorkspaceTests
         .Items.OfType<TabItem>().Select(item => Read<TextEditor>(
             Tabs(window).Single(tab => ReferenceEquals(Read<TabItem>(tab, "Item"), item)), "Editor").Text).ToArray();
 
-    private static Button GroupButton(object group, string name) => Read<Grid>(group, "View").Children
-        .OfType<StackPanel>().Single().Children.OfType<Button>().Single(button => Equals(button.Content, name));
+    private static Button GroupButton(object group, string name)
+    {
+        var tools = Assert.IsType<StackPanel>(Read<WorkspaceTabs>(group, "Tabs").HeaderActions);
+        return Assert.Single(tools.Children.OfType<Button>(), button => Equals(button.Content, name)
+            || string.Equals(Avalonia.Automation.AutomationProperties.GetName(button), name, StringComparison.Ordinal));
+    }
 
     private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;

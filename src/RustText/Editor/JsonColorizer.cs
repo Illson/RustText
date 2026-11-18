@@ -13,11 +13,11 @@ internal sealed class JsonColorizer : DocumentColorizingTransformer
 {
     private static readonly IBrush[] Palette =
     [
-        new ImmutableSolidColorBrush(Color.Parse("#8CC8F0")),
-        new ImmutableSolidColorBrush(Color.Parse("#A9D7A0")),
-        new ImmutableSolidColorBrush(Color.Parse("#E9B680")),
-        new ImmutableSolidColorBrush(Color.Parse("#D2ADEB")),
-        new ImmutableSolidColorBrush(Color.Parse("#92A4B2"))
+        new ImmutableSolidColorBrush(Color.Parse("#AEC9E1")),
+        new ImmutableSolidColorBrush(Color.Parse("#BDD3AA")),
+        FocusTheme.Warning,
+        new ImmutableSolidColorBrush(Color.Parse("#CDB9E1")),
+        FocusTheme.Text
     ];
 
     public bool Enabled { get; set; }

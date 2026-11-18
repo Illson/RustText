@@ -7,14 +7,57 @@ using Avalonia.Input;
 using RustText.Demo;
 using RustText.Demo.Logs;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace RustText.Tests;
 
 [Collection(HeadlessCollection.Name)]
 public sealed class LogUiTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public LogUiTests(ITestOutputHelper output) => _output = output;
+
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
+    [Fact]
+    public async Task CompactLogKeepsThreeRowsVisibleWithSearchResultsAt760By360()
+    {
+        await HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "compact.log");
+            var rows = Enumerable.Range(1, 96).Select(row => row % 12 == 0
+                ? $"2026-11-19 12:{row / 60:D2}:{row % 60:D2}.000 ERROR needle id={row:D3}"
+                : $"2026-11-19 12:{row / 60:D2}:{row % 60:D2}.000 INFO request completed id={row:D3}");
+            await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, rows) + Environment.NewLine);
+
+            var window = new MainWindow { Width = 760, Height = 360 };
+            window.Show();
+            await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+            await InvokeTask(window, "OpenPathAsync", path, true, null);
+            var log = ActiveLog(window);
+            var text = (TextBox)Field(log, "_logText");
+            await HeadlessTests.WaitForAsync(() => Page(log) is not null && !(bool)Field(log, "_busy"));
+
+            try
+            {
+                log.GetType().GetMethod("FocusSearch")!.Invoke(log, null);
+                ((TextBox)Field(log, "_searchBox")).Text = "needle";
+                await InvokeTask(log, "SearchAsync", false);
+                await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy")
+                    && ((System.Collections.ICollection)Field(log, "_searchResults")).Count == 8);
+                await HeadlessTests.WaitForAsync(() => text.Bounds.Height > 0);
+
+                _output.WriteLine($"Compact log viewport at 760×360 with search: {text.Bounds.Height:0.#}px.");
+                Assert.True(text.Bounds.Height >= 58,
+                    $"Expected at least about three 12px text rows, but the log viewport is {text.Bounds.Height:0.#}px high.");
+            }
+            finally
+            {
+                await CloseMainWindowAsync(window);
+            }
+        });
+    }
     [Fact]
     public async Task MinimapWheelTrackAndDragNavigateLiveAcrossLog()
     {

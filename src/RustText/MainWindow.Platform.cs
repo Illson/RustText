@@ -32,7 +32,7 @@ public partial class MainWindow
     {
         var query = new TextBox { PlaceholderText = "PID или часть заголовка окна" };
         var matches = new ListBox { MinHeight = 155, MaxHeight = 400 };
-        var status = new TextBlock();
+        var status = new TextBlock { Foreground = FocusTheme.Muted };
         var body = DialogPanel(query, matches, status);
         var dialog = Dialog("Вывести окно на передний план", body, 650);
         void Find()
@@ -49,7 +49,7 @@ public partial class MainWindow
             status.Text = $"Окон найдено · {matches.Items.Count}";
         }
 
-        body.Children.Add(Row(Button("Найти", Find), Button("Вывести", () =>
+        body.Children.Add(Row(FocusButton(Button("Найти", Find), primary: true), FocusButton(Button("Вывести", () =>
         {
             if (matches.SelectedItem is ListBoxItem { Tag: WindowIdentity window })
             {
@@ -57,7 +57,7 @@ public partial class MainWindow
                     ? "Окно выведено на передний план."
                     : "Windows отклонила переключение либо окно было закрыто.";
             }
-        })));
+        }))));
         query.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter)
@@ -160,7 +160,7 @@ public partial class MainWindow
                 }
             }
         });
-        body.Children.Add(Row(Button("Восстановить в редакторе", () => Run(async () =>
+        body.Children.Add(Row(FocusButton(Button("Восстановить в редакторе", () => Run(async () =>
         {
             if (list.SelectedItem is ListBoxItem { Tag: VersionSnapshot selected } && _tabs.ContainsKey(active.Id))
             {
@@ -189,7 +189,7 @@ public partial class MainWindow
                 dialog.Close();
                 SetStatus("Версия восстановлена в редакторе. Ctrl+S сохранит её на диск.");
             }
-        })), Button("Лимиты…", () => Run(ShowSettingsAsync))));
+        })), primary: true), FocusButton(Button("Лимиты…", () => Run(ShowSettingsAsync)))));
         await dialog.ShowDialog(this);
     }
 
@@ -209,10 +209,10 @@ public partial class MainWindow
         {
             var (marker, foreground) = line.Kind switch
             {
-                VersionDiffKind.Added => ("+ ", Brushes.LightGreen),
-                VersionDiffKind.Removed => ("− ", Brushes.LightCoral),
-                VersionDiffKind.Info => ("· ", Brushes.Goldenrod),
-                _ => ("  ", Brushes.LightGray)
+                VersionDiffKind.Added => ("+ ", FocusTheme.Success),
+                VersionDiffKind.Removed => ("− ", FocusTheme.Danger),
+                VersionDiffKind.Info => ("· ", FocusTheme.Warning),
+                _ => ("  ", FocusTheme.Muted)
             };
             inlines.Add(new Run(marker + line.Text) { Foreground = foreground });
             inlines.Add(new LineBreak());
@@ -266,9 +266,10 @@ public partial class MainWindow
             return;
         }
 
-        var body = DialogPanel(new TextBlock { Text = $"Доступна версия {release.Version}." });
+        var body = DialogPanel(new TextBlock { Text = $"Доступна версия {release.Version}.", Foreground = FocusTheme.Text });
         var dialog = Dialog("Обновление RustText", body);
-        body.Children.Add(Row(Button("Скачать и перезапустить", () => dialog.Close(true)), Button("Позже", () => dialog.Close(false))));
+        body.Children.Add(Row(FocusButton(Button("Скачать и перезапустить", () => dialog.Close(true)), primary: true),
+            FocusButton(Button("Позже", () => dialog.Close(false)))));
         if (!await dialog.ShowDialog<bool>(this))
         {
             return;

@@ -3,7 +3,6 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
-using Avalonia.Media.Immutable;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Document;
@@ -13,16 +12,13 @@ namespace RustText.Demo.Editor;
 
 internal sealed class DocumentMinimap : Control
 {
-    private static readonly IBrush BackgroundBrush = new ImmutableSolidColorBrush(Color.Parse("#17212A"));
-    private static readonly IBrush LineBrush = new ImmutableSolidColorBrush(Color.Parse("#516775"));
-    private static readonly IBrush ViewBrush = new ImmutableSolidColorBrush(Color.Parse("#314D66"));
     private readonly TextEditor _editor;
     private bool _dragging;
 
     public DocumentMinimap(TextEditor editor)
     {
         _editor = editor;
-        Width = 55;
+        Width = 72;
         Cursor = new Cursor(StandardCursorType.Arrow);
         _editor.TextChanged += (_, _) => InvalidateVisual();
         _editor.TextArea.TextView.VisualLinesChanged += (_, _) => InvalidateVisual();
@@ -37,7 +33,8 @@ internal sealed class DocumentMinimap : Control
             return;
         }
 
-        context.FillRectangle(BackgroundBrush, new Rect(Bounds.Size));
+        context.FillRectangle(FocusTheme.Hover, new Rect(Bounds.Size));
+        context.FillRectangle(FocusTheme.Border, new Rect(0, 0, 1, Bounds.Height));
         var count = document.LineCount;
         var rows = Math.Clamp((int)(Bounds.Height / 3), 1, 160);
         if (FindScrollViewer() is { } scroll && scroll.Extent.Height > 0)
@@ -46,7 +43,7 @@ internal sealed class DocumentMinimap : Control
                 Math.Min(10, Bounds.Height), Bounds.Height);
             var maximum = scroll.Extent.Height - scroll.Viewport.Height;
             var fraction = maximum > 0 ? Math.Clamp(scroll.Offset.Y / maximum, 0, 1) : 0;
-            context.FillRectangle(ViewBrush, new Rect(0, fraction * (Bounds.Height - height), Bounds.Width, height));
+            context.FillRectangle(FocusTheme.Selection, new Rect(1, fraction * (Bounds.Height - height), Bounds.Width - 1, height));
         }
         for (var row = 0; row < rows; row++)
         {
@@ -54,7 +51,7 @@ internal sealed class DocumentMinimap : Control
             var width = Math.Min(Bounds.Width - 12, line.Length * .6);
             if (width > 0)
             {
-                context.FillRectangle(LineBrush, new Rect(6, row * Bounds.Height / rows, width, 1));
+                context.FillRectangle(FocusTheme.Border, new Rect(7, row * Bounds.Height / rows, width, 1));
             }
         }
     }
@@ -120,8 +117,6 @@ internal sealed class DocumentMinimap : Control
 
 internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
 {
-    private static readonly IBrush Brush = new ImmutableSolidColorBrush(Color.Parse("#665528"));
-    private static readonly IBrush CurrentBrush = new ImmutableSolidColorBrush(Color.Parse("#366187"));
     public Regex? Pattern { get; set; }
     public bool OnlyCurrent { get; set; }
     public (int Offset, int Length)? Current { get; set; }
@@ -173,7 +168,7 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
 
         if (all.CreateGeometry() is { } matches)
         {
-            drawingContext.DrawGeometry(Brush, null, matches);
+            drawingContext.DrawGeometry(FocusTheme.Match, null, matches);
         }
 
         if (Current is { Length: > 0 } current && current.Offset + current.Length <= document.TextLength)
@@ -182,7 +177,7 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
             active.AddSegment(view, new TextSegment { StartOffset = current.Offset, Length = current.Length });
             if (active.CreateGeometry() is { } selected)
             {
-                drawingContext.DrawGeometry(CurrentBrush, null, selected);
+            drawingContext.DrawGeometry(FocusTheme.CurrentMatch, null, selected);
             }
         }
     }

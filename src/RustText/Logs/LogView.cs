@@ -62,15 +62,29 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly TextBlock _fileLabel = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBox _logText = new()
     {
+        Classes = { "focus-log-editor" },
         IsReadOnly = true,
         AcceptsReturn = true,
         FontFamily = new FontFamily("Consolas, monospace"),
-        FontSize = 14,
+        FontSize = FocusTheme.EditorFontSize,
         IsInactiveSelectionHighlightEnabled = true,
-        Padding = new Thickness(12),
+        Padding = new Thickness(8, 6),
+        Background = FocusTheme.Editor,
+        Foreground = FocusTheme.Text,
+        CaretBrush = FocusTheme.Accent,
+        SelectionBrush = FocusTheme.Selection,
+        SelectionForegroundBrush = FocusTheme.Text,
         TextWrapping = TextWrapping.NoWrap,
     };
-    private readonly TextBox _percentBox = new() { Width = 90, PlaceholderText = "%", Text = "0" };
+    private readonly TextBox _percentBox = new()
+    {
+        Width = 76,
+        PlaceholderText = "%",
+        Text = "0",
+        Background = FocusTheme.Field,
+        Foreground = FocusTheme.Text,
+        BorderBrush = FocusTheme.Border,
+    };
     private readonly TextBox _searchBox = new() { PlaceholderText = "Текст или регулярное выражение" };
     private readonly CheckBox _regexBox = new() { Content = "Регулярное выражение" };
     private readonly CheckBox _caseBox = new() { Content = "Учитывать регистр" };
@@ -102,23 +116,40 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly TextBlock _lineGutterText = new()
     {
         FontFamily = new FontFamily("Consolas, monospace"),
-        FontSize = 14,
+        FontSize = FocusTheme.EditorFontSize,
         TextAlignment = TextAlignment.Right,
         TextWrapping = TextWrapping.NoWrap,
-        Foreground = Brushes.Gray,
+        Foreground = FocusTheme.Gutter,
     };
     private readonly ScrollViewer _lineGutterScrollViewer = new()
     {
-        Width = 96,
+        Width = 64,
         HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
         VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
         IsHitTestVisible = false,
     };
     private ScrollViewer? _logScrollViewer;
     private readonly TextBlock _indexLabel = new();
-    private readonly ListBox _minimapList = new() { Width = 110 };
-    private readonly StackPanel _searchPanel = new() { Spacing = 7, IsVisible = false };
+    private readonly ListBox _minimapList = new()
+    {
+        Width = 52,
+        Background = FocusTheme.Hover,
+        Foreground = FocusTheme.Muted,
+        BorderBrush = FocusTheme.Border,
+    };
+    private readonly StackPanel _searchPanel = new()
+    {
+        Spacing = 7,
+        Margin = new Thickness(0, 5, 0, 0),
+        Background = FocusTheme.Panel,
+        IsVisible = false,
+    };
     private readonly StackPanel _searchResultButtons = new() { Spacing = 2 };
+    private readonly TextBlock _liveLabel = new()
+    {
+        VerticalAlignment = VerticalAlignment.Center,
+        FontSize = 12,
+    };
 
     private readonly List<IndexEntry> _lineIndex = [];
     private readonly HashSet<long> _skippedSearchLines = [];
@@ -200,6 +231,7 @@ internal sealed class LogView : UserControl, IDisposable
 
     public string Path => _path;
     public bool IsReadOnly => true;
+    public string StatusText { get; private set; } = string.Empty;
 
     public bool WordWrap
     {
@@ -330,7 +362,11 @@ internal sealed class LogView : UserControl, IDisposable
         return new LogSystemTime(seconds, nanos);
     }
 
-    public void SetTextSize(double value) => _logText.FontSize = value;
+    public void SetTextSize(double value)
+    {
+        _logText.FontSize = value;
+        _lineGutterText.FontSize = value;
+    }
 
     private int _activeSearchResult = -1;
 
@@ -422,56 +458,75 @@ internal sealed class LogView : UserControl, IDisposable
 
     private Control BuildLayout()
     {
-        var root = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto") };
-        var contextRow = new StackPanel
+        var root = new Grid
         {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            Spacing = 8
+            RowDefinitions = new RowDefinitions("Auto,*,Auto,Auto"),
+            Background = FocusTheme.Editor,
         };
-        contextRow.Children.Add(_fileLabel);
-        contextRow.Children.Add(new TextBlock { Text = "ТОЛЬКО ЧТЕНИЕ", Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center });
-        contextRow.Children.Add(_pauseButton);
-        contextRow.Children.Add(_followButton);
-        contextRow.Children.Add(_indexButton);
-        contextRow.Children.Add(_cancelIndexButton);
-        contextRow.Children.Add(_openSearchButton);
-        contextRow.Children.Add(_wrapButton);
-        contextRow.Children.Add(_hideButton);
-        contextRow.Children.Add(_revealButton);
-        contextRow.Children.Add(_trimButton);
-        contextRow.Children.Add(_cancelTrimButton);
-        root.Children.Add(contextRow);
 
-        var navigation = new StackPanel
+        _fileLabel.FontSize = 12;
+        _fileLabel.FontWeight = FontWeight.Medium;
+        _fileLabel.MinWidth = 0;
+        _fileLabel.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _fileLabel.VerticalAlignment = VerticalAlignment.Center;
+        _fileLabel.Foreground = FocusTheme.Text;
+        var readOnlyLabel = new TextBlock
+        {
+            Text = "ТОЛЬКО ЧТЕНИЕ",
+            FontSize = 11,
+            Foreground = FocusTheme.Muted,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var titleGroup = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 10,
+            MinWidth = 0,
+        };
+        titleGroup.Children.Add(_fileLabel);
+        Grid.SetColumn(readOnlyLabel, 1);
+        titleGroup.Children.Add(readOnlyLabel);
+
+        SetButtonStyle(_pauseButton, "focus-quiet");
+        SetButtonStyle(_followButton, "focus-quiet");
+        var contextActions = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Spacing = 6,
-            Margin = new Thickness(0, 8, 0, 8)
+            Spacing = 5,
         };
-        Grid.SetRow(navigation, 1);
-        navigation.Children.Add(_startButton);
-        navigation.Children.Add(_previousButton);
-        navigation.Children.Add(_nextButton);
-        navigation.Children.Add(_endButton);
-        navigation.Children.Add(_middleButton);
-        navigation.Children.Add(_percentBox);
-        var percentButton = new Button { Content = "Перейти, %" };
-        percentButton.Click += async (_, _) => await JumpByPercentageAsync();
-        navigation.Children.Add(percentButton);
-        navigation.Children.Add(_timeButton);
-        root.Children.Add(navigation);
+        contextActions.Children.Add(_pauseButton);
+        contextActions.Children.Add(_followButton);
+        contextActions.Children.Add(_liveLabel);
+
+        var contextGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 12,
+        };
+        contextGrid.Children.Add(titleGroup);
+        Grid.SetColumn(contextActions, 1);
+        contextGrid.Children.Add(contextActions);
+        root.Children.Add(new Border
+        {
+            Padding = new Thickness(10, 5),
+            Background = FocusTheme.Chrome,
+            BorderBrush = FocusTheme.Border,
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Child = contextGrid,
+        });
 
         var content = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
-            ColumnSpacing = 8
+            ColumnSpacing = 0,
+            Background = FocusTheme.Editor,
         };
-        Grid.SetRow(content, 2);
+        Grid.SetRow(content, 1);
         _lineGutterScrollViewer.Content = new Border
         {
-            Padding = new Thickness(0, 12),
+            Padding = new Thickness(0, 6),
+            Background = FocusTheme.Gutter,
             Child = _lineGutterText,
         };
         AutomationProperties.SetName(_lineGutterScrollViewer, "Номера строк лога");
@@ -492,11 +547,24 @@ internal sealed class LogView : UserControl, IDisposable
 
             var button = new Button
             {
-                Padding = new Thickness(3),
+                Height = 5,
+                MinHeight = 5,
+                MaxHeight = 5,
+                Padding = new Thickness(0),
+                Margin = new Thickness(0),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Left,
-                Content = new TextBlock { Text = sample.Preview, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 9 }
+                Content = new Border
+                {
+                    Width = Math.Clamp(sample.Preview.Length * 1.35, 6, 46),
+                    Height = 2,
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    Background = FocusTheme.Muted,
+                },
             };
-            ToolTip.SetTip(button, $"{sample.Offset:N0} байт");
+            SetButtonStyle(button, "focus-quiet");
+            button.Margin = new Thickness(0);
+            ToolTip.SetTip(button, $"{sample.Offset:N0} байт · {sample.Preview}");
             button.Click += async (_, _) => await NavigateAsync(sample.Offset, true);
             return button;
         });
@@ -504,34 +572,160 @@ internal sealed class LogView : UserControl, IDisposable
         content.Children.Add(_minimapList);
         root.Children.Add(content);
 
-        var footer = new StackPanel { Spacing = 6, Margin = new Thickness(0, 8, 0, 0) };
-        Grid.SetRow(footer, 3);
-        var statusRow = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 12 };
-        statusRow.Children.Add(_countLabel);
-        Grid.SetColumn(_lineNumberLabel, 1);
-        statusRow.Children.Add(_lineNumberLabel);
-        Grid.SetColumn(_positionLabel, 2);
-        statusRow.Children.Add(_positionLabel);
-        footer.Children.Add(statusRow);
-        footer.Children.Add(_indexLabel);
-        footer.Children.Add(_statusLabel);
-
-        var searchRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        var searchRow = new WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+            ItemSpacing = 4,
+        };
+        _searchBox.MinWidth = 180;
+        _searchBox.FontSize = 12;
+        _searchBox.Background = FocusTheme.Field;
+        _searchBox.Foreground = FocusTheme.Text;
+        _searchBox.BorderBrush = FocusTheme.Border;
+        _percentBox.FontSize = 12;
+        _regexBox.FontSize = 12;
+        _caseBox.FontSize = 12;
+        _wholeWordBox.FontSize = 12;
+        AutomationProperties.SetName(_regexBox, "Регулярное выражение");
+        ToolTip.SetTip(_regexBox, "Регулярное выражение");
+        AutomationProperties.SetName(_caseBox, "Учитывать регистр");
+        ToolTip.SetTip(_caseBox, "Учитывать регистр");
+        _regexBox.Foreground = FocusTheme.Muted;
+        _caseBox.Foreground = FocusTheme.Muted;
+        _wholeWordBox.Foreground = FocusTheme.Muted;
         searchRow.Children.Add(_searchBox);
         searchRow.Children.Add(_regexBox);
         searchRow.Children.Add(_caseBox);
         searchRow.Children.Add(_wholeWordBox);
+        SetButtonStyle(_searchButton, "focus-primary");
+        SetButtonStyle(_moreButton, "focus-quiet");
+        SetButtonStyle(_cancelSearchButton, "focus-quiet");
+        SetButtonStyle(_searchCloseButton, "focus-icon");
+        AutomationProperties.SetName(_searchCloseButton, "Закрыть поиск");
+        ToolTip.SetTip(_searchCloseButton, "Закрыть поиск");
         searchRow.Children.Add(_searchButton);
         searchRow.Children.Add(_moreButton);
         searchRow.Children.Add(_cancelSearchButton);
         searchRow.Children.Add(_searchCloseButton);
         _searchPanel.Children.Add(searchRow);
-        _searchPanel.Children.Add(_searchResultButtons);
-        AutomationProperties.SetName(_searchBox, "Поиск по логу");
-        AutomationProperties.SetAutomationId(_searchBox, "LogSearch");
-        footer.Children.Add(_searchPanel);
+        var searchResults = new ScrollViewer
+        {
+            MaxHeight = 48,
+            Content = _searchResultButtons,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        };
+        root.SizeChanged += (_, e) => searchResults.MaxHeight = Math.Clamp(e.NewSize.Height / 8, 32, 48);
+        _searchPanel.Children.Add(searchResults);
+        Grid.SetRow(_searchPanel, 2);
+        root.Children.Add(_searchPanel);
+
+        SetNavigationIcon(_startButton, "В начало лога");
+        SetNavigationIcon(_previousButton, "Предыдущая страница");
+        SetNavigationIcon(_nextButton, "Следующая страница");
+        SetNavigationIcon(_endButton, "В конец лога");
+        SetButtonStyle(_middleButton, "focus-quiet");
+        SetButtonStyle(_timeButton, "focus-quiet");
+        var percentButton = new Button { Content = "Перейти, %" };
+        SetButtonStyle(percentButton, "focus-quiet");
+        percentButton.Click += async (_, _) => await JumpByPercentageAsync();
+
+        var navigation = new WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 2),
+            ItemSpacing = 4,
+        };
+        navigation.Children.Add(_startButton);
+        navigation.Children.Add(_previousButton);
+        navigation.Children.Add(_nextButton);
+        navigation.Children.Add(_endButton);
+        navigation.Children.Add(_middleButton);
+        navigation.Children.Add(_percentBox);
+        navigation.Children.Add(percentButton);
+        navigation.Children.Add(_timeButton);
+
+        SetButtonStyle(_indexButton, "focus-quiet");
+        SetButtonStyle(_cancelIndexButton, "focus-quiet");
+        SetButtonStyle(_openSearchButton, "focus-quiet");
+        SetButtonStyle(_wrapButton, "focus-quiet");
+        SetButtonStyle(_hideButton, "focus-quiet");
+        SetButtonStyle(_revealButton, "focus-quiet");
+        SetButtonStyle(_trimButton, "focus-danger");
+        SetButtonStyle(_cancelTrimButton, "focus-quiet");
+        var fileActions = new StackPanel { Spacing = 2 };
+        var actionsFlyout = new Flyout { Content = fileActions, Placement = PlacementMode.Top };
+        foreach (var button in new[] { _indexButton, _wrapButton, _hideButton, _revealButton, _trimButton })
+        {
+            button.HorizontalAlignment = HorizontalAlignment.Stretch;
+            button.HorizontalContentAlignment = HorizontalAlignment.Left;
+            button.Click += (_, _) => actionsFlyout.Hide();
+            fileActions.Children.Add(button);
+        }
+        var actions = new Button { Content = "Действия ▾", Flyout = actionsFlyout };
+        SetButtonStyle(actions, "focus-quiet");
+        navigation.Children.Add(_openSearchButton);
+        navigation.Children.Add(actions);
+        navigation.Children.Add(_cancelIndexButton);
+        navigation.Children.Add(_cancelTrimButton);
+
+        _countLabel.FontSize = 11;
+        _countLabel.Foreground = FocusTheme.Muted;
+        _lineNumberLabel.FontSize = 11;
+        _lineNumberLabel.Foreground = FocusTheme.Muted;
+        _lineNumberLabel.MaxWidth = 110;
+        _indexLabel.FontSize = 11;
+        _indexLabel.Foreground = FocusTheme.Muted;
+        _indexLabel.TextTrimming = TextTrimming.CharacterEllipsis;
+        _indexLabel.MaxWidth = 160;
+        _positionLabel.FontSize = 11;
+        _positionLabel.Foreground = FocusTheme.Muted;
+        _positionLabel.MaxWidth = 190;
+        var footerContent = new StackPanel
+        {
+            Spacing = 2,
+            Margin = new Thickness(8, 3),
+            Background = FocusTheme.Chrome,
+        };
+        footerContent.Children.Add(navigation);
+        var statusRow = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"),
+            ColumnSpacing = 8,
+            Margin = new Thickness(0, 3, 0, 0),
+        };
+        statusRow.Children.Add(_countLabel);
+        Grid.SetColumn(_lineNumberLabel, 1);
+        statusRow.Children.Add(_lineNumberLabel);
+        Grid.SetColumn(_indexLabel, 2);
+        statusRow.Children.Add(_indexLabel);
+        Grid.SetColumn(_positionLabel, 3);
+        statusRow.Children.Add(_positionLabel);
+        footerContent.Children.Add(statusRow);
+        var footer = new Border
+        {
+            Background = FocusTheme.Chrome,
+            BorderBrush = FocusTheme.Border,
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Child = footerContent,
+        };
+        Grid.SetRow(footer, 3);
         root.Children.Add(footer);
         return root;
+    }
+
+    private static void SetButtonStyle(Button button, string styleClass)
+    {
+        button.Classes.Add(styleClass);
+        button.FontSize = 12;
+        button.Margin = new Thickness(0, 0, 4, 3);
+    }
+
+    private static void SetNavigationIcon(Button button, string name)
+    {
+        SetButtonStyle(button, "focus-icon");
+        AutomationProperties.SetName(button, name);
+        ToolTip.SetTip(button, name);
     }
 
     private void ConfigureInteractions()
@@ -714,8 +908,9 @@ internal sealed class LogView : UserControl, IDisposable
                 ? $"Строки {first:N0}–{last:N0}"
                 : "Строки индексируются";
             _countLabel.Text = $"Записей на странице · {page.Rows.Count} · {_reader.Encoding}";
-            _statusLabel.Text = page.WasTruncated ? "Файл изменился во время чтения. Позиция пересчитана по открытом файлу." : string.Empty;
-            _statusLabel.IsVisible = !string.IsNullOrEmpty(_statusLabel.Text);
+            SetStatus(page.WasTruncated
+                ? "Файл изменился во время чтения. Позиция пересчитана по открытому файлу."
+                : string.Empty);
             if (allowFollowEnd && _followEnd && page.HasMore)
             {
                 loadFollowEnd = true;
@@ -872,8 +1067,16 @@ internal sealed class LogView : UserControl, IDisposable
                 var button = new Button
                 {
                     HorizontalContentAlignment = HorizontalAlignment.Left,
-                    Content = $"{hit.LineNumber?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"} · {hit.Preview}"
+                    Background = FocusTheme.Panel,
+                    Content = new TextBlock
+                    {
+                        Text = $"{hit.LineNumber?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"} · {hit.Preview}",
+                        TextWrapping = TextWrapping.Wrap,
+                        FontSize = 12,
+                        Foreground = FocusTheme.Text,
+                    }
                 };
+                SetButtonStyle(button, "focus-quiet");
                 ToolTip.SetTip(button, $"Байт {hit.Offset:N0}");
                 button.Click += async (_, _) => await OpenSearchHitAsync(hit);
                 _searchResultButtons.Children.Add(button);
@@ -1211,21 +1414,31 @@ internal sealed class LogView : UserControl, IDisposable
             Width = 460,
             SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            CanResize = false
+            CanResize = false,
+            Background = FocusTheme.Panel,
+            Foreground = FocusTheme.Text,
         };
         var result = false;
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Spacing = 8 };
         var accept = new Button { Content = "Удалить начало", MinWidth = 120 };
         var cancel = new Button { Content = "Отмена", MinWidth = 90 };
+        SetButtonStyle(accept, "focus-danger");
+        SetButtonStyle(cancel, "focus-quiet");
         accept.Click += (_, _) => { result = true; dialog.Close(); };
         cancel.Click += (_, _) => dialog.Close();
         buttons.Children.Add(cancel);
         buttons.Children.Add(accept);
-        dialog.Content = new StackPanel
+        dialog.Content = new Border
         {
-            Margin = new Thickness(18),
-            Spacing = 16,
-            Children = { new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, buttons }
+            Padding = new Thickness(18),
+            Background = FocusTheme.Panel,
+            BorderBrush = FocusTheme.Border,
+            BorderThickness = new Thickness(1),
+            Child = new StackPanel
+            {
+                Spacing = 16,
+                Children = { new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, Foreground = FocusTheme.Text }, buttons }
+            }
         };
         await dialog.ShowDialog(window);
         return result;
@@ -1739,9 +1952,17 @@ internal sealed class LogView : UserControl, IDisposable
     {
         var enabled = !_busy && !_closed;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
-        _followButton.Content = _followEnd ? "Следовать: вкл." : "Следовать за концом";
+        _followButton.Content = _followEnd ? "К концу" : "Следовать";
+        _liveLabel.Text = _autoRefresh ? "● Обновляется" : "● На паузе";
+        _liveLabel.Foreground = _autoRefresh ? FocusTheme.Success : FocusTheme.Muted;
+        _followButton.Background = _followEnd ? FocusTheme.Hover : Brushes.Transparent;
+        _followButton.Foreground = _followEnd ? FocusTheme.Accent : FocusTheme.Text;
+        _indexButton.Background = _indexPaused ? FocusTheme.Hover : Brushes.Transparent;
+        _indexButton.Foreground = _indexPaused ? FocusTheme.Accent : FocusTheme.Text;
         _indexButton.Content = _indexPaused ? "Продолжить индекс" : "Индексирование";
         _wrapButton.Content = _wordWrap ? "Перенос: вкл." : "Перенос: выкл.";
+        _wrapButton.Background = _wordWrap ? FocusTheme.Hover : Brushes.Transparent;
+        _wrapButton.Foreground = _wordWrap ? FocusTheme.Accent : FocusTheme.Text;
         _previousButton.IsEnabled = enabled && _previousOffsets.Count > 0;
         _nextButton.IsEnabled = enabled && _page?.HasMore == true;
         _startButton.IsEnabled = enabled && _page is not null;
@@ -1760,6 +1981,7 @@ internal sealed class LogView : UserControl, IDisposable
 
     private void SetStatus(string text)
     {
+        StatusText = text;
         _statusLabel.Text = text;
         _statusLabel.IsVisible = text.Length > 0;
         StatusChanged?.Invoke(text);

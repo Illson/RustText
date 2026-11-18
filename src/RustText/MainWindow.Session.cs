@@ -277,7 +277,7 @@ public partial class MainWindow
         tab.JsonDisabled = saved.JsonValidationDisabled;
         tab.LastWorked = saved.LastWorkedMs is { } ms ? DateTimeOffset.FromUnixTimeMilliseconds(ms) : DateTimeOffset.Now;
         tab.Deferred = saved;
-        tab.Item.Content = Button("Загрузить вкладку", () => Run(() => ActivateDeferredAsync(tab)));
+        tab.Item.Content = FocusButton(Button("Загрузить вкладку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
         UpdateTab(tab);
     }
 
@@ -370,7 +370,7 @@ public partial class MainWindow
         {
             if (_tabs.ContainsKey(tab.Id))
             {
-                tab.Item.Content = Button("Повторить загрузку", () => Run(() => ActivateDeferredAsync(tab)));
+                tab.Item.Content = FocusButton(Button("Повторить загрузку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
             }
 
             throw;
@@ -458,7 +458,7 @@ public partial class MainWindow
         AttachLog(tab, draftPath, TextEncodingKind.Utf8);
         tab.Recovery = saved;
         var panel = new DockPanel();
-        var copy = Button("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab)));
+        var copy = FocusButton(Button("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab))), primary: true);
         Avalonia.Controls.DockPanel.SetDock(copy, Dock.Top);
         tab.Item.Content = null;
         panel.Children.Add(copy);
@@ -639,13 +639,20 @@ public partial class MainWindow
     private async Task ShowHomeAsync()
     {
         _home = true;
+        SetCaption(null);
         _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
         if (!_home)
         {
             return;
         }
 
-        var input = new TextBox { PlaceholderText = "Поиск по имени или пути" };
+        var input = new TextBox
+        {
+            PlaceholderText = "Поиск по имени или пути",
+            Background = FocusTheme.Field,
+            Foreground = FocusTheme.Text,
+            BorderBrush = FocusTheme.Border
+        };
         var rows = new StackPanel { Spacing = 3 };
         var footer = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
         var index = 0;
@@ -658,8 +665,8 @@ public partial class MainWindow
             index = Math.Clamp(index, 0, count - 1);
             foreach (var entry in visible.Skip(index * 16).Take(16))
             {
-                var label = Button($"{Path.GetFileName(entry.Path)}   {DescribeWork(entry.LineCount, entry.LastWorkedMs)}",
-                    () => Run(() => OpenRecentAsync(entry)));
+                var label = FocusButton(Button($"{Path.GetFileName(entry.Path)}   {DescribeWork(entry.LineCount, entry.LastWorkedMs)}",
+                    () => Run(() => OpenRecentAsync(entry))));
                 label.HorizontalAlignment = HorizontalAlignment.Stretch;
                 label.HorizontalContentAlignment = HorizontalAlignment.Left;
                 ToolTip.SetTip(label, entry.Path);
@@ -671,23 +678,24 @@ public partial class MainWindow
 
         input.TextChanged += (_, _) => { index = 0; Rebuild(); };
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        actions.Children.Add(Button("Назад", () => { index--; Rebuild(); }));
+        actions.Children.Add(FocusButton(Button("Назад", () => { index--; Rebuild(); })));
         actions.Children.Add(footer);
-        actions.Children.Add(Button("Дальше", () => { index++; Rebuild(); }));
+        actions.Children.Add(FocusButton(Button("Дальше", () => { index++; Rebuild(); })));
         var surface = new Grid
         {
             MaxWidth = 840,
-            Margin = new Thickness(28),
+            Margin = new Thickness(18),
             RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"),
-            RowSpacing = 12
+            RowSpacing = 10,
+            Background = FocusTheme.Editor
         };
         var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        head.Children.Add(new TextBlock { Text = "История файлов", FontSize = 26 });
-        head.Children.Add(Button("Открыть…", () => Run(() => OpenDialogAsync())));
-        head.Children.Add(Button("Новый документ", () => { ShowGroups(); NewTab(); }));
+        head.Children.Add(new TextBlock { Text = "История файлов", FontSize = 20, Foreground = FocusTheme.Text });
+        head.Children.Add(FocusButton(Button("Открыть…", () => Run(() => OpenDialogAsync())), primary: true));
+        head.Children.Add(FocusButton(Button("Новый документ", () => { ShowGroups(); NewTab(); })));
         if (_tabs.Count > 0)
         {
-            head.Children.Add(Button("К вкладкам", ShowGroups));
+            head.Children.Add(FocusButton(Button("К вкладкам", ShowGroups)));
         }
 
         surface.Children.Add(head);
