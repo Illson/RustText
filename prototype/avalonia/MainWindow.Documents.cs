@@ -146,7 +146,7 @@ public partial class MainWindow
         tab.Log?.Close();
         tab.Log = null;
         tab.LastWorked = DateTimeOffset.Now;
-        var editor = new TextEditor
+        var editor = new FocusTextEditor
         {
             Text = text,
             FontFamily = new FontFamily("Cascadia Mono, Consolas, monospace"),
@@ -154,6 +154,7 @@ public partial class MainWindow
             Background = FocusTheme.Editor,
             Foreground = FocusTheme.Text,
             LineNumbersForeground = FocusTheme.Gutter,
+            LineNumbersMargin = new Thickness(8, 0, 12, 0),
             WordWrap = _wordWrap,
             ShowLineNumbers = true,
             HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
