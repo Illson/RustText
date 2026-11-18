@@ -2,7 +2,7 @@
 
 Текстовый редактор и просмотрщик больших логов для Windows x64 на Rust и GPUI Kit.
 
-Отдельное [демо на .NET 11 и Avalonia](prototype/avalonia/README.md) читает большие логи постранично и собирается с Native AOT.
+[Реализация на .NET 11 и Avalonia](prototype/avalonia/README.md) включает редактор и постраничный просмотр логов. Её можно собрать с Native AOT.
 
 ## Запуск
 
