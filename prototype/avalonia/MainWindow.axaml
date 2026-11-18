@@ -1,0 +1,36 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="RustText.Demo.MainWindow"
+        Title="RustText · Демо"
+        Width="820" Height="580" MinWidth="480" MinHeight="380"
+        WindowStartupLocation="CenterScreen"
+        Background="#111820" Foreground="#E9F0F6">
+    <Grid Margin="28,24" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="16">
+        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+            <StackPanel Spacing="5">
+                <TextBlock Text="Журнал событий" FontSize="28" FontWeight="SemiBold" />
+                <TextBlock Text="Демонстрационные данные" Foreground="#A4B3C2" />
+            </StackPanel>
+            <Border Grid.Column="1" VerticalAlignment="Top"
+                    Background="#192B39" CornerRadius="6" Padding="10,5">
+                <TextBlock x:Name="RuntimeLabel" Foreground="#A9D8FF" />
+            </Border>
+        </Grid>
+
+        <TextBox x:Name="SearchBox" Grid.Row="1"
+                 AutomationProperties.Name="Фильтр журнала"
+                 PlaceholderText="Фильтр по тексту, например WARN" PlaceholderForeground="#A4B3C2"
+                 Background="#17212B" BorderBrush="#364756" />
+
+        <TextBox x:Name="LogBox" Grid.Row="2"
+                 AutomationProperties.Name="Строки журнала"
+                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                 ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                 PlaceholderText="Совпадений нет" PlaceholderForeground="#A4B3C2"
+                 FontFamily="Consolas, monospace" FontSize="14"
+                 Padding="14,12" Background="#0C131A" BorderBrush="#364756" />
+
+        <TextBlock x:Name="CountLabel" Grid.Row="3" Foreground="#A4B3C2" />
+    </Grid>
+</Window>
