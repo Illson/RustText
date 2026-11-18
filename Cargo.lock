@@ -2694,6 +2694,7 @@ dependencies = [
  "rand 0.9.5",
  "raw-window-handle",
  "smallvec",
+ "tempfile",
  "uuid",
  "windows 0.62.2",
  "windows-core 0.62.2",

@@ -1,7 +1,9 @@
 use std::{
     borrow::Cow,
     ffi::{c_uint, c_void},
+    io::Write,
     mem::ManuallyDrop,
+    os::windows::ffi::OsStrExt,
 };
 
 use anyhow::{Context, Result};
@@ -9,6 +11,7 @@ use collections::HashMap;
 use gpui_util::{ResultExt, maybe};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use smallvec::SmallVec;
+use tempfile::{NamedTempFile, TempPath};
 use windows::{
     Win32::{
         Foundation::*,
@@ -40,20 +43,50 @@ pub(crate) struct DirectWriteTextSystem {
 
 struct DirectWriteComponents {
     locale: HSTRING,
-    factory: IDWriteFactory5,
-    in_memory_loader: IDWriteInMemoryFontFileLoader,
-    builder: IDWriteFontSetBuilder1,
+    factory: IDWriteFactory4,
+    custom_fonts: CustomFonts,
     text_renderer: TextRendererWrapper,
     system_ui_font_name: SharedString,
     system_subpixel_rendering: bool,
 }
 
+enum CustomFonts {
+    InMemory {
+        loader: IDWriteInMemoryFontFileLoader,
+        builder: IDWriteFontSetBuilder1,
+    },
+    LocalFiles(IDWriteFontSetBuilder),
+}
+
+impl CustomFonts {
+    fn new(factory: &IDWriteFactory4, in_memory_factory: Option<IDWriteFactory5>) -> Result<Self> {
+        unsafe {
+            if let Some(in_memory_factory) = in_memory_factory {
+                let loader = in_memory_factory.CreateInMemoryFontFileLoader()?;
+                let builder = in_memory_factory.CreateFontSetBuilder()?;
+                factory.RegisterFontFileLoader(&loader)?;
+                Ok(Self::InMemory { loader, builder })
+            } else {
+                // RustText #31. Build 14393 supports font sets but lacks the built-in memory loader.
+                Ok(Self::LocalFiles(factory.CreateFontSetBuilder()?))
+            }
+        }
+    }
+
+    fn builder(&self) -> &IDWriteFontSetBuilder {
+        match self {
+            Self::InMemory { builder, .. } => builder,
+            Self::LocalFiles(builder) => builder,
+        }
+    }
+}
+
 impl Drop for DirectWriteComponents {
     fn drop(&mut self) {
-        unsafe {
-            let _ = self
-                .factory
-                .UnregisterFontFileLoader(&self.in_memory_loader);
+        if let CustomFonts::InMemory { loader, .. } = &self.custom_fonts {
+            unsafe {
+                let _ = self.factory.UnregisterFontFileLoader(loader);
+            }
         }
     }
 }
@@ -65,17 +98,26 @@ struct DirectWriteState {
     font_to_font_id: HashMap<Font, FontId>,
     font_info_cache: HashMap<usize, FontId>,
     layout_line_scratch: Vec<u16>,
+    // DirectWrite can reopen these files while any of the cached faces are alive.
+    custom_font_files: Vec<TempPath>,
 }
 
 impl DirectWriteTextSystem {
     pub(crate) fn new() -> Result<Self> {
-        let factory: IDWriteFactory5 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-        // The `IDWriteInMemoryFontFileLoader` here is supported starting from
-        // Windows 10 Creators Update, which consequently requires the entire
-        // `DirectWriteTextSystem` to run on `win10 1703`+.
-        let in_memory_loader = unsafe { factory.CreateInMemoryFontFileLoader()? };
-        unsafe { factory.RegisterFontFileLoader(&in_memory_loader)? };
-        let builder = unsafe { factory.CreateFontSetBuilder()? };
+        let factory: IDWriteFactory4 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        let in_memory_factory = match factory.cast::<IDWriteFactory5>() {
+            Ok(factory) => Some(factory),
+            Err(error) if error.code() == E_NOINTERFACE => None,
+            Err(error) => return Err(error.into()),
+        };
+        Self::with_factory(factory, in_memory_factory)
+    }
+
+    fn with_factory(
+        factory: IDWriteFactory4,
+        in_memory_factory: Option<IDWriteFactory5>,
+    ) -> Result<Self> {
+        let custom_fonts = CustomFonts::new(&factory, in_memory_factory)?;
         let mut locale = [0u16; LOCALE_NAME_MAX_LENGTH as usize];
         unsafe { GetUserDefaultLocaleName(&mut locale) };
         let locale = HSTRING::from_wide(&locale);
@@ -86,8 +128,7 @@ impl DirectWriteTextSystem {
         let components = DirectWriteComponents {
             locale,
             factory,
-            in_memory_loader,
-            builder,
+            custom_fonts,
             text_renderer,
             system_ui_font_name,
             system_subpixel_rendering,
@@ -100,7 +141,7 @@ impl DirectWriteTextSystem {
                 .GetSystemFontCollection(false, &mut result, true)?;
             result.context("Failed to get system font collection")?
         };
-        let custom_font_set = unsafe { components.builder.CreateFontSet()? };
+        let custom_font_set = unsafe { components.custom_fonts.builder().CreateFontSet()? };
         let custom_font_collection = unsafe {
             components
                 .factory
@@ -116,6 +157,7 @@ impl DirectWriteTextSystem {
                 font_to_font_id: HashMap::default(),
                 font_info_cache: HashMap::default(),
                 layout_line_scratch: Vec::new(),
+                custom_font_files: Vec::new(),
             }),
         })
     }
@@ -251,41 +293,62 @@ impl DirectWriteState {
         fonts: Vec<Cow<'static, [u8]>>,
     ) -> Result<()> {
         for font_data in fonts {
-            match font_data {
-                Cow::Borrowed(data) => unsafe {
-                    let font_file = components
-                        .in_memory_loader
-                        .CreateInMemoryFontFileReference(
-                            &components.factory,
-                            data.as_ptr().cast(),
-                            data.len() as _,
-                            None,
-                        )?;
-                    components.builder.AddFontFile(&font_file)?;
+            match &components.custom_fonts {
+                CustomFonts::InMemory { loader, builder } => unsafe {
+                    let font_file = loader.CreateInMemoryFontFileReference(
+                        &components.factory,
+                        font_data.as_ptr().cast(),
+                        font_data.len().try_into()?,
+                        None,
+                    )?;
+                    builder.AddFontFile(&font_file)?;
                 },
-                Cow::Owned(data) => unsafe {
-                    let font_file = components
-                        .in_memory_loader
-                        .CreateInMemoryFontFileReference(
-                            &components.factory,
-                            data.as_ptr().cast(),
-                            data.len() as _,
-                            None,
-                        )?;
-                    components.builder.AddFontFile(&font_file)?;
-                },
+                CustomFonts::LocalFiles(builder) => {
+                    self.add_local_font(&components.factory, builder, &font_data)?;
+                }
             }
         }
-        let set = unsafe { components.builder.CreateFontSet()? };
+        let set = unsafe { components.custom_fonts.builder().CreateFontSet()? };
         let collection = unsafe { components.factory.CreateFontCollectionFromFontSet(&set)? };
         self.custom_font_collection = collection;
 
         Ok(())
     }
 
+    fn add_local_font(
+        &mut self,
+        factory: &IDWriteFactory4,
+        builder: &IDWriteFontSetBuilder,
+        font_data: &[u8],
+    ) -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        file.write_all(font_data)?;
+        let path = file.into_temp_path();
+        let wide_path: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+        let font_file =
+            unsafe { factory.CreateFontFileReference(PCWSTR(wide_path.as_ptr()), None)? };
+        let mut supported = BOOL::default();
+        let mut file_type = DWRITE_FONT_FILE_TYPE::default();
+        let mut face_count = 0;
+        unsafe { font_file.Analyze(&mut supported, &mut file_type, None, &mut face_count)? };
+        anyhow::ensure!(
+            supported.as_bool() && face_count > 0,
+            "Unsupported font data"
+        );
+
+        self.custom_font_files.push(path);
+        for index in 0..face_count {
+            let face = unsafe {
+                factory.CreateFontFaceReference(&font_file, index, DWRITE_FONT_SIMULATIONS_NONE)?
+            };
+            unsafe { builder.AddFontFaceReference2(&face)? };
+        }
+        Ok(())
+    }
+
     fn generate_font_fallbacks(
         fallbacks: &FontFallbacks,
-        factory: &IDWriteFactory5,
+        factory: &IDWriteFactory4,
         system_font_collection: &IDWriteFontCollection1,
     ) -> Result<Option<IDWriteFontFallback>> {
         let fallback_list = fallbacks.fallback_list();
@@ -342,7 +405,7 @@ impl DirectWriteState {
     }
 
     unsafe fn generate_font_features(
-        factory: &IDWriteFactory5,
+        factory: &IDWriteFactory4,
         font_features: &FontFeatures,
     ) -> Result<IDWriteTypography> {
         let direct_write_features = unsafe { factory.CreateTypography()? };
@@ -359,7 +422,7 @@ impl DirectWriteState {
             style,
         }: &Font,
         collection: &IDWriteFontCollection1,
-        factory: &IDWriteFactory5,
+        factory: &IDWriteFactory4,
         system_font_collection: &IDWriteFontCollection1,
         system_ui_font_name: &SharedString,
     ) -> Option<FontInfo> {
@@ -1756,7 +1819,7 @@ fn get_system_ui_font_name() -> SharedString {
 fn is_color_glyph(
     font_face: &IDWriteFontFace3,
     glyph_id: GlyphId,
-    factory: &IDWriteFactory5,
+    factory: &IDWriteFactory4,
 ) -> bool {
     let glyph_run = DWRITE_GLYPH_RUN {
         fontFace: ManuallyDrop::new(Some(unsafe { std::ptr::read(&****font_face) })),
@@ -1797,12 +1860,36 @@ fn is_line_separator(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::DirectWriteTextSystem;
+    use super::{DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory, DirectWriteTextSystem};
     use crate::direct_write::ClusterAnalyzer;
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use gpui::{Font, FontWeight, PlatformTextSystem, TextRun, TextSystem, WindowTextSystem, px};
     use std::sync::Arc;
     use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_STRETCH_NORMAL, DWRITE_TEXT_METRICS};
+
+    #[test]
+    fn build_14393_font_path_does_not_need_factory5() -> Result<()> {
+        let factory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        let text_system = DirectWriteTextSystem::with_factory(factory, None)?;
+        let font = Font {
+            family: "Consolas".into(),
+            ..Default::default()
+        };
+        let font_id = text_system.font_id(&font)?;
+        assert_ne!(text_system.glyph_for_char(font_id, 'Ж').unwrap().0, 0);
+
+        let windows = std::env::var_os("SystemRoot").context("SystemRoot is missing")?;
+        let font_path = std::path::PathBuf::from(windows)
+            .join("Fonts")
+            .join("consola.ttf");
+        let data = std::fs::read(font_path)?;
+        text_system.add_fonts(vec![data.into()])?;
+        let state = text_system.state.read();
+        let custom_fonts = unsafe { state.custom_font_collection.GetFontSet()? };
+        assert_eq!(unsafe { custom_fonts.GetFontCount() }, 1);
+        assert!(state.custom_font_files[0].exists());
+        Ok(())
+    }
 
     #[test]
     fn tabs_preserve_native_advances_and_cursor() -> Result<()> {

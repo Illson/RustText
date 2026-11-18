@@ -15,11 +15,10 @@ use windows::Win32::{
         },
         Dxgi::{
             CreateDXGIFactory2, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
-            IDXGIAdapter1, IDXGIFactory6,
+            IDXGIAdapter1, IDXGIFactory2,
         },
     },
 };
-use windows::core::Interface;
 
 pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     (0..5)
@@ -38,7 +37,7 @@ pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T
 #[derive(Clone)]
 pub(crate) struct DirectXDevices {
     pub(crate) adapter: IDXGIAdapter1,
-    pub(crate) dxgi_factory: IDXGIFactory6,
+    pub(crate) dxgi_factory: IDXGIFactory2,
     pub(crate) device: ID3D11Device,
     pub(crate) device_context: ID3D11DeviceContext,
 }
@@ -89,7 +88,7 @@ fn check_debug_layer_available() -> bool {
 }
 
 #[inline]
-fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
+fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory2> {
     let factory_flag = if debug_layer_available {
         DXGI_CREATE_FACTORY_DEBUG
     } else {
@@ -104,7 +103,7 @@ fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
 
 #[inline]
 fn get_adapter(
-    dxgi_factory: &IDXGIFactory6,
+    dxgi_factory: &IDXGIFactory2,
     debug_layer_available: bool,
 ) -> Result<(
     IDXGIAdapter1,
@@ -113,7 +112,7 @@ fn get_adapter(
     D3D_FEATURE_LEVEL,
 )> {
     for adapter_index in 0.. {
-        let adapter: IDXGIAdapter1 = unsafe { dxgi_factory.EnumAdapters(adapter_index)?.cast()? };
+        let adapter = unsafe { dxgi_factory.EnumAdapters1(adapter_index)? };
         if let Ok(desc) = unsafe { adapter.GetDesc1() } {
             let gpu_name = String::from_utf16_lossy(&desc.Description)
                 .trim_matches(char::from(0))
