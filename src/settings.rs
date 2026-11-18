@@ -70,7 +70,6 @@ pub(crate) fn parse_untitled_tab_limit(raw: &str) -> Result<usize, &'static str>
     Ok(value)
 }
 
-#[cfg(test)]
 pub(crate) fn untitled_tab_name(first_line: &str, limit: usize) -> String {
     let limit = clamp_untitled_tab_limit(limit);
     let line = first_line.split(['\r', '\n']).next().unwrap_or("");

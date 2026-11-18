@@ -2,6 +2,7 @@ mod associations;
 #[cfg(windows)]
 mod desktop_icon;
 mod disk_status;
+mod draft_recovery;
 mod file_actions;
 mod home;
 mod json_action;
@@ -40,8 +41,8 @@ use crate::{
     log_file::LogBookmark,
     log_viewer::LogViewer,
     recent_files::{RecentFile, RecentFiles},
-    session::{MAX_CLOSED_TABS, Tab},
-    settings::{Settings, untitled_tab_name_rope},
+    session::{Draft, MAX_CLOSED_TABS, Tab},
+    settings::{Settings, untitled_tab_name, untitled_tab_name_rope},
     single_instance::SingleInstance,
     text_format::{TextEncoding, TextFormat},
 };
@@ -63,12 +64,19 @@ struct Document {
     json_validation: json_validation::Validation,
     json_validation_disabled: bool,
     restored_scroll: Option<[f64; 2]>,
+    recovery: Option<draft_recovery::Recovery>,
     log: Option<Entity<LogViewer>>,
     _subscriptions: [Subscription; 2],
 }
 
 impl Document {
     fn history_line_count(&self, cx: &App) -> Option<u64> {
+        if let Some(recovery) = &self.recovery {
+            return recovery
+                .tab
+                .line_count
+                .or_else(|| recovery.draft.as_ref().map(draft_line_count));
+        }
         available_history_line_count(self.placeholder, || {
             if let Some(log) = &self.log {
                 return log.read(cx).total_line_count();
@@ -92,8 +100,21 @@ fn available_history_line_count(
 
 struct ClosedTab {
     tab: Tab,
-    draft: Option<Rope>,
-    digest: Option<crate::session::DraftDigest>,
+    draft: Option<Draft>,
+}
+
+fn draft_name(draft: &Draft, limit: usize) -> String {
+    match draft {
+        Draft::Memory(text) => untitled_tab_name_rope(text, limit),
+        Draft::Persisted(text) => untitled_tab_name(text.first_line(), limit),
+    }
+}
+
+fn draft_line_count(draft: &Draft) -> u64 {
+    match draft {
+        Draft::Memory(text) => home::text_line_count(text),
+        Draft::Persisted(text) => text.line_count(),
+    }
 }
 
 struct ClosedTabEntry {
@@ -116,7 +137,7 @@ fn closed_tab_entries<'a>(
         } else {
             entry.draft.as_ref().map_or_else(
                 || "Без имени".to_owned(),
-                |draft| untitled_tab_name_rope(draft, untitled_tab_limit),
+                |draft| draft_name(draft, untitled_tab_limit),
             )
         };
         let fallback = tab
@@ -142,7 +163,7 @@ fn closed_tab_entries<'a>(
             line_count: tab
                 .line_count
                 .or_else(|| fallback.and_then(|recent| recent.line_count))
-                .or_else(|| entry.draft.as_ref().map(home::text_line_count)),
+                .or_else(|| entry.draft.as_ref().map(draft_line_count)),
             last_worked_ms: tab
                 .last_worked_ms
                 .or_else(|| fallback.and_then(|recent| recent.last_worked_ms)),
@@ -176,6 +197,7 @@ pub(crate) struct Workspace {
     #[cfg(windows)]
     window_finder: Option<window_finder::WindowFinder>,
     session: Option<session_runtime::SessionWriter>,
+    loading_session: bool,
     session_notice: Option<SharedString>,
     session_error: Option<SharedString>,
     updates: updates::Updates,
@@ -184,7 +206,7 @@ pub(crate) struct Workspace {
 impl Workspace {
     pub(crate) fn new(
         paths: Vec<PathBuf>,
-        startup: crate::session::Startup,
+        startup: Task<crate::session::Startup>,
         instance: SingleInstance,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -227,11 +249,12 @@ impl Workspace {
             #[cfg(windows)]
             window_finder: None,
             session: None,
+            loading_session: true,
             session_notice: None,
             session_error: None,
             updates: updates::Updates::default(),
         };
-        this.init_session(startup, window, cx);
+        this.start_session_restore(startup, paths, window, cx);
         this.listen_for_launches(instance, window, cx);
         let workspace = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -240,9 +263,6 @@ impl Workspace {
                 .unwrap_or(true)
         });
 
-        if !paths.is_empty() {
-            this.open_paths(paths, file_actions::OpenMode::NORMAL, window, cx);
-        }
         this.check_for_updates(window, cx);
         if this.active_document_opt().is_none() {
             this.fallback_focus.focus(window, cx);
@@ -354,6 +374,7 @@ impl Workspace {
             json_validation: json_validation::Validation::default(),
             json_validation_disabled: false,
             restored_scroll: None,
+            recovery: None,
             log: None,
             _subscriptions: [change, cursor],
         });
@@ -380,10 +401,13 @@ impl Workspace {
             let focus = if let Some(log) = log {
                 self.clear_search(cx);
                 log.read(cx).focus_handle(cx)
+            } else if self.documents[index].recovery.is_some() {
+                self.fallback_focus.clone()
             } else {
                 self.documents[index].editor.read(cx).focus_handle(cx)
             };
             window.focus(&focus, cx);
+            self.start_tab_restore(id, window, cx);
             self.refresh_all_search_highlights(cx);
             cx.notify();
         }
@@ -395,10 +419,13 @@ impl Workspace {
 
     pub(super) fn focus_active_document(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(doc) = self.active_document_opt() {
-            let focus = doc.log.as_ref().map_or_else(
-                || doc.editor.read(cx).focus_handle(cx),
-                |log| log.read(cx).focus_handle(cx),
-            );
+            let focus = if let Some(log) = &doc.log {
+                log.read(cx).focus_handle(cx)
+            } else if doc.recovery.is_some() {
+                self.fallback_focus.clone()
+            } else {
+                doc.editor.read(cx).focus_handle(cx)
+            };
             window.focus(&focus, cx);
         } else {
             self.fallback_focus.focus(window, cx);
@@ -417,7 +444,15 @@ impl Workspace {
         let limit = self.settings.untitled_tab_limit;
         for doc in &mut self.documents {
             if doc.file.is_none() {
-                doc.name = untitled_tab_name_rope(doc.editor.read(cx).text(), limit).into();
+                doc.name = doc
+                    .recovery
+                    .as_ref()
+                    .and_then(|recovery| recovery.draft.as_ref())
+                    .map_or_else(
+                        || untitled_tab_name_rope(doc.editor.read(cx).text(), limit),
+                        |draft| draft_name(draft, limit),
+                    )
+                    .into();
             }
         }
     }
@@ -450,7 +485,7 @@ impl Workspace {
     }
 
     fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_some() || self.applying_update() {
+        if self.loading_session || self.busy.is_some() || self.applying_update() {
             return;
         }
         self.home.open = false;
@@ -510,7 +545,7 @@ impl Workspace {
         {
             return;
         }
-        if !doc.dirty || (doc.file.is_none() && self.session.is_some()) {
+        if doc.recovery.is_some() || !doc.dirty || (doc.file.is_none() && self.session.is_some()) {
             self.remove_tab(id, window, cx);
             return;
         }
@@ -524,14 +559,18 @@ impl Workspace {
         };
         self.remember_activity(id, window, cx);
         let doc = self.documents.remove(index);
+        if let Some(recovery) = &doc.recovery {
+            recovery.cancel();
+        }
         self.layout.remove(id);
-        let (mut tab, draft, digest) = doc.session_snapshot_with_digest(doc.file.is_none(), cx);
+        let (mut tab, draft) =
+            doc.session_snapshot(doc.file.is_none() || doc.recovery.is_some(), cx);
         tab.line_count = doc.history_line_count(cx);
         tab.last_worked_ms = Some(crate::recent_files::now_millis());
         if self.closed.len() == MAX_CLOSED_TABS {
             self.closed.remove(0);
         }
-        self.closed.push(ClosedTab { tab, draft, digest });
+        self.closed.push(ClosedTab { tab, draft });
 
         self.clear_search(cx);
         if let Some(next) = self.layout.active() {
@@ -558,20 +597,27 @@ impl Workspace {
             return;
         };
         let tab = &self.closed[index].tab;
-        if let Some(file) = &tab.file {
+        if let Some(file) = &tab.file
+            && self.closed[index].draft.is_none()
+        {
             let mut recent = RecentFile::new(file.path.clone(), tab.format.encoding);
             recent.view_as_log = tab.log.is_some();
             let tab = tab.clone();
             self.open_closed_file(recent, tab, window, cx);
         } else {
-            let ClosedTab { tab, draft, .. } = self.closed.remove(index);
-            let id = self.restore_tab(tab, draft.map(|draft| draft.to_string()), window, cx);
+            let ClosedTab { tab, draft } = self.closed.remove(index);
+            let id = self.restore_tab(tab, draft, window, cx);
             self.select(id, window, cx);
         }
     }
 
     fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.busy.is_some() || self.log_is_writing(cx) {
+            return false;
+        }
+        if self.loading_session && self.documents.iter().any(|doc| doc.dirty) {
+            self.session_notice = Some("Завершается восстановление журнала сессии…".into());
+            cx.notify();
             return false;
         }
         if !self.home.close_recorded {

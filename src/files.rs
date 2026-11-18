@@ -147,8 +147,15 @@ pub fn open(path: &Path, windows_1251: bool) -> io::Result<OpenedFile> {
     })
 }
 
-pub fn save(mut target: FileTarget, format: TextFormat, text: &str) -> io::Result<FileTarget> {
+pub fn save(target: FileTarget, format: TextFormat, text: &str) -> io::Result<FileTarget> {
     let bytes = format.encode(text)?;
+    save_with(target, |file| file.write_all(&bytes))
+}
+
+pub(crate) fn save_with(
+    mut target: FileTarget,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<FileTarget> {
     let directory = target
         .path
         .parent()
@@ -161,7 +168,7 @@ pub fn save(mut target: FileTarget, format: TextFormat, text: &str) -> io::Resul
     };
     #[cfg(not(windows))]
     let mut pending = NamedTempFile::new_in(directory)?;
-    pending.write_all(&bytes)?;
+    write(pending.as_file_mut())?;
     pending.as_file().sync_all()?;
 
     publish(&target, pending)?;

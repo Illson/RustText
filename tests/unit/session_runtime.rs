@@ -47,7 +47,7 @@ fn queues_the_final_state_even_when_it_matches_the_last_completed_write() {
 #[test]
 fn view_only_changes_wait_for_quiet_window_and_flush_on_shutdown() {
     use super::{DraftDigest, VIEW_SAVE_QUIET};
-    use crate::session::Tab;
+    use crate::session::{Draft, Tab};
     use crate::text_format::TextFormat;
     use std::time::{Duration, Instant};
 
@@ -67,8 +67,9 @@ fn view_only_changes_wait_for_quiet_window_and_flush_on_shutdown() {
         line_count: None,
         last_worked_ms: None,
     });
-    base.drafts
-        .push(Some(gpui_kit::component::input::Rope::from("text")));
+    let text = gpui_kit::component::input::Rope::from("text");
+    let digests = vec![Some(DraftDigest::from_rope(&text))];
+    base.drafts.push(Some(Draft::Memory(text)));
 
     let mut writer = SessionWriter {
         journal: Arc::new(Mutex::new(journal)),
@@ -84,9 +85,6 @@ fn view_only_changes_wait_for_quiet_window_and_flush_on_shutdown() {
     scrolled.drafts = base.drafts.clone();
     scrolled.state.tabs[0].scroll = [0.0, -500.0];
     scrolled.state.tabs[0].selection = 2..2;
-    let digests = vec![Some(DraftDigest::from_rope(
-        scrolled.drafts[0].as_ref().unwrap(),
-    ))];
 
     // First observation of view-only change starts the quiet timer.
     assert!(

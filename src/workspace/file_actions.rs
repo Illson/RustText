@@ -7,7 +7,7 @@ use crate::{
     files::{self, FileTarget, OpenedFile},
     log_file::LogBookmark,
     recent_files::RecentFile,
-    session::Tab,
+    session::{Draft, Tab},
     text_format::TextEncoding,
 };
 
@@ -95,7 +95,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy.is_some() {
+        if self.loading_session || self.busy.is_some() {
             return;
         }
         self.busy = Some("Выбор файла…");
@@ -184,7 +184,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if paths.is_empty() || self.busy.is_some() {
+        if paths.is_empty() || self.loading_session || self.busy.is_some() {
             return;
         }
 
@@ -277,6 +277,12 @@ impl Workspace {
                     .is_some_and(|file| file.path == opened.target.path)
         }) {
             let id = doc.id;
+            if let Some(recovery) = &doc.recovery
+                && recovery.draft.is_none()
+            {
+                recovery.cancel();
+                doc.recovery = None;
+            }
             let reopen = reopen_existing_document(
                 doc.dirty,
                 doc.placeholder,
@@ -393,17 +399,25 @@ impl Workspace {
         let Some(doc) = self.active_document_opt() else {
             return;
         };
-        if doc.log.is_some() {
+        let draft_copy = doc
+            .recovery
+            .as_ref()
+            .filter(|recovery| matches!(recovery.stage, super::draft_recovery::Stage::Preview))
+            .and_then(|recovery| recovery.draft.clone());
+        if doc.log.is_some() && draft_copy.is_none() {
             return;
         }
-        if doc.placeholder {
+        if doc.placeholder && draft_copy.is_none() {
             self.error = Some("Откройте исходный файл, когда он станет доступен.".into());
             cx.notify();
             return;
         }
         let id = doc.id;
 
-        if !save_as && let Some(file) = doc.file.clone() {
+        if draft_copy.is_none()
+            && !save_as
+            && let Some(file) = doc.file.clone()
+        {
             self.write_file(id, file, window, cx);
             return;
         }
@@ -436,7 +450,13 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 match target {
-                    Ok(Some(target)) => this.write_file(id, target, window, cx),
+                    Ok(Some(target)) => {
+                        if let Some(draft) = draft_copy {
+                            this.write_draft_copy(target, draft, window, cx);
+                        } else {
+                            this.write_file(id, target, window, cx);
+                        }
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         this.error = Some(format!("Не удалось выбрать файл. {error}").into())
@@ -445,6 +465,48 @@ impl Workspace {
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+    }
+
+    fn write_draft_copy(
+        &mut self,
+        target: FileTarget,
+        draft: Draft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(doc) = self.documents.iter().find(|doc| {
+            doc.file
+                .as_ref()
+                .is_some_and(|file| file.path == target.path)
+        }) {
+            self.error = Some(
+                format!(
+                    "Файл «{}» уже открыт. Выберите другой путь для копии.",
+                    doc.name
+                )
+                .into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.busy = Some("Сохранение копии черновика…");
+        let task = cx
+            .background_spawn(async move { files::save_with(target, |file| draft.write_to(file)) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.busy = None;
+                match result {
+                    Ok(_) => this.session_notice = Some("Копия черновика сохранена.".into()),
+                    Err(error) => {
+                        this.error =
+                            Some(format!("Не удалось сохранить копию черновика. {error}").into());
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }

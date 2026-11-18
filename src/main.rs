@@ -62,11 +62,7 @@ fn main() {
         Err(error) => return launch_error(error),
     };
 
-    let startup = session::startup();
-    let restored_size = startup
-        .recovered
-        .as_ref()
-        .map(|session| session.state.window);
+    let restored_size = session::window_hint();
 
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
@@ -75,6 +71,7 @@ fn main() {
         appearance::apply(cx);
         workspace::bind_keys(cx);
         log_viewer::bind_keys(cx);
+        let startup = cx.background_executor().spawn(async { session::startup() });
 
         let min_size = size(px(760.0), px(350.0));
         let initial_size = restored_size.map_or(size(px(1080.0), px(700.0)), |restored| {

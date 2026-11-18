@@ -3,7 +3,7 @@ use std::{
     env,
     fmt::Write as _,
     fs::{self, File, OpenOptions},
-    io::{self, BufWriter, Read, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -64,14 +64,87 @@ pub struct Tab {
 
 pub struct Capture {
     pub state: State,
-    pub drafts: Vec<Option<Rope>>,
-    pub closed_drafts: Vec<Option<Rope>>,
+    pub drafts: Vec<Option<Draft>>,
+    pub closed_drafts: Vec<Option<Draft>>,
 }
 
 pub struct Recovered {
     pub state: State,
-    pub drafts: Vec<Option<String>>,
-    pub closed_drafts: Vec<Option<String>>,
+    pub drafts: Vec<Option<Draft>>,
+    pub closed_drafts: Vec<Option<Draft>>,
+}
+
+#[derive(Clone)]
+pub enum Draft {
+    Memory(Rope),
+    Persisted(PersistedDraft),
+}
+
+#[derive(Clone)]
+pub struct PersistedDraft {
+    file: std::sync::Arc<std::sync::Mutex<File>>,
+    digest: DraftDigest,
+    line_count: u64,
+    first_line: String,
+}
+
+impl Draft {
+    pub fn byte_len(&self) -> u64 {
+        match self {
+            Self::Memory(text) => text.len() as u64,
+            Self::Persisted(draft) => draft.digest.bytes,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn load_string(&self) -> io::Result<String> {
+        let mut bytes = Vec::new();
+        let capacity = usize::try_from(self.byte_len())
+            .map_err(|_| io::Error::other("Черновик не помещается в память процесса"))?;
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(io::Error::other)?;
+        self.write_to(&mut bytes)?;
+        String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    pub fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        match self {
+            Self::Memory(text) => {
+                for chunk in text.chunks() {
+                    writer.write_all(chunk.as_bytes())?;
+                }
+                Ok(())
+            }
+            Self::Persisted(draft) => draft.write_to(writer),
+        }
+    }
+
+    fn digest(&self) -> DraftDigest {
+        match self {
+            Self::Memory(text) => DraftDigest::from_rope(text),
+            Self::Persisted(draft) => draft.digest,
+        }
+    }
+}
+
+impl PersistedDraft {
+    pub fn first_line(&self) -> &str {
+        &self.first_line
+    }
+
+    pub fn line_count(&self) -> u64 {
+        self.line_count
+    }
+
+    fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("Черновик недоступен"))?;
+        file.seek(SeekFrom::Start(0))?;
+        copy_verified(&mut file, writer, self.digest).map(|_| ())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -181,6 +254,32 @@ pub struct Startup {
     pub journal: Option<Journal>,
     pub recovered: Option<Recovered>,
     pub warning: Option<String>,
+}
+
+pub fn window_hint() -> Option<WindowSize> {
+    let directory = env::var_os("LOCALAPPDATA")
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)?
+        .join("RustText")
+        .join("session");
+    window_hint_in(&directory)
+}
+
+fn window_hint_in(directory: &Path) -> Option<WindowSize> {
+    records(directory).ok()?.into_iter().find_map(|sequence| {
+        let manifest = fs::read(
+            directory
+                .join(format!("{RECORD_PREFIX}{sequence:020}"))
+                .join("manifest.json"),
+        )
+        .ok()?;
+        let manifest: Manifest = serde_json::from_slice(&manifest).ok()?;
+        (manifest.version == FORMAT_VERSION
+            && manifest.state.active < manifest.state.tabs.len().max(1)
+            && manifest.state.tabs.len() == manifest.drafts.len()
+            && manifest.state.closed.len() == manifest.closed_drafts.len())
+        .then_some(manifest.state.window)
+    })
 }
 
 pub fn startup() -> Startup {
@@ -449,7 +548,7 @@ fn write_or_link_drafts(
     pending_dir: &Path,
     final_dir: &Path,
     prefix: &str,
-    drafts: &[Option<Rope>],
+    drafts: &[Option<Draft>],
     precomputed: &[Option<DraftDigest>],
     donors: &BTreeMap<u64, Vec<DonorFile>>,
     excluded_previous: Option<u64>,
@@ -466,7 +565,7 @@ fn write_or_link_drafts(
             .get(index)
             .copied()
             .flatten()
-            .unwrap_or_else(|| DraftDigest::from_rope(text));
+            .unwrap_or_else(|| text.digest());
         let file_name = format!("{prefix}-{index}.txt");
         let pending_path = pending_dir.join(&file_name);
         let final_path = final_dir.join(&file_name);
@@ -592,11 +691,139 @@ fn verify_open_file_digest(file: &mut File, expected: &DraftDigest) -> bool {
         && actual_sha == expected.sha256
 }
 
-fn write_draft(path: &Path, text: &Rope) -> io::Result<()> {
-    let mut writer = BufWriter::with_capacity(256 * 1024, File::create(path)?);
-    for chunk in text.chunks() {
-        writer.write_all(chunk.as_bytes())?;
+fn copy_and_digest(
+    reader: &mut File,
+    writer: &mut impl Write,
+) -> io::Result<(DraftDigest, u64, String)> {
+    const BUFFER_SIZE: usize = 64 * 1024;
+    const FIRST_LINE_PREFIX_BYTES: usize = 1024;
+    let mut buffer = [0; BUFFER_SIZE];
+    let mut checksum = crc32fast::Hasher::new();
+    let mut sha = Sha256::new();
+    let mut total = 0u64;
+    let mut line_count = 1u64;
+    let mut utf8_carry = Vec::with_capacity(4);
+    let mut first_line = String::with_capacity(FIRST_LINE_PREFIX_BYTES);
+    let mut first_line_complete = false;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Черновик слишком велик"))?;
+        line_count =
+            line_count.saturating_add(chunk.iter().filter(|byte| **byte == b'\n').count() as u64);
+        checksum.update(chunk);
+        sha.update(chunk);
+        let valid_prefix = validated_utf8_prefix(&mut utf8_carry, chunk)?;
+        if !first_line_complete {
+            for character in std::str::from_utf8(&valid_prefix)
+                .expect("the prefix was validated")
+                .chars()
+            {
+                if matches!(character, '\n' | '\r') {
+                    first_line_complete = true;
+                    break;
+                }
+                if first_line.is_empty() && character.is_whitespace() {
+                    continue;
+                }
+                if first_line.len() + character.len_utf8() > FIRST_LINE_PREFIX_BYTES {
+                    first_line_complete = true;
+                    break;
+                }
+                first_line.push(character);
+            }
+        }
+        writer.write_all(chunk)?;
     }
+    if !utf8_carry.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Черновик содержит некорректный UTF-8",
+        ));
+    }
+    Ok((
+        DraftDigest {
+            bytes: total,
+            checksum: checksum.finalize(),
+            sha256: sha.finalize().into(),
+        },
+        line_count,
+        first_line,
+    ))
+}
+
+fn copy_verified(
+    reader: &mut File,
+    writer: &mut impl Write,
+    expected: DraftDigest,
+) -> io::Result<(DraftDigest, u64)> {
+    let (actual, line_count, _) = copy_and_digest(reader, writer)?;
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Повреждён снимок черновика",
+        ));
+    }
+    Ok((actual, line_count))
+}
+
+fn validated_utf8_prefix(carry: &mut Vec<u8>, chunk: &[u8]) -> io::Result<Vec<u8>> {
+    let mut combined = Vec::with_capacity(carry.len() + chunk.len());
+    combined.extend_from_slice(carry);
+    combined.extend_from_slice(chunk);
+    let valid_len = match std::str::from_utf8(&combined) {
+        Ok(_) => combined.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Черновик содержит некорректный UTF-8",
+            ));
+        }
+    };
+    carry.clear();
+    carry.extend_from_slice(&combined[valid_len..]);
+    combined.truncate(valid_len);
+    Ok(combined)
+}
+
+fn open_pinned_draft(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_SHARE_READ: u32 = 1;
+        const FILE_SHARE_DELETE: u32 = 4;
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+    }
+    options.open(path)
+}
+
+fn verify_draft(file: &mut File, expected: &DraftInfo) -> io::Result<(DraftDigest, u64, String)> {
+    file.seek(SeekFrom::Start(0))?;
+    let (digest, line_count, first_line) = copy_and_digest(file, &mut io::sink())?;
+    let sha_matches = expected
+        .sha256
+        .as_deref()
+        .is_none_or(|sha| parse_sha256_hex(sha).is_some_and(|expected| expected == digest.sha256));
+    if digest.bytes != expected.bytes || digest.checksum != expected.checksum || !sha_matches {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Повреждён снимок черновика",
+        ));
+    }
+    Ok((digest, line_count, first_line))
+}
+
+fn write_draft(path: &Path, text: &Draft) -> io::Result<()> {
+    let mut writer = BufWriter::with_capacity(256 * 1024, File::create(path)?);
+    text.write_to(&mut writer)?;
     writer.flush()?;
     let file = writer.into_inner().map_err(io::Error::from)?;
     file.sync_all()?;
@@ -692,7 +919,7 @@ fn read_drafts(
     drafts: Vec<Option<DraftInfo>>,
     skip: usize,
     donors: &mut Vec<DonorFile>,
-) -> io::Result<Vec<Option<String>>> {
+) -> io::Result<Vec<Option<Draft>>> {
     drafts
         .into_iter()
         .zip(tabs)
@@ -714,29 +941,17 @@ fn read_drafts(
         .collect()
 }
 
-fn read_draft(path: &Path, info: DraftInfo) -> io::Result<(String, DonorFile)> {
-    let text = fs::read(path)?;
-    let actual_checksum = crc32fast::hash(&text);
-    let actual_sha: [u8; 32] = Sha256::digest(&text).into();
-    let sha_matches = match info.sha256.as_deref() {
-        Some(expected) => parse_sha256_hex(expected).is_some_and(|bytes| bytes == actual_sha),
-        None => true,
-    };
-    if text.len() as u64 != info.bytes || actual_checksum != info.checksum || !sha_matches {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Повреждён снимок черновика",
-        ));
-    }
-    let digest = DraftDigest {
-        bytes: info.bytes,
-        checksum: actual_checksum,
-        sha256: actual_sha,
-    };
-    let text = String::from_utf8(text)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+fn read_draft(path: &Path, info: DraftInfo) -> io::Result<(Draft, DonorFile)> {
+    let mut file = open_pinned_draft(path)?;
+    let (digest, line_count, first_line) = verify_draft(&mut file, &info)?;
+    let draft = Draft::Persisted(PersistedDraft {
+        file: std::sync::Arc::new(std::sync::Mutex::new(file)),
+        digest,
+        line_count,
+        first_line,
+    });
     Ok((
-        text,
+        draft,
         DonorFile {
             path: path.to_path_buf(),
             digest,

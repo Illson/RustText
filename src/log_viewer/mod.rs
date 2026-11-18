@@ -14,6 +14,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
+use tempfile::NamedTempFile;
 
 use gpui_kit::{
     component::input::{EditorState, InputEvent, InputState},
@@ -66,6 +67,8 @@ impl Progress {
 
 pub(crate) struct LogViewer {
     path: PathBuf,
+    snapshot: Option<Arc<NamedTempFile>>,
+    immutable_snapshot: bool,
     encoding_override: Option<TextEncoding>,
     encoding: TextEncoding,
     bookmark: LogBookmark,
@@ -110,6 +113,35 @@ impl LogViewer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_inner(path, windows_1251, bookmark, None, window, cx)
+    }
+
+    pub(crate) fn new_draft(
+        file: Arc<NamedTempFile>,
+        mut bookmark: LogBookmark,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        bookmark.auto_refresh = false;
+        bookmark.follow_end = false;
+        Self::new_inner(
+            file.path().to_path_buf(),
+            false,
+            bookmark,
+            Some(file),
+            window,
+            cx,
+        )
+    }
+
+    fn new_inner(
+        path: PathBuf,
+        windows_1251: bool,
+        bookmark: LogBookmark,
+        snapshot: Option<Arc<NamedTempFile>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let encoding_override = windows_1251.then_some(TextEncoding::Windows1251);
         let log_viewer = cx.entity().downgrade();
         let scroll_bottom = Rc::new(Cell::new(px(0.)));
@@ -150,6 +182,8 @@ impl LogViewer {
             });
         let mut this = Self {
             path,
+            immutable_snapshot: snapshot.is_some(),
+            snapshot,
             encoding_override,
             encoding: encoding_override.unwrap_or_default(),
             bookmark,
@@ -186,8 +220,14 @@ impl LogViewer {
             _submit_percentage: submit_percentage,
         };
         this.load_page(Destination::Restore, window, cx);
-        this.start_monitor(window, cx);
+        if !this.immutable_snapshot {
+            this.start_monitor(window, cx);
+        }
         this
+    }
+
+    pub(super) fn retain_snapshot(&self) -> Option<Arc<NamedTempFile>> {
+        self.snapshot.clone()
     }
 
     pub(crate) fn bookmark(&self) -> LogBookmark {

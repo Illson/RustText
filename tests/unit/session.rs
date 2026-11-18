@@ -28,9 +28,17 @@ fn capture(text: &str) -> Capture {
             wrap: true,
             font_size: 16.,
         },
-        drafts: vec![Some(Rope::from(text))],
+        drafts: vec![Some(Draft::Memory(Rope::from(text)))],
         closed_drafts: Vec::new(),
     }
+}
+
+fn draft_text(draft: &Option<Draft>) -> Option<String> {
+    draft.as_ref().map(|draft| draft.load_string().unwrap())
+}
+
+fn draft_texts(drafts: &[Option<Draft>]) -> Vec<Option<String>> {
+    drafts.iter().map(draft_text).collect()
 }
 
 #[test]
@@ -47,7 +55,10 @@ fn roundtrips_an_empty_workspace_and_closed_draft() {
     let recovered = recovered.unwrap();
     assert!(recovered.state.tabs.is_empty());
     assert!(recovered.drafts.is_empty());
-    assert_eq!(recovered.closed_drafts, [Some("closed draft".into())]);
+    assert_eq!(
+        draft_texts(&recovered.closed_drafts),
+        [Some("closed draft".into())]
+    );
     assert_eq!(recovered.state.layout.unwrap().active(), None);
 }
 
@@ -111,7 +122,7 @@ fn restores_previous_commit_if_the_latest_draft_or_manifest_is_corrupt() {
         let (recovered, warning) = journal.restore();
         let recovered = recovered.unwrap();
         assert!(warning.is_some());
-        assert_eq!(recovered.drafts, [Some("ёж".into())]);
+        assert_eq!(draft_texts(&recovered.drafts), [Some("ёж".into())]);
         assert_eq!(recovered.state.tabs[0].selection, 0..2);
         assert!(recovered.state.tabs[0].reversed);
         assert_eq!(recovered.state.tabs[0].scroll, [0., -154.]);
@@ -127,7 +138,10 @@ fn a_delayed_periodic_commit_cannot_overwrite_a_newer_shutdown_commit() {
     journal.commit(1, capture("устарело")).unwrap();
     let (recovered, warning) = journal.restore();
     assert!(warning.is_none());
-    assert_eq!(recovered.unwrap().drafts, [Some("при закрытии".into())]);
+    assert_eq!(
+        draft_texts(&recovered.unwrap().drafts),
+        [Some("при закрытии".into())]
+    );
 }
 
 #[test]
@@ -148,7 +162,71 @@ fn retains_two_latest_commits_and_refuses_concurrent_writers() {
     let mut reopened = Journal::open(directory).unwrap();
     let (state, warning) = reopened.restore();
     assert!(warning.is_none());
-    assert_eq!(state.unwrap().drafts, [Some("third".into())]);
+    assert_eq!(draft_texts(&state.unwrap().drafts), [Some("third".into())]);
+}
+
+#[test]
+fn verified_draft_stays_retryable_after_its_checkpoint_is_pruned() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().to_path_buf();
+    let mut journal = Journal::open(directory.clone()).unwrap();
+    journal
+        .commit(1, capture("first line\nsecond line\n"))
+        .unwrap();
+    let (recovered, warning) = journal.restore();
+    assert!(warning.is_none());
+    let draft = recovered.unwrap().drafts[0].clone().unwrap();
+
+    struct CancelAfter(usize);
+    impl Write for CancelAfter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if self.0 == 0 {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "cancelled"));
+            }
+            let count = self.0.min(buffer.len());
+            self.0 -= count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    assert!(draft.write_to(&mut CancelAfter(4)).is_err());
+    let checkpoint_without_drafts = || {
+        let mut snapshot = capture("");
+        snapshot.state.tabs[0].draft_revision = None;
+        snapshot.drafts[0] = None;
+        snapshot
+    };
+    journal.commit(2, checkpoint_without_drafts()).unwrap();
+    journal.commit(3, checkpoint_without_drafts()).unwrap();
+    assert_eq!(records(&directory).unwrap(), vec![3, 2]);
+    assert_eq!(draft.load_string().unwrap(), "first line\nsecond line\n");
+    let Draft::Persisted(source) = &draft else {
+        panic!("restored drafts must remain disk-backed");
+    };
+    assert_eq!(source.first_line(), "first line");
+    assert_eq!(source.line_count(), 3);
+}
+
+#[test]
+fn window_hint_uses_the_newest_valid_manifest_without_reading_drafts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
+    let mut first = capture("first");
+    first.state.window.width = 900.;
+    journal.commit(1, first).unwrap();
+    let mut second = capture("second");
+    second.state.window.width = 1100.;
+    journal.commit(2, second).unwrap();
+    fs::write(journal.record_path(2).join("draft-0.txt"), "corrupt").unwrap();
+
+    assert_eq!(window_hint_in(temporary.path()).unwrap().width, 1100.);
+
+    fs::write(journal.record_path(2).join("manifest.json"), "corrupt").unwrap();
+    assert_eq!(window_hint_in(temporary.path()).unwrap().width, 900.);
 }
 
 #[test]
@@ -160,7 +238,7 @@ fn restores_previous_checkpoint_after_corrupting_an_unchanged_draft() {
         snapshot.state.closed.push(closed_tab);
         snapshot
             .closed_drafts
-            .push(Some(Rope::from("closed draft")));
+            .push(Some(Draft::Memory(Rope::from("closed draft"))));
         snapshot.state.tabs[0].selection = cursor..cursor;
         snapshot
     };
@@ -182,8 +260,11 @@ fn restores_previous_checkpoint_after_corrupting_an_unchanged_draft() {
         let recovered = recovered.expect("the earlier checkpoint must survive in-place corruption");
         assert!(warning.is_some());
         assert_eq!(recovered.state.tabs[0].selection, 1..1);
-        assert_eq!(recovered.drafts, [Some("open draft".into())]);
-        assert_eq!(recovered.closed_drafts, [Some("closed draft".into())]);
+        assert_eq!(draft_texts(&recovered.drafts), [Some("open draft".into())]);
+        assert_eq!(
+            draft_texts(&recovered.closed_drafts),
+            [Some("closed draft".into())]
+        );
     }
 }
 
@@ -202,7 +283,10 @@ fn corrupted_previous_draft_is_rewritten_from_the_current_capture() {
 
     let (recovered, warning) = journal.restore();
     assert!(warning.is_none());
-    assert_eq!(recovered.unwrap().drafts, [Some("recoverable text".into())]);
+    assert_eq!(
+        draft_texts(&recovered.unwrap().drafts),
+        [Some("recoverable text".into())]
+    );
 }
 
 #[test]
@@ -218,7 +302,10 @@ fn restores_checkpoint_with_legacy_draft_timestamp() {
 
     let (recovered, warning) = journal.restore();
     assert!(warning.is_none());
-    assert_eq!(recovered.unwrap().drafts, [Some("previous format".into())]);
+    assert_eq!(
+        draft_texts(&recovered.unwrap().drafts),
+        [Some("previous format".into())]
+    );
 }
 
 #[test]
@@ -234,7 +321,10 @@ fn named_drafts_do_not_change_the_underlying_file() {
     let (recovered, warning) = journal.restore();
     assert!(warning.is_none());
     let recovered = recovered.unwrap();
-    assert_eq!(recovered.drafts[0].as_deref(), Some("unsaved text"));
+    assert_eq!(
+        draft_text(&recovered.drafts[0]).as_deref(),
+        Some("unsaved text")
+    );
     assert_eq!(
         recovered.state.tabs[0].file.as_ref().unwrap().path,
         document.canonicalize().unwrap()
@@ -285,7 +375,7 @@ fn a_log_bookmark_round_trips_without_storing_file_contents() {
     let (restored, warning) = journal.restore();
     assert!(warning.is_none());
     let restored = restored.unwrap();
-    assert_eq!(restored.drafts, [None]);
+    assert_eq!(draft_texts(&restored.drafts), [None]);
     assert_eq!(restored.state.tabs[0].log.as_ref(), Some(&bookmark));
 }
 
@@ -308,7 +398,7 @@ fn closed_scratch_tabs_keep_unicode_text_across_restart() {
     });
     state
         .closed_drafts
-        .push(Some(Rope::from("Заметки 🦀 café")));
+        .push(Some(Draft::Memory(Rope::from("Заметки 🦀 café"))));
     let mut journal = Journal::open(temporary.path().to_path_buf()).unwrap();
 
     journal.commit(1, state).unwrap();
@@ -319,7 +409,7 @@ fn closed_scratch_tabs_keep_unicode_text_across_restart() {
     assert!(warning.is_none());
     let recovered = recovered.unwrap();
     assert_eq!(
-        recovered.closed_drafts,
+        draft_texts(&recovered.closed_drafts),
         [Some("Заметки 🦀 café".to_owned())]
     );
     assert_eq!(recovered.state.closed[0].id, 2);
@@ -394,7 +484,10 @@ fn restores_records_written_before_closed_tab_history_was_added() {
     let recovered = recovered.unwrap();
     assert!(recovered.state.closed.is_empty());
     assert!(recovered.closed_drafts.is_empty());
-    assert_eq!(recovered.drafts, [Some("старый формат".into())]);
+    assert_eq!(
+        draft_texts(&recovered.drafts),
+        [Some("старый формат".into())]
+    );
 }
 
 #[test]
@@ -445,7 +538,7 @@ fn reuses_unchanged_draft_from_non_adjacent_checkpoint_via_hard_link() {
         closed_tab.id = 2;
         s.state.closed.push(closed_tab);
         s.closed_drafts
-            .push(Some(Rope::from("unchanged closed draft")));
+            .push(Some(Draft::Memory(Rope::from("unchanged closed draft"))));
         s.state.tabs[0].selection = cursor..cursor;
         s
     };
@@ -494,7 +587,10 @@ fn restores_previous_checkpoint_after_corrupting_hardlinked_draft() {
     assert!(warning.is_some());
     let recovered = recovered.unwrap();
     assert_eq!(recovered.state.tabs[0].selection, 2..2);
-    assert_eq!(recovered.drafts, [Some("open draft text".into())]);
+    assert_eq!(
+        draft_texts(&recovered.drafts),
+        [Some("open draft text".into())]
+    );
 }
 
 #[test]
@@ -520,7 +616,10 @@ fn corrupted_donor_before_commit_falls_back_to_fresh_write() {
     let mut reopened = Journal::open(directory).unwrap();
     let (recovered, warning) = reopened.restore();
     assert!(warning.is_none());
-    assert_eq!(recovered.unwrap().drafts, [Some("fresh draft text".into())]);
+    assert_eq!(
+        draft_texts(&recovered.unwrap().drafts),
+        [Some("fresh draft text".into())]
+    );
 }
 
 #[test]
@@ -550,7 +649,9 @@ fn reuses_draft_when_moving_between_open_and_closed_tabs_and_cleans_pending_dirs
         line_count: None,
         last_worked_ms: None,
     });
-    closed.closed_drafts.push(Some(Rope::from("moved text")));
+    closed
+        .closed_drafts
+        .push(Some(Draft::Memory(Rope::from("moved text"))));
     journal.commit(3, closed).unwrap();
 
     let closed_id_3 = file_identity(&journal.record_path(3).join("closed-draft-0.txt"));
@@ -585,7 +686,10 @@ fn reopened_journal_verifies_older_untrusted_donor_before_linking() {
 
     let (recovered, warning) = reopened.restore();
     assert!(warning.is_none());
-    assert_eq!(recovered.unwrap().drafts, [Some("trusted text".into())]);
+    assert_eq!(
+        draft_texts(&recovered.unwrap().drafts),
+        [Some("trusted text".into())]
+    );
 }
 
 #[test]
@@ -640,7 +744,10 @@ fn rollback_excludes_donors_sharing_file_id_with_restored_previous() {
     assert!(warning.is_some());
     let fallback = fallback.unwrap();
     assert_eq!(fallback.state.tabs[0].selection, 3..3);
-    assert_eq!(fallback.drafts, [Some("shared fallback draft".into())]);
+    assert_eq!(
+        draft_texts(&fallback.drafts),
+        [Some("shared fallback draft".into())]
+    );
 }
 
 #[test]

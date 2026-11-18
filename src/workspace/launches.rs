@@ -17,7 +17,7 @@ impl Workspace {
             loop {
                 executor.timer(Duration::from_millis(100)).await;
                 let Ok(keep_listening) = this.update_in(cx, |this, window, cx| {
-                    if this.busy.is_some() {
+                    if this.loading_session || this.busy.is_some() {
                         return true;
                     }
                     match instance.try_receive() {

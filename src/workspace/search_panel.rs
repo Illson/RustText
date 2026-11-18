@@ -452,6 +452,9 @@ impl Workspace {
             log.update(cx, |viewer, cx| viewer.open_search(window, cx));
             return;
         }
+        if self.active_document().recovery.is_some() {
+            return;
+        }
         if self.search.is_none() {
             self.search = Some(SearchPanel::new(window, cx));
         }
@@ -772,9 +775,9 @@ fn search_documents(
     all_tabs: bool,
     tab: u64,
 ) -> impl Iterator<Item = &Document> {
-    documents
-        .iter()
-        .filter(move |doc| doc.log.is_none() && (all_tabs || doc.id == tab))
+    documents.iter().filter(move |doc| {
+        doc.log.is_none() && doc.recovery.is_none() && (all_tabs || doc.id == tab)
+    })
 }
 
 fn command_button(
