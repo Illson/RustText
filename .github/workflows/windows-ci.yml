@@ -46,7 +46,7 @@ jobs:
         run: cargo test --locked -p gpui-pre-windows --lib direct_write::tests::build_14393_font_path_does_not_need_factory5 -- --exact
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warning
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build portable Windows executable
         env:
