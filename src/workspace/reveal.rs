@@ -26,7 +26,7 @@ pub(crate) fn select_in_explorer(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(any(windows, test))]
-fn normalize_shell_path(path: &Path) -> io::Result<String> {
+pub(super) fn normalize_shell_path(path: &Path) -> io::Result<String> {
     let path = path.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
