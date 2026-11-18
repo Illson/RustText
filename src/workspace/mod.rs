@@ -1,4 +1,6 @@
 mod associations;
+#[cfg(windows)]
+mod desktop_icon;
 mod disk_status;
 mod file_actions;
 mod home;
