@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::workspace::json_validation::{self, Status};
+use crate::workspace::json_validation::{self, Status, Validation};
 
 #[test]
 fn accepts_valid_json_numbers_used_by_the_formatter() {
@@ -90,11 +90,56 @@ fn ignores_plain_text_xml_and_empty_content() {
 }
 
 #[test]
+fn unchanged_revision_keeps_pending_work_and_completed_results() {
+    for result in [
+        Status::Valid,
+        json_validation::validate("{broken"),
+        Status::TooLarge,
+    ] {
+        let mut validation = Validation::default();
+        assert!(validation.set_active_revision(Some(1)));
+        let generation = validation.generation;
+        assert!(!validation.set_active_revision(Some(1)));
+        assert!(validation.complete(1, generation, result.clone()));
+        assert!(!validation.set_active_revision(Some(1)));
+        assert_eq!(validation.status(), Some(&result));
+    }
+}
+
+#[test]
+fn reenabling_validation_restores_the_result_until_text_changes() {
+    let mut validation = Validation::default();
+    let error = json_validation::validate("{broken");
+    assert!(validation.set_active_revision(Some(1)));
+    assert!(validation.complete(1, validation.generation, error.clone()));
+
+    assert!(validation.set_active_revision(None));
+    assert_eq!(validation.status(), None);
+    assert!(validation.set_active_revision(Some(1)));
+    assert_eq!(validation.status(), Some(&error));
+
+    assert!(validation.set_active_revision(None));
+    assert!(validation.set_active_revision(Some(2)));
+    assert_eq!(validation.status(), None);
+    assert!(validation.complete(2, validation.generation, Status::Valid));
+    assert_eq!(validation.status(), Some(&Status::Valid));
+}
+
+#[test]
 fn dismissed_and_superseded_validation_tasks_cannot_apply() {
-    assert!(json_validation::validation_is_current(false, 7, 7));
-    assert!(!json_validation::validation_is_current(true, 7, 7));
-    assert!(!json_validation::validation_is_current(false, 8, 7));
-    assert!(!json_validation::validation_is_current(true, 8, 7));
+    let mut validation = Validation::default();
+    assert!(validation.set_active_revision(Some(1)));
+    let original_generation = validation.generation;
+
+    assert!(validation.set_active_revision(None));
+    assert!(!validation.complete(1, original_generation, Status::Valid));
+    assert!(validation.set_active_revision(Some(1)));
+    assert!(!validation.complete(1, original_generation, Status::Valid));
+
+    let generation = validation.generation;
+    assert!(validation.set_active_revision(Some(2)));
+    assert!(!validation.complete(1, generation, Status::Valid));
+    assert_eq!(validation.status(), None);
 }
 
 #[test]

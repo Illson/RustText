@@ -327,11 +327,9 @@ impl Workspace {
         let id = self.insert_document(file, text, format, window, cx);
         let doc = self.documents.last_mut().expect("restored tab exists");
         doc.json_validation_disabled = json_validation_disabled;
-        doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
         doc.disk_status = status;
         doc.placeholder = placeholder;
         if placeholder {
-            doc.json_status = None;
             doc.revision = doc.revision.wrapping_add(1);
         }
         if dirty {
