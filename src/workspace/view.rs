@@ -726,7 +726,7 @@ impl Workspace {
     fn jump_to_json_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(super::json_validation::Status::Invalid(problem)) = self
             .active_document_opt()
-            .and_then(|doc| doc.json_status.as_ref())
+            .and_then(|doc| doc.json_validation.status())
         else {
             return;
         };
@@ -742,8 +742,8 @@ impl Workspace {
             .documents
             .iter()
             .find(|doc| doc.id == self.active)?
-            .json_status
-            .clone()?;
+            .json_validation
+            .status()?;
         let (message, invalid) = match status {
             super::json_validation::Status::Invalid(problem) => (
                 format!(
@@ -756,9 +756,7 @@ impl Workspace {
                 "Проверка JSON не выполнена. Размер превышает 64 МиБ.".to_owned(),
                 false,
             ),
-            super::json_validation::Status::Checking | super::json_validation::Status::Valid => {
-                return None;
-            }
+            super::json_validation::Status::Valid => return None,
         };
         Some(
             div()

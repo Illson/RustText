@@ -42,5 +42,16 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Test DirectWrite without Factory5
+        run: cargo test --locked -p gpui-pre-windows --lib direct_write::tests::build_14393_font_path_does_not_need_factory5 -- --exact
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build portable Windows executable
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Check portable Windows executable imports
+        run: ./tools/Check-ReleaseImports.ps1 -ExecutablePath target/x86_64-pc-windows-msvc/release/rusttext.exe
