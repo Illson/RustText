@@ -297,7 +297,6 @@ impl Workspace {
             }
             if let Some(tab) = reopen.restore {
                 doc.json_validation_disabled = tab.json_validation_disabled;
-                doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
                 doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             }
             let mut recent = RecentFile::new(opened.target.path, doc.format.encoding);
@@ -320,7 +319,6 @@ impl Workspace {
             let doc = self.documents.last_mut().expect("opened document exists");
             let id = doc.id;
             doc.json_validation_disabled = tab.json_validation_disabled;
-            doc.json_validation_generation = doc.json_validation_generation.wrapping_add(1);
             doc.restore_view(tab.selection.clone(), tab.reversed, tab.scroll, cx);
             self.schedule_json_validation(id, cx);
         }
