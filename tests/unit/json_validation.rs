@@ -96,3 +96,18 @@ fn dismissed_and_superseded_validation_tasks_cannot_apply() {
     assert!(!json_validation::validation_is_current(false, 8, 7));
     assert!(!json_validation::validation_is_current(true, 8, 7));
 }
+
+#[test]
+fn oversized_json_rope_reports_too_large() {
+    let oversized = gpui_kit::component::input::Rope::from(
+        format!(
+            "[{}]",
+            "1,".repeat(crate::json_format::MAX_JSON_BYTES / 2 + 1)
+        )
+        .as_str(),
+    );
+    assert_eq!(
+        json_validation::validate_rope(&oversized),
+        json_validation::Status::TooLarge
+    );
+}

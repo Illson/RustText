@@ -70,6 +70,7 @@ pub(crate) fn parse_untitled_tab_limit(raw: &str) -> Result<usize, &'static str>
     Ok(value)
 }
 
+#[cfg(test)]
 pub(crate) fn untitled_tab_name(first_line: &str, limit: usize) -> String {
     let limit = clamp_untitled_tab_limit(limit);
     let line = first_line.split(['\r', '\n']).next().unwrap_or("");
@@ -85,8 +86,41 @@ pub(crate) fn untitled_tab_name_rope(text: &Rope, limit: usize) -> String {
     if text.len() == 0 {
         return DEFAULT_UNTITLED_NAME.to_owned();
     }
-    let line = text.slice_line(0).to_string();
-    untitled_tab_name(&line, limit)
+    let limit = clamp_untitled_tab_limit(limit);
+    let mut chars = text
+        .slice_line(0)
+        .chars()
+        .take_while(|&character| character != '\r' && character != '\n');
+    let mut out = String::new();
+    let mut count = 0usize;
+    let mut started = false;
+    for character in chars.by_ref() {
+        if !started && character.is_whitespace() {
+            continue;
+        }
+        started = true;
+        out.push(character);
+        count += 1;
+        if count == limit {
+            break;
+        }
+    }
+    if out.is_empty() {
+        return DEFAULT_UNTITLED_NAME.to_owned();
+    }
+    if count == limit
+        && out.chars().last().is_some_and(char::is_whitespace)
+        && chars.any(|character| !character.is_whitespace())
+    {
+        return out;
+    }
+    let trimmed_len = out.trim_end().len();
+    if trimmed_len == 0 {
+        DEFAULT_UNTITLED_NAME.to_owned()
+    } else {
+        out.truncate(trimmed_len);
+        out
+    }
 }
 
 fn settings_path() -> Option<PathBuf> {
