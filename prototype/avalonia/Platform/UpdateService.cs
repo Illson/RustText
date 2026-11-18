@@ -100,8 +100,20 @@ public static class UpdateService
         string currentExecutable,
         CancellationToken cancellationToken = default)
     {
+        using var client = CreateClient(TimeSpan.FromMinutes(2));
+        return await StageAsync(release, currentExecutable, client, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Uses a caller-owned HTTP client; internal so release verification can use an offline fixture handler.</summary>
+    internal static async Task<StagedUpdate> StageAsync(
+        UpdateRelease release,
+        string currentExecutable,
+        HttpClient client,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentNullException.ThrowIfNull(release);
         ArgumentException.ThrowIfNullOrWhiteSpace(currentExecutable);
+        ArgumentNullException.ThrowIfNull(client);
         ValidateRelease(release);
 
         var executablePath = Path.GetFullPath(currentExecutable);
@@ -122,7 +134,6 @@ public static class UpdateService
         try
         {
             var archivePath = Path.Combine(stagingDirectory, "download.zip");
-            using var client = CreateClient(TimeSpan.FromMinutes(2));
             var downloadedSize = await DownloadToFileAsync(client, release.ArchiveUri, archivePath,
                 MaximumArchiveBytes, cancellationToken).ConfigureAwait(false);
             if (downloadedSize != release.ArchiveSize)

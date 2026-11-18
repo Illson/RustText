@@ -493,7 +493,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static bool IsUserError(Exception error) => error is IOException or UnauthorizedAccessException
+    private static bool IsUserError(Exception error) => error is IOException or InvalidDataException or UnauthorizedAccessException
         or FormatException or ArgumentException or InvalidOperationException or OverflowException or TimeoutException
         or System.Text.Json.JsonException or System.Text.RegularExpressions.RegexMatchTimeoutException
         or System.ComponentModel.Win32Exception or HttpRequestException;

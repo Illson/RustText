@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using RustText.Demo.Logs;
 
 namespace RustText.Demo;
@@ -339,26 +340,7 @@ public partial class MainWindow
                 AttachEditor(tab, "");
             }
 
-            if (tab.Editor is { } editor)
-            {
-                var size = editor.Document.TextLength;
-                var start = Math.Clamp(saved.SelectionStart, 0, size);
-                var length = Math.Clamp(saved.SelectionLength, 0, size - start);
-                if (saved.SelectionUsesUtf8)
-                {
-                    var text = editor.Text;
-                    start = Utf8IndexToUtf16(text, saved.SelectionStart);
-                    var end = Utf8IndexToUtf16(text, (long)saved.SelectionStart + saved.SelectionLength);
-                    length = Math.Max(0, end - start);
-                }
-                editor.Select(start, length);
-                editor.CaretOffset = saved.Reversed ? start : start + length;
-                Dispatcher.UIThread.Post(() =>
-                {
-                    editor.ScrollToHorizontalOffset(saved.ScrollX);
-                    editor.ScrollToVerticalOffset(saved.ScrollY);
-                }, DispatcherPriority.Loaded);
-            }
+            RestoreEditorView(tab, saved);
 
             tab.Deferred = null;
             UpdateTab(tab);
@@ -377,6 +359,35 @@ public partial class MainWindow
             tab.Loading = false;
             tab.LoadCancellation = null;
         }
+    }
+
+    private static void RestoreEditorView(WorkTab tab, SessionTab saved)
+    {
+        if (tab.Editor is not { } editor)
+        {
+            return;
+        }
+
+        var size = editor.Document.TextLength;
+        var start = Math.Clamp(saved.SelectionStart, 0, size);
+        var length = Math.Clamp(saved.SelectionLength, 0, size - start);
+        if (saved.SelectionUsesUtf8)
+        {
+            var text = editor.Text;
+            start = Utf8IndexToUtf16(text, saved.SelectionStart);
+            var end = Utf8IndexToUtf16(text, (long)saved.SelectionStart + saved.SelectionLength);
+            length = Math.Max(0, end - start);
+        }
+
+        editor.Select(start, length);
+        editor.CaretOffset = saved.Reversed ? start : start + length;
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (editor.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault() is { } scroll)
+            {
+                scroll.SetCurrentValue(ScrollViewer.OffsetProperty, new Vector(saved.ScrollX, saved.ScrollY));
+            }
+        }, DispatcherPriority.Loaded);
     }
 
     private const long LineGeneratorThreshold = 8L * 1024 * 1024;
@@ -437,7 +448,7 @@ public partial class MainWindow
     private async Task RememberClosedAsync(WorkTab tab)
     {
         var saved = CaptureTab(tab);
-        if (tab.Editor is { } editor && (tab.Dirty || tab.Path is null))
+        if (tab.Editor is { } editor && tab.Path is null)
         {
             saved = await _storage.SaveClosedDraftAsync(saved, editor.Text, _lifetime.Token);
         }
@@ -456,9 +467,49 @@ public partial class MainWindow
 
     private async Task RestoreClosedAsync(SessionTab saved)
     {
-        if (_tabs.TryGetValue(saved.Id, out var existing))
+        if (saved is { Path: { } path, DraftRef: null })
         {
-            Select(existing);
+            var isLog = saved.Log is not null || saved.LogOffset is not null;
+            var existing = _tabs.Values.FirstOrDefault(tab =>
+                tab.IsLog == isLog && tab.Recovery is null && SamePath(tab.Path, path));
+            if (existing is not null)
+            {
+                if (existing.Loading)
+                {
+                    Select(existing);
+                    return;
+                }
+
+                if (!existing.Dirty && existing.Deferred?.DraftRef is null)
+                {
+                    if (existing.Deferred is not null)
+                    {
+                        SetDeferred(existing, saved with { Id = existing.Id });
+                        await ActivateDeferredAsync(existing);
+                    }
+                    else if (isLog)
+                    {
+                        AttachLog(existing, path, saved.Encoding,
+                            saved.Log ?? new LogTabState(saved.Encoding, saved.LogOffset ?? 0, WordWrap: _wordWrap));
+                    }
+                    else
+                    {
+                        await RestoreClosedEditorAsync(existing, path, saved);
+                    }
+                }
+
+                if (_tabs.ContainsKey(existing.Id))
+                {
+                    Select(existing);
+                    RemoveClosedEntry(saved);
+                }
+                return;
+            }
+        }
+
+        if (_tabs.TryGetValue(saved.Id, out var sameTab))
+        {
+            Select(sameTab);
             return;
         }
 
@@ -467,14 +518,38 @@ public partial class MainWindow
         try
         {
             await ActivateDeferredAsync(tab);
-            _closedTabs.RemoveAll(item => item.Id == saved.Id);
-            RefreshHistoryMenus();
+            RemoveClosedEntry(saved);
         }
         catch
         {
             RemoveTab(tab);
             throw;
         }
+    }
+
+    private async Task RestoreClosedEditorAsync(WorkTab tab, string path, SessionTab saved)
+    {
+        if (tab.Encoding != saved.Encoding)
+        {
+            var revision = tab.Revision;
+            var loaded = await DocumentFiles.ReadAsync(path, saved.Encoding, _lifetime.Token);
+            if (tab.Dirty || tab.Revision != revision || !_tabs.ContainsKey(tab.Id))
+            {
+                return;
+            }
+
+            AttachLoadedEditor(tab, loaded);
+        }
+
+        tab.JsonDisabled = saved.JsonValidationDisabled;
+        RestoreEditorView(tab, saved);
+        ScheduleJsonValidation(tab);
+    }
+
+    private void RemoveClosedEntry(SessionTab saved)
+    {
+        _closedTabs.RemoveAll(item => item.Id == saved.Id);
+        RefreshHistoryMenus();
     }
 
     private async Task RecordRecentAsync(WorkTab tab)

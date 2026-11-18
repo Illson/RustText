@@ -10,6 +10,9 @@ internal sealed class LogDataReader
     private const int MidpointScanBytes = 64 * 1024;
     private const int MaximumPageBytes = 1024 * 1024;
     private const int MaximumFrameBytes = 64 * 1024;
+    private const int DefaultPageSize = 80;
+    private const int DefaultFrameBytes = 16 * 1024;
+    private const int DefaultPageBytes = 128 * 1024;
 
     private readonly FileStream _file;
     private readonly Encoding _decoder;
@@ -56,9 +59,9 @@ internal sealed class LogDataReader
 
     public LogPage ReadPage(
         long offset,
-        int pageSize = 80,
-        int maxFrameBytes = 16 * 1024,
-        int maxPageBytes = 128 * 1024,
+        int pageSize = DefaultPageSize,
+        int maxFrameBytes = DefaultFrameBytes,
+        int maxPageBytes = DefaultPageBytes,
         CancellationToken cancellationToken = default)
     {
         if (pageSize is < 1 or > 100)
@@ -73,19 +76,19 @@ internal sealed class LogDataReader
         cancellationToken.ThrowIfCancellationRequested();
         var observedLength = _file.Length;
         var requestedOffset = Math.Clamp(offset, 0, observedLength);
-        var alignedOffset = AlignOffset(requestedOffset, observedLength);
-        var readLength = (int)Math.Min((long)maxPageBytes + LookaheadBytes, observedLength - requestedOffset);
-        var bytes = ReadWindow(_file.SafeFileHandle, requestedOffset, readLength, cancellationToken);
-        var position = Math.Min(checked((int)(alignedOffset - requestedOffset)), bytes.Length);
-        if (requestedOffset == 0)
-        {
-            position = (int)Math.Min(_bomLength, bytes.Length);
-        }
+        var alignedOffset = requestedOffset < observedLength
+            ? AlignOffset(requestedOffset, observedLength)
+            : requestedOffset;
+        var readOffset = Math.Min(requestedOffset, alignedOffset);
+        var readLength = (int)Math.Min((long)maxPageBytes + LookaheadBytes, observedLength - readOffset);
+        var bytes = ReadWindow(_file.SafeFileHandle, readOffset, readLength, cancellationToken);
+        var firstPosition = (int)Math.Min(Math.Max(_bomLength, alignedOffset) - readOffset, bytes.Length);
+        var position = firstPosition;
 
         var pageEnd = Math.Min(bytes.Length, maxPageBytes);
         var rows = new List<LogRow>(Math.Min(pageSize, maxPageBytes / maxFrameBytes));
-        var inputStartsWithinLine = requestedOffset > _bomLength
-            && !IsNewlineBefore(_file.SafeFileHandle, requestedOffset);
+        var inputStartsWithinLine = alignedOffset > _bomLength
+            && !IsNewlineBefore(_file.SafeFileHandle, alignedOffset);
 
         while (rows.Count < pageSize && position < pageEnd)
         {
@@ -108,7 +111,7 @@ internal sealed class LogDataReader
             if (!terminated)
             {
                 var followingIsLineEnd = IsLineEndingAt(bytes, position + frameLimit, bytes.Length);
-                var hasFollowingContent = position + frameLimit < observedLength - requestedOffset
+                var hasFollowingContent = position + frameLimit < observedLength - readOffset
                     && !followingIsLineEnd;
                 if (hasFollowingContent)
                 {
@@ -135,7 +138,7 @@ internal sealed class LogDataReader
                 break;
             }
 
-            var startsWithinLine = rowStart == (requestedOffset == 0 ? (int)_bomLength : checked((int)(alignedOffset - requestedOffset)))
+            var startsWithinLine = rowStart == firstPosition
                 ? inputStartsWithinLine
                 : !IsNewlineBefore(bytes, rowStart);
             var text = _decoder.GetString(bytes.AsSpan(position, textByteCount));
@@ -143,8 +146,8 @@ internal sealed class LogDataReader
             if (!(startsWithinLine && terminated && text.Length == 0))
             {
                 rows.Add(new LogRow(
-                    requestedOffset + rowStart,
-                    requestedOffset + rowEnd,
+                    readOffset + rowStart,
+                    readOffset + rowEnd,
                     text,
                     startsWithinLine || wasTruncated,
                     wasTruncated));
@@ -153,11 +156,11 @@ internal sealed class LogDataReader
             position = rowEnd;
         }
 
-        var nextOffset = requestedOffset + position;
+        var nextOffset = readOffset + position;
         var currentLength = _file.Length;
         return new LogPage(
             rows,
-            requestedOffset,
+            readOffset,
             nextOffset,
             observedLength,
             nextOffset < currentLength,
@@ -216,18 +219,52 @@ internal sealed class LogDataReader
             return 0;
         }
 
-        var candidate = Math.Max(_bomLength, length - 128 * 1024);
+        var candidate = Math.Max(_bomLength, length - DefaultPageBytes);
         var aligned = AlignOffset(candidate, length);
-        var scanLength = (int)Math.Min(MidpointScanBytes, length - aligned);
+        var scanLength = (int)Math.Min(DefaultPageBytes, length - aligned);
         var bytes = ReadWindow(_file.SafeFileHandle, aligned, scanLength, cancellationToken);
-        var newlineIndex = FindNewline(bytes);
-        if (newlineIndex >= 0)
+
+        var pageStart = bytes.Length;
+        var searchIndex = bytes.Length - _codeUnitBytes;
+        if (searchIndex >= 0 && IsLineFeed(bytes.AsSpan(searchIndex, _codeUnitBytes)))
         {
-            var afterLine = aligned + newlineIndex + _codeUnitBytes;
-            return afterLine < length ? afterLine : 0;
+            searchIndex -= _codeUnitBytes;
         }
-        return aligned >= length ? 0 : aligned;
+
+        var renderedRows = 0;
+        for (var index = searchIndex; index >= 0; index -= _codeUnitBytes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsLineFeed(bytes.AsSpan(index, _codeUnitBytes)))
+            {
+                continue;
+            }
+
+            var lineStart = index + _codeUnitBytes;
+            renderedRows += TailFrameCount(pageStart - lineStart);
+            if (renderedRows > DefaultPageSize)
+            {
+                return aligned + pageStart;
+            }
+
+            pageStart = lineStart;
+            if (renderedRows == DefaultPageSize)
+            {
+                return aligned + pageStart;
+            }
+        }
+
+        if (pageStart < bytes.Length && (renderedRows + TailFrameCount(pageStart) > DefaultPageSize
+            || (aligned > _bomLength && !IsNewlineBefore(_file.SafeFileHandle, aligned))))
+        {
+            return aligned + pageStart;
+        }
+
+        return aligned;
     }
+
+    // A frame can end up to three bytes early to preserve a UTF code point.
+    private static int TailFrameCount(int bytes) => Math.Max(1, (bytes + DefaultFrameBytes - 4) / (DefaultFrameBytes - 3));
 
     public static FileStream Open(string path)
     {

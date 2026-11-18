@@ -22,7 +22,7 @@ public partial class MainWindow
     {
         if (tab.Path is { } path)
         {
-            Run(() => { ExplorerReveal.SelectFile(path); return Task.CompletedTask; });
+            Run(() => ExplorerReveal.SelectFileAsync(path));
         }
     }
 

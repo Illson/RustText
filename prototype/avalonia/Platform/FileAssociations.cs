@@ -31,9 +31,15 @@ public static class FileAssociations
             throw new FileNotFoundException("The RustText executable was not found.", fullPath);
         }
 
+        using var userRoot = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+        WriteRegistration(userRoot, fullPath);
+        SHChangeNotify(0x08000000, 0x0000, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    internal static void WriteRegistration(RegistryKey userRoot, string fullPath)
+    {
         var executableName = Path.GetFileName(fullPath);
         var openCommand = $"{QuoteWindowsArgument(fullPath)} \"%1\"";
-        using var userRoot = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
         using var classes = userRoot.CreateSubKey(@"Software\Classes", writable: true)
             ?? throw new IOException("Could not open the current user's Classes registry key.");
 
@@ -79,12 +85,13 @@ public static class FileAssociations
             verbCommand.SetValue(null, openCommand, RegistryValueKind.String);
         }
 
-        using (var capabilities = Registry.CurrentUser.CreateSubKey(CapabilitiesPath, writable: true))
+        using (var capabilities = userRoot.CreateSubKey(CapabilitiesPath, writable: true)
+            ?? throw new IOException("Could not create the application capabilities."))
         {
-            capabilities?.SetValue("ApplicationName", ApplicationName, RegistryValueKind.String);
-            capabilities?.SetValue("ApplicationDescription", "Просмотрщик и редактор логов RustText", RegistryValueKind.String);
-            capabilities?.SetValue("ApplicationIcon", $"{QuoteWindowsArgument(fullPath)},0", RegistryValueKind.String);
-            using var fileAssociations = capabilities?.CreateSubKey("FileAssociations", writable: true)
+            capabilities.SetValue("ApplicationName", ApplicationName, RegistryValueKind.String);
+            capabilities.SetValue("ApplicationDescription", "Просмотрщик и редактор логов RustText", RegistryValueKind.String);
+            capabilities.SetValue("ApplicationIcon", $"{QuoteWindowsArgument(fullPath)},0", RegistryValueKind.String);
+            using var fileAssociations = capabilities.CreateSubKey("FileAssociations", writable: true)
                 ?? throw new IOException("Could not create the file association capabilities.");
             foreach (var association in Associations)
             {
@@ -92,12 +99,9 @@ public static class FileAssociations
             }
         }
 
-        using (var registered = Registry.CurrentUser.CreateSubKey(@"Software\RegisteredApplications", writable: true))
-        {
-            registered?.SetValue(ApplicationName, CapabilitiesPath, RegistryValueKind.String);
-        }
-
-        SHChangeNotify(0x08000000, 0x0000, IntPtr.Zero, IntPtr.Zero);
+        using var registered = userRoot.CreateSubKey(@"Software\RegisteredApplications", writable: true)
+            ?? throw new IOException("Could not create the registered applications key.");
+        registered.SetValue(ApplicationName, CapabilitiesPath, RegistryValueKind.String);
     }
 
     /// <summary>Registers RustText and opens Windows default-app settings for the user to choose associations.</summary>

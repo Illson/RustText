@@ -18,6 +18,7 @@ public partial class MainWindow
 {
     private const long LogThreshold = 50L * 1024 * 1024;
     private static readonly FilePickerFileType TextFiles = new("Текст и логи") { Patterns = ["*.txt", "*.log", "*.json", "*.xml"] };
+    private bool _confirmingTabClose;
 
     private void NewTab(string text = "")
     {
@@ -25,7 +26,7 @@ public partial class MainWindow
         AttachEditor(tab, text);
         if (text.Length > 0)
         {
-            tab.Dirty = true;
+            tab.RestoredDirty = tab.Dirty = true;
             UpdateTab(tab);
         }
 
@@ -161,7 +162,8 @@ public partial class MainWindow
         tab.Dirty = false;
         tab.Highlights = new SearchHighlights(editor);
         editor.TextArea.TextView.BackgroundRenderers.Add(tab.Highlights);
-        editor.Document.UndoStack.MarkAsOriginalFile();
+        var undoStack = editor.Document.UndoStack;
+        undoStack.MarkAsOriginalFile();
 
         var warning = new TextBlock { VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
         var jump = Button("Перейти к ошибке", () =>
@@ -200,10 +202,17 @@ public partial class MainWindow
         Grid.SetColumn(minimap, 1);
         grid.Children.Add(minimap);
         tab.Item.Content = grid;
+        undoStack.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(undoStack.IsOriginalFile) && ReferenceEquals(tab.Editor, editor))
+            {
+                tab.Dirty = tab.RestoredDirty || !undoStack.IsOriginalFile;
+                UpdateTab(tab);
+            }
+        };
         editor.TextChanged += (_, _) =>
         {
             tab.Revision++;
-            tab.Dirty = tab.RestoredDirty || !editor.Document.UndoStack.IsOriginalFile;
             tab.LastWorked = DateTimeOffset.Now;
             UpdateTab(tab);
             ScheduleJsonValidation(tab);
@@ -331,9 +340,34 @@ public partial class MainWindow
 
     private async Task CloseTabAsync(WorkTab tab)
     {
-        if (!_tabs.ContainsKey(tab.Id))
+        if (!_tabs.ContainsKey(tab.Id) || _confirmingTabClose)
         {
             return;
+        }
+
+        if (tab is { Dirty: true, Path: { } path, Recovery: null })
+        {
+            var body = DialogPanel(new TextBlock
+            {
+                Text = $"Вкладка «{Path.GetFileName(path)}» содержит несохранённый текст.",
+                TextWrapping = TextWrapping.Wrap
+            });
+            var dialog = Dialog("Закрыть без сохранения?", body);
+            var cancel = Button("Отмена", () => dialog.Close(false));
+            cancel.IsCancel = true;
+            body.Children.Add(Row(cancel, Button("Закрыть", () => dialog.Close(true))));
+            _confirmingTabClose = true;
+            try
+            {
+                if (!await dialog.ShowDialog<bool>(this))
+                {
+                    return;
+                }
+            }
+            finally
+            {
+                _confirmingTabClose = false;
+            }
         }
 
         await RememberClosedAsync(tab);

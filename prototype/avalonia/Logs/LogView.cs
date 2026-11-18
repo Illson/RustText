@@ -330,11 +330,16 @@ internal sealed class LogView : UserControl, IDisposable
         _minimapList.ItemsSource = _miniSamples;
         _minimapList.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<MiniSample>((sample, _) =>
         {
+            if (sample is null)
+            {
+                return null;
+            }
+
             var button = new Button
             {
                 Padding = new Thickness(3),
                 HorizontalContentAlignment = HorizontalAlignment.Left,
-            Content = new TextBlock { Text = sample.Preview, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 9 }
+                Content = new TextBlock { Text = sample.Preview, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 9 }
             };
             ToolTip.SetTip(button, $"{sample.Offset:N0} байт");
             button.Click += async (_, _) => await NavigateAsync(sample.Offset, true);
@@ -503,7 +508,7 @@ internal sealed class LogView : UserControl, IDisposable
             RefreshButtons();
             if (loadFollowEnd && !_closed)
             {
-                _ = LoadPageAsync(_reader.GetEndOffset(_closing.Token), saveHistory: false);
+                _ = NavigateAsync(_reader.GetEndOffset(_closing.Token), saveHistory: false);
             }
         }
     }
@@ -1093,7 +1098,7 @@ internal sealed class LogView : UserControl, IDisposable
                 ResetFileHandle();
                 _fileStamp = now;
                 SetStatus("Файл был заменён или очищен. Позиция и индекс сброшены.");
-                await NavigateAsync(0, false);
+                await LoadPageAsync(0, saveHistory: false);
                 StartIndexIfNeeded();
                 LoadMinimapSamples();
             }
@@ -1102,11 +1107,11 @@ internal sealed class LogView : UserControl, IDisposable
                 _fileStamp = now;
                 if (_followEnd)
                 {
-                    await NavigateAsync(_reader.GetEndOffset(_closing.Token), false);
+                    await LoadPageAsync(_reader.GetEndOffset(_closing.Token), saveHistory: false);
                 }
                 else if (_page is { } page)
                 {
-                    await NavigateAsync(page.StartOffset, false);
+                    await LoadPageAsync(page.StartOffset, saveHistory: false);
                 }
                 StartIndexIfNeeded();
                 LoadMinimapSamples();
@@ -1121,7 +1126,7 @@ internal sealed class LogView : UserControl, IDisposable
                 ResetFileHandle();
                 _fileStamp = now;
                 SetStatus("Файл был перезаписан. Позиция и индекс сброшены.");
-                await NavigateAsync(0, false);
+                await LoadPageAsync(0, saveHistory: false);
                 StartIndexIfNeeded();
                 LoadMinimapSamples();
             }
