@@ -248,6 +248,8 @@ impl Workspace {
         let versions_workspace = cx.entity().downgrade();
         let json_workspace = cx.entity().downgrade();
         let settings_workspace = cx.entity().downgrade();
+        #[cfg(windows)]
+        let window_finder_workspace = cx.entity().downgrade();
         let json_disabled = doc.is_some_and(|doc| doc.json_validation_disabled);
         let can_show_versions = can_edit && doc.is_some_and(|doc| doc.file.is_some());
         let can_generate = self.busy.is_none() && !self.applying_update();
@@ -261,6 +263,8 @@ impl Workspace {
                 let versions_workspace = versions_workspace.clone();
                 let json_workspace = json_workspace.clone();
                 let settings_workspace = settings_workspace.clone();
+                #[cfg(windows)]
+                let window_finder_workspace = window_finder_workspace.clone();
                 let menu = menu
                     .action_context(focus.clone())
                     .min_w(px(280.))
@@ -335,16 +339,24 @@ impl Workspace {
                         PopupMenuItem::new("Уменьшить текст")
                             .action(Box::new(ZoomOut))
                             .disabled(showing_home || log.is_some()),
-                    )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new("Настройки…")
-                            .disabled(!can_generate)
-                            .on_click(move |_, window, cx| {
-                                let _ = settings_workspace
-                                    .update(cx, |this, cx| this.open_settings(window, cx));
-                            }),
                     );
+                #[cfg(windows)]
+                let menu = menu.separator().item(
+                    PopupMenuItem::new("Вывести окно на передний план…")
+                        .disabled(!can_generate)
+                        .on_click(move |_, window, cx| {
+                            let _ = window_finder_workspace
+                                .update(cx, |this, cx| this.open_window_finder(window, cx));
+                        }),
+                );
+                let menu = menu.separator().item(
+                    PopupMenuItem::new("Настройки…")
+                        .disabled(!can_generate)
+                        .on_click(move |_, window, cx| {
+                            let _ = settings_workspace
+                                .update(cx, |this, cx| this.open_settings(window, cx));
+                        }),
+                );
                 if let Some(log) = &log {
                     log.update(cx, |viewer, cx| viewer.tools_menu(menu, window, cx))
                 } else {

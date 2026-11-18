@@ -16,6 +16,8 @@ mod updates;
 mod version_actions;
 mod versions_panel;
 mod view;
+#[cfg(windows)]
+mod window_finder;
 
 pub(crate) use associations::register_for_current_user;
 pub(crate) use view::bind_keys;
@@ -92,6 +94,8 @@ pub(crate) struct Workspace {
     search: Option<search_panel::SearchPanel>,
     template_generator: Option<template_generator::TemplateGenerator>,
     list_comparison: Option<list_comparison::ListComparison>,
+    #[cfg(windows)]
+    window_finder: Option<window_finder::WindowFinder>,
     session: Option<session_runtime::SessionWriter>,
     session_notice: Option<SharedString>,
     session_error: Option<SharedString>,
@@ -141,6 +145,8 @@ impl Workspace {
             search: None,
             template_generator: None,
             list_comparison: None,
+            #[cfg(windows)]
+            window_finder: None,
             session: None,
             session_notice: None,
             session_error: None,

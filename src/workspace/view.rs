@@ -930,14 +930,17 @@ impl Render for Workspace {
                     .flatten(),
             )
             .children(self.update_panel(cx));
-        div()
+        let layers = div()
             .relative()
             .size_full()
             .child(workspace)
             .children(self.template_generator_panel(cx))
             .children(self.list_comparison_panel(cx))
             .children(self.versions_panel(cx))
-            .children(self.settings_panel(cx))
+            .children(self.settings_panel(cx));
+        #[cfg(windows)]
+        let layers = layers.children(self.window_finder_panel(cx));
+        layers
     }
 }
 
