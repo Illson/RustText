@@ -1080,6 +1080,8 @@ internal static class SettingsExtensions
         UntitledTabLimit = Math.Clamp(settings.UntitledTabLimit, 1, 200),
         RecentFileLimit = Math.Clamp(settings.RecentFileLimit, 1, 100),
         VersionFileLimitBytes = Math.Clamp(settings.VersionFileLimitBytes, 0, 50 * 1024 * 1024),
-        VersionTotalLimitBytes = Math.Clamp(settings.VersionTotalLimitBytes, 0, 1024L * 1024 * 1024)
+        VersionTotalLimitBytes = Math.Clamp(settings.VersionTotalLimitBytes, 0, 1024L * 1024 * 1024),
+        ArchiveClosedDraftAfterMinutes = Math.Clamp(settings.ArchiveClosedDraftAfterMinutes, 0, 525_600),
+        ArchivedDraftRetentionDays = Math.Clamp(settings.ArchivedDraftRetentionDays, 0, 3650)
     };
 }

@@ -178,6 +178,25 @@ public partial class MainWindow
         ActiveTab?.Editor?.Focus();
     }
 
+    private void ForgetSearchTab(WorkTab tab)
+    {
+        var isSearchSource = ReferenceEquals(_searchTab, tab);
+        if (isSearchSource || _allTabs.IsChecked == true && _searchCancellation is not null)
+            CancelSearch();
+
+        if (isSearchSource) _searchTab = null;
+        if (_searchFocus is { } focus && ReferenceEquals(focus.Tab, tab)) _searchFocus = null;
+
+        var matchingItems = _searchResults.Items.OfType<ListBoxItem>().Where(item =>
+            item.Tag is SearchResult result && ReferenceEquals(result.Tab, tab)).ToArray();
+        if (_searchResults.SelectedItem is ListBoxItem selected && matchingItems.Contains(selected))
+            _searchResults.SelectedItem = null;
+        foreach (var item in matchingItems)
+        {
+            _searchResults.Items.Remove(item);
+        }
+    }
+
     private void CancelSearch()
     {
         _searchDebounce.Stop();

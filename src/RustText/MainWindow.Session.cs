@@ -594,7 +594,7 @@ public partial class MainWindow
         await _workspace.SaveGate.WaitAsync(_lifetime.Token);
         try
         {
-            var saved = CaptureTab(tab);
+            var saved = CaptureTab(tab) with { ClosedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
             if (tab.Editor is { } editor && (tab.Path is null || (preserveUnsavedText && tab.Dirty)))
             {
                 if (FindSavedLiveDraft(tab) is { } existingDraft)

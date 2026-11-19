@@ -1224,6 +1224,121 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task ClosingLargeUntitledTabReleasesEditorMemoryAndKeepsItsSavedDraftRecoverable() => HeadlessTests.RunAsync(async _ =>
+    {
+        var text = "закрытый черновик 💡\n" + string.Concat(Enumerable.Repeat("строка со значимым содержимым\n", 20_000));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", text);
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            Assert.Equal(text, editor.Text);
+
+            await CallAsync(window, "CloseTabAsync", tab);
+
+            Assert.Null(Property(tab, "Editor"));
+            Assert.Equal(0, editor.Document.TextLength);
+            var closed = Assert.Single(((System.Collections.IEnumerable)Field(window, "_closedTabs")).Cast<SessionTab>());
+            Assert.NotNull(closed.DraftRef);
+            Assert.Equal(text, await ((StorageService)Field(window, "_storage")!).LoadDraftAsync(closed));
+
+            await CallAsync(window, "RestoreClosedAsync", closed);
+            Assert.Equal(text, Read<TextEditor>(ActiveTab(window), "Editor").Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ClosedDraftsPastTheConfiguredAgeArchiveWhileOpenDraftsStayLive() => HeadlessTests.RunAsync(async profile =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "closed text to archive");
+            var closedTab = ActiveTab(window);
+            await CallAsync(window, "CloseTabAsync", closedTab);
+            var closed = Assert.Single(((System.Collections.IEnumerable)Field(window, "_closedTabs")).Cast<SessionTab>());
+            var old = closed with { ClosedAtMs = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeMilliseconds() };
+            ((List<SessionTab>)Field(window, "_closedTabs")!)[0] = old;
+
+            Invoke(window, "NewTab", "leave this tab open");
+            var settings = (UserSettings)Field(window, "_settings")!;
+            var updated = settings with
+            {
+                ArchiveClosedDraftAfterMinutes = 1,
+                ArchivedDraftRetentionDays = 0
+            };
+            typeof(MainWindow).GetField("_settings", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, updated);
+            await CallAsync(window, "SaveWorkspaceSettingsAsync", updated);
+            await CallAsync(window, "ArchiveClosedDraftsAsync");
+
+            Assert.Empty((List<SessionTab>)Field(window, "_closedTabs")!);
+            Assert.Equal("leave this tab open", Read<TextEditor>(ActiveTab(window), "Editor").Text);
+            var archive = new DraftArchiveService(((StorageService)Field(window, "_storage")!).RootDirectory);
+            Assert.Equal(old.Id, Assert.Single(await archive.GetEntriesAsync()).Tab.Id);
+            Assert.False(File.Exists(((StorageService)Field(window, "_storage")!).GetDraftPath(old)));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ClosingLogReleasesItsPageAndSearchReferencesAndCanRestoreIt() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "close-log.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat("log row with payload\n", 300)));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenSinglePathAsync", path, true, null, false);
+            var tab = ActiveTab(window);
+            var log = Read<LogView>(tab, "Log");
+            await log.InitialPageLoad;
+            Assert.Contains("log row", LogText(log).Text);
+            typeof(MainWindow).GetField("_searchTab", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, tab);
+
+            await CallAsync(window, "CloseTabAsync", tab);
+
+            Assert.Null(Property(tab, "Log"));
+            Assert.Null(Property(Property(tab, "Item")!, "Content"));
+            Assert.Null(typeof(LogView).GetField("_page", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(log));
+            Assert.Equal(string.Empty, LogText(log).Text);
+            Assert.Null(Field(window, "_searchTab"));
+            var closed = Assert.Single(((System.Collections.IEnumerable)Field(window, "_closedTabs")).Cast<SessionTab>());
+
+            await CallAsync(window, "RestoreClosedAsync", closed);
+            var restored = Read<LogView>(ActiveTab(window), "Log");
+            await restored.InitialPageLoad;
+            Assert.Contains("log row", LogText(restored).Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ClosingEditorRemovesItsSearchResultsAndSourceReferences() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-close.txt");
+        await File.WriteAllTextAsync(path, "needle in the document");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            ((TextBox)Field(window, "_searchInput")).Text = "needle";
+            await CallAsync(window, "FindAsync");
+            var results = (ListBox)Field(window, "_searchResults");
+            Assert.Single(results.Items);
+            var tab = ActiveTab(window);
+
+            await CallAsync(window, "CloseTabAsync", tab);
+
+            Assert.Empty(results.Items);
+            Assert.Null(Field(window, "_searchTab"));
+            Assert.Null(Field(window, "_searchFocus"));
+            Assert.Null(Property(Property(tab, "Item")!, "Content"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task NulInTextStartupDoesNotPreventOpeningAnotherFile() => HeadlessTests.RunAsync(async profile =>
     {
         var bad = Path.Combine(profile, "nul.txt");
