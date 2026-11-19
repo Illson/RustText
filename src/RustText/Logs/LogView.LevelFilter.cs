@@ -187,6 +187,7 @@ internal sealed partial class LogView
         _sourceSelectionEnd = _logText.SelectionEnd;
         _sourceCaretIndex = _logText.CaretIndex;
         _contentViewport!.Children[0].IsVisible = false;
+        _contentViewport.Children.Add(_levelFilterViewport!);
         _levelFilterViewport!.IsVisible = true;
     }
 
@@ -197,6 +198,7 @@ internal sealed partial class LogView
         _levelFilterViewport.IsVisible = false;
         _contentViewport.Children[0].IsVisible = true;
         if (!wasFiltered) return;
+        _contentViewport.Children.Remove(_levelFilterViewport);
         _logText.CaretIndex = Math.Clamp(_sourceCaretIndex, 0, _logText.Text?.Length ?? 0);
         _logText.SelectionStart = Math.Clamp(_sourceSelectionStart, 0, _logText.Text?.Length ?? 0);
         _logText.SelectionEnd = Math.Clamp(_sourceSelectionEnd, 0, _logText.Text?.Length ?? 0);

@@ -1361,7 +1361,7 @@ public partial class MainWindow
             return;
         }
 
-        if (LogLevels.IsLogPath(tab.Path))
+        if (LogLevels.IsLogPath(tab.Path) && !MightBeJsonLogLinesPrefix(editor.Document))
         {
             return;
         }
@@ -1377,18 +1377,20 @@ public partial class MainWindow
         {
             await Task.Delay(270, source.Token);
             var path = tab.Path;
-            if (LogLevels.IsLogPath(path))
+            if (LogLevels.IsLogPath(path) && !MightBeJsonLogLinesPrefix(editor.Document))
             {
                 return;
             }
 
-            var text = editor.Text;
-            if (!TextOperations.LooksLikeJson(text, path))
+            var snapshot = editor.Document.CreateSnapshot();
+            var problem = await Task.Run(() =>
             {
-                return;
-            }
-
-            var problem = await Task.Run(() => TextOperations.ValidateJson(text, path, source.Token), source.Token);
+                using var reader = snapshot.CreateReader();
+                var text = reader.ReadToEnd();
+                return TextOperations.LooksLikeJson(text, path)
+                    ? TextOperations.ValidateJson(text, path, source.Token)
+                    : null;
+            }, source.Token);
             if (!source.IsCancellationRequested && ReferenceEquals(tab.Editor, editor) && problem is not null)
             {
                 tab.JsonError = problem;
@@ -1412,6 +1414,19 @@ public partial class MainWindow
 
             source.Dispose();
         }
+    }
+
+    private static bool MightBeJsonLogLinesPrefix(TextDocument document)
+    {
+        var lines = document.Lines;
+        if (lines.Count < 2 || lines[0].Length == 0 || lines[1].Length == 0) return false;
+
+        const int prefixLimit = 256;
+        var first = lines[0];
+        var second = lines[1];
+        var firstPrefix = document.GetText(first.Offset, Math.Min(first.Length, prefixLimit));
+        var secondPrefix = document.GetText(second.Offset, Math.Min(second.Length, prefixLimit));
+        return TextOperations.IsJsonContainerPrefix(firstPrefix) && TextOperations.IsJsonContainerPrefix(secondPrefix);
     }
 
     private sealed class WorkTab(long id, Group group)

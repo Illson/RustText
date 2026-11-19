@@ -33,8 +33,25 @@ public sealed class JsonTextTests
     [InlineData("[not valid JSON]", null, true)]
     [InlineData("not JSON", "events.json", true)]
     [InlineData("not JSON", "events.jsonl", true)]
+    [InlineData("not JSON", "events.ndjson", true)]
     public void AutomaticValidationOnlyRecognizesJsonDocumentsAndJsonPaths(string text, string? path, bool expected) =>
         Assert.Equal(expected, TextOperations.LooksLikeJson(text, path));
+
+    [Fact]
+    public void LogJsonLinesRequireAValidFirstRecordAndAContainerStartOnTheNextLine()
+    {
+        const string first = "{\"kind\":\"start\"}";
+        const string invalidSecond = "{\"kind\": }";
+
+        var jsonLines = first + "\r\n" + invalidSecond;
+        Assert.True(TextOperations.LooksLikeJson(jsonLines, "events.log"));
+        Assert.Equal(2, TextOperations.ValidateJson(jsonLines, "events.log")?.Line);
+
+        Assert.False(TextOperations.LooksLikeJson("{not JSON}\r\n" + invalidSecond, "events.log"));
+        Assert.False(TextOperations.LooksLikeJson(first + "\r\nnull", "events.log"));
+        Assert.False(TextOperations.LooksLikeJson(first + "\r\n[INFO] request-42", "events.log"));
+        Assert.False(TextOperations.LooksLikeJson(first + "\r\n{worker} request-42", "events.log"));
+    }
 
     [Fact]
     public Task DemoLogDoesNotStartJsonValidationOrShowItsBanner() => HeadlessTests.RunAsync(async profile =>

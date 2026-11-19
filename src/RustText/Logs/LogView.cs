@@ -617,7 +617,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         _levelFilterViewport = BuildLevelFilterViewport();
         _levelFilterViewport.IsVisible = false;
         _levelFilter!.IsVisible = false;
-        _contentViewport.Children.Add(_levelFilterViewport);
         var logViewport = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
         logViewport.Children.Add(_levelFilter!);
         Grid.SetRow(_contentViewport, 1);
