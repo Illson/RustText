@@ -208,7 +208,7 @@ public partial class MainWindow
             _closedTabs.AddRange((targetState.ClosedTabs ?? []).Take(100));
             MountSessionTabs(targetState, pending: false);
             ApplyTextAppearance();
-            if (SelectedIn(_active) is { } selected) await ActivateDeferredAsync(selected);
+            if (SelectedIn(_active) is { } selected) await GuardAsync(() => ActivateDeferredAsync(selected));
         }
         else
         {

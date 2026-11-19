@@ -1536,6 +1536,37 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task MissingFileInNamedWorkspaceCanBeRetriedWithoutDisturbingOtherTabs() => HeadlessTests.RunAsync(async profile =>
+    {
+        var missing = Path.Combine(profile, "missing.txt");
+        var intact = Path.Combine(profile, "intact.txt");
+        await File.WriteAllTextAsync(intact, "unchanged");
+        await File.WriteAllTextAsync(missing, "original");
+        var window = await OpenWorkspaceAsync(intact, missing);
+        try
+        {
+            Invoke(window, "Select", Tabs(window).Single(tab => Equals(Property(tab, "Path"), missing)));
+            await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Investigation");
+            var id = (string)Field(window, "_workspaceId");
+            await CloseAsync(window);
+            File.Delete(missing);
+            window = await OpenWorkspaceAsync();
+            Assert.Equal(id, Field(window, "_workspaceId"));
+            var pending = Tabs(window).Single(tab => Equals(Property(tab, "Path"), missing));
+            Assert.Contains(missing, Read<string>(pending, "DiskStatus"));
+            var placeholder = Assert.IsType<StackPanel>(Read<TabItem>(pending, "Item").Content);
+            Assert.Contains(missing, placeholder.Children.OfType<TextBlock>().Single().Text);
+            var valid = Tabs(window).Single(tab => Equals(Property(tab, "Path"), intact));
+            await CallAsync(window, "ActivateDeferredAsync", valid);
+            Assert.Equal("unchanged", Read<TextEditor>(valid, "Editor").Text);
+            await File.WriteAllTextAsync(missing, "restored file");
+            Click(placeholder.Children.OfType<Button>().Single());
+            await HeadlessTests.WaitForAsync(() => Property(pending, "Editor") is TextEditor editor && editor.Text == "restored file");
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task SettingsOpensTheSelectedNamedWorkspaceOnRestart() => HeadlessTests.RunAsync(async profile =>
     {
         var window = await OpenWorkspaceAsync();

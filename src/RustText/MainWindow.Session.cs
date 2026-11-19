@@ -541,13 +541,18 @@ public partial class MainWindow
             tab.Deferred = null;
             UpdateTab(tab);
         }
-        catch
+        catch (Exception error)
         {
-            if (_tabs.ContainsKey(tab.Id))
+            if (_tabs.TryGetValue(tab.Id, out var current) && ReferenceEquals(tab, current))
             {
-                tab.Item.Content = FocusButton(Button("Повторить загрузку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
+                var retry = FocusButton(Button("Повторить загрузку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
+                if (saved.Path is { } missing && error is FileNotFoundException or DirectoryNotFoundException)
+                {
+                    tab.DiskStatus = $"Файл не найден. {missing}";
+                    tab.Item.Content = DialogPanel(new TextBlock { Text = tab.DiskStatus, TextWrapping = Avalonia.Media.TextWrapping.Wrap }, retry);
+                }
+                else tab.Item.Content = retry;
             }
-
             throw;
         }
         finally
