@@ -411,6 +411,7 @@ public partial class MainWindow
         foreach (var key in _workspace.SessionStores.Keys.Where(key => key.WorkspaceId == workspaceId).ToArray())
         {
             var storage = _workspace.SessionStores[key];
+            _workspace.DetachedDrafts.Remove(storage);
             var cacheKey = StorageCacheKey(storage);
             _workspace.LiveDrafts.Remove(cacheKey);
             _workspace.LastCheckpoints.Remove(cacheKey);

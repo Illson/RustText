@@ -689,6 +689,7 @@ public partial class MainWindow : Window
             {
                 await SaveSessionAsync();
             }
+            await PreserveDetachedDraftsOnCloseAsync();
             sessionSaved = true;
 
             CloseWorkspaceContents();

@@ -25,6 +25,7 @@ public partial class MainWindow
         public List<MainWindow> Windows { get; } = [];
         public Dictionary<string, List<SessionTab>> ClosedTabs { get; } = new(StringComparer.Ordinal);
         public Dictionary<(string WorkspaceId, string WindowId), StorageService> SessionStores { get; } = [];
+        public Dictionary<StorageService, DetachedDraftRecovery> DetachedDrafts { get; } = [];
         public HashSet<long> ClosedTabOperations { get; } = [];
         public Dictionary<string, Dictionary<long, SavedLiveDraft>> LiveDrafts { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, int?> LastCheckpoints { get; } = new(StringComparer.Ordinal);
@@ -76,6 +77,11 @@ public partial class MainWindow
 
     private sealed record WorkspaceViewState(Dictionary<long, WorkTab> Tabs, Group Root, Group Active, bool Home,
         double Width, double Height, bool Maximized, bool WordWrap, double FontSize, StorageService Storage, List<SessionTab> ClosedTabs);
+
+    private sealed record DetachedDraftRecovery(StorageService PrimaryStorage)
+    {
+        public Dictionary<long, long?> DestinationIds { get; } = [];
+    }
 
     private WorkspaceViewState CaptureWorkspaceView() => new(_tabs, _root, _active, _home,
         Width, Height, WindowState == WindowState.Maximized, _wordWrap, _fontSize, SessionStorage, _closedTabs);
@@ -131,11 +137,14 @@ public partial class MainWindow
 
         var workspaceId = _workspaceId;
         var windowId = "window:" + Guid.NewGuid().ToString("N");
-        var sharedStorage = workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId ? null : SessionStorage;
+        var sourceStorage = SessionStorage;
+        var primaryStorage = _workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+        var independent = !_startEmpty && !ReferenceEquals(sourceStorage, primaryStorage);
+        var sharedStorage = independent || workspaceId != WorkspaceCatalogStore.DefaultWorkspaceId ? sourceStorage : null;
         if (sharedStorage is not null)
             _workspace.ShareSession(workspaceId, windowId, sharedStorage);
         var window = new MainWindow([], _workspace, workspaceId, windowId,
-            shareDefaultSession: workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId, restoreWorkspace: false)
+            shareDefaultSession: sharedStorage is null, restoreWorkspace: false)
         {
             _fontSize = _fontSize,
             _wordWrap = _wordWrap,
@@ -166,6 +175,12 @@ public partial class MainWindow
         try
         {
             TransferTab(tab, window, window._active, null);
+            if (independent && window._tabs.ContainsKey(tab.Id))
+            {
+                if (!_workspace.DetachedDrafts.TryGetValue(sourceStorage, out var recovery))
+                    _workspace.DetachedDrafts.Add(sourceStorage, recovery = new DetachedDraftRecovery(primaryStorage));
+                recovery.DestinationIds.TryAdd(tab.Id, null);
+            }
         }
         catch
         {

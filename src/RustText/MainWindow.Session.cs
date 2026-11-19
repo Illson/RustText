@@ -330,6 +330,93 @@ public partial class MainWindow
 
     private Task SaveSessionAsync() => SaveWorkspaceSessionAsync(excludeWindow: null);
 
+    private async Task PreserveDetachedDraftsOnCloseAsync()
+    {
+        var trackedViews = _workspaceViews.Values.Prepend(CaptureWorkspaceView())
+            .Where(view => _workspace.DetachedDrafts.ContainsKey(view.Storage))
+            .GroupBy(view => view.Storage).ToArray();
+        if (trackedViews.Length == 0) return;
+
+        var token = _lifetime.Token;
+        await _workspace.SaveGate.WaitAsync(token);
+        try
+        {
+            foreach (var views in trackedViews)
+            {
+                var source = views.Key;
+                var recovery = _workspace.DetachedDrafts[source];
+                var otherViews = SessionViews(source, this).Any();
+                var closingIds = views.SelectMany(view => view.Tabs.Keys).ToHashSet();
+                var pending = recovery.DestinationIds.Keys.Where(id => !otherViews || closingIds.Contains(id)).ToHashSet();
+                if (pending.Count == 0) continue;
+
+                var saved = await source.LoadSessionAsync(token);
+                if (saved is null && source.HasSessionCheckpoint)
+                    throw new InvalidDataException("Не удалось прочитать сохранённый черновик вынесенной вкладки.");
+                var drafts = (saved?.Tabs ?? []).Concat(saved?.ClosedTabs ?? [])
+                    .Where(tab => pending.Contains(tab.Id) && tab.DraftRef is not null)
+                    .DistinctBy(tab => tab.Id).ToArray();
+                var savedIds = drafts.Select(tab => tab.Id).ToHashSet();
+                if (views.SelectMany(view => view.Tabs.Values).Any(tab => pending.Contains(tab.Id)
+                    && (tab.Dirty || tab.Recovery is not null || tab.Deferred?.DraftRef is not null || tab.Path is null && tab.Editor is not null)
+                    && !savedIds.Contains(tab.Id)))
+                    throw new IOException("Черновик вынесенной вкладки ещё не сохранён. Повторите закрытие окна.");
+                if (drafts.Length > 0) await MergeDetachedDraftsAsync(source, recovery, drafts, token);
+
+                foreach (var draft in drafts) recovery.DestinationIds.Remove(draft.Id);
+                if (!otherViews || recovery.DestinationIds.Count == 0) _workspace.DetachedDrafts.Remove(source);
+            }
+        }
+        finally { _workspace.SaveGate.Release(); }
+    }
+
+    private async Task MergeDetachedDraftsAsync(StorageService source, DetachedDraftRecovery recovery,
+        SessionTab[] drafts, CancellationToken token)
+    {
+        var primary = recovery.PrimaryStorage;
+        var checkpoint = await primary.LoadSessionAsync(token);
+        if (checkpoint is null && primary.HasSessionCheckpoint)
+            throw new InvalidDataException("Не удалось прочитать основной сеанс рабочего пространства для восстановления черновика.");
+        checkpoint ??= new SessionState([]);
+
+        var liveViews = SessionViews(primary, null).ToList();
+        var liveHistory = liveViews.Count > 0 ? _workspace.GetClosedTabs(primary) : null;
+        var existing = liveHistory ?? checkpoint.ClosedTabs ?? [];
+        _workspace.NextId = Math.Max(_workspace.NextId, checkpoint.Tabs.Concat(checkpoint.ClosedTabs ?? []).Concat(existing)
+            .Select(tab => tab.Id).DefaultIfEmpty().Max());
+
+        var readers = new Dictionary<long, Func<TextReader>>();
+        var recovered = new List<SessionTab>();
+        var closedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var draft in drafts)
+        {
+            var id = recovery.DestinationIds[draft.Id] ?? NextId();
+            recovery.DestinationIds[draft.Id] = id;
+            var path = source.GetDraftPath(draft)!;
+            readers.Add(id, () => new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.Read | FileShare.Delete), new UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: false));
+            recovered.Add(draft with { Id = id, DraftRef = null, DraftSha256 = null, ClosedAtMs = closedAt });
+        }
+
+        if (liveHistory is not null)
+        {
+            // Include live tabs and their drafts so checkpoint pruning keeps any newly opened recovery files.
+            var committed = (await SaveSessionViewsAsync(primary, liveViews, forget: null, force: true, recovered, readers))!;
+            liveHistory.RemoveAll(tab => readers.ContainsKey(tab.Id));
+            liveHistory.InsertRange(0, committed.ClosedTabs!.Where(tab => readers.ContainsKey(tab.Id)));
+            if (!liveViews[0].Owner.PreserveEmptyHistory(primary) && liveHistory.Count > 100)
+                liveHistory.RemoveRange(100, liveHistory.Count - 100);
+            RefreshHistoryMenus();
+        }
+        else
+        {
+            // Only the closed history changes when the primary session is on disk.
+            var updated = checkpoint with { ClosedTabs = [.. recovered, .. existing.Where(tab => !readers.ContainsKey(tab.Id))] };
+            await primary.SaveSessionWithDraftReadersAsync(updated, readers, token);
+        }
+        _workspace.SetLastCheckpoint(StorageCacheKey(primary), null);
+    }
+
     private async Task SaveWorkspaceSessionAsync(MainWindow? excludeWindow, SessionTab? forgetClosedTab = null)
     {
         var activeStorage = SessionStorage;
@@ -371,8 +458,9 @@ public partial class MainWindow
         }
     }
 
-    private async Task SaveSessionViewsAsync(StorageService storage,
-        List<(MainWindow Owner, WorkspaceViewState View)> views, SessionTab? forget, bool force)
+    private async Task<SessionState?> SaveSessionViewsAsync(StorageService storage,
+        List<(MainWindow Owner, WorkspaceViewState View)> views, SessionTab? forget, bool force,
+        IReadOnlyList<SessionTab>? recovered = null, IReadOnlyDictionary<long, Func<TextReader>>? draftReaders = null)
     {
         var (owner, home) = views[0];
         var entries = views.SelectMany(pair =>
@@ -387,16 +475,17 @@ public partial class MainWindow
         var selected = home.Tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, home.Active.Tabs.SelectedItem));
         var history = _workspace.GetClosedTabs(storage);
         var preserveHistory = owner.PreserveEmptyHistory(storage);
-        var capturedHistory = history.Where(tab => tab.Id != forget?.Id).Take(preserveHistory ? int.MaxValue : 100).ToList();
+        var historyToSave = recovered is null ? history : recovered.Concat(history).DistinctBy(tab => tab.Id);
+        var capturedHistory = historyToSave.Where(tab => tab.Id != forget?.Id).Take(preserveHistory ? int.MaxValue : 100).ToList();
         var session = new SessionState(state, capturedHistory, Math.Max(0, Array.IndexOf(tabs, selected)),
             double.IsFinite(home.Width) ? home.Width : 1080, double.IsFinite(home.Height) ? home.Height : 700,
             home.Maximized, home.WordWrap, home.FontSize, owner.CaptureLayout(home.Root, home.Tabs), home.Active.Id);
         var cacheKey = StorageCacheKey(storage);
         var fingerprint = CheckpointFingerprint(session, tabs);
-        if (!force && forget is null && _workspace.GetLastCheckpoint(cacheKey) == fingerprint) return;
+        if (!force && forget is null && _workspace.GetLastCheckpoint(cacheKey) == fingerprint) return null;
 
         var existing = _workspace.GetLiveDrafts(cacheKey);
-        var readers = new Dictionary<long, Func<TextReader>>();
+        Dictionary<long, Func<TextReader>> readers = draftReaders is null ? [] : new(draftReaders);
         var live = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
         for (var i = 0; i < tabs.Length; i++)
         {
@@ -434,6 +523,7 @@ public partial class MainWindow
                 forget.DraftRef is not null && committed.Tabs.All(tab => tab.Id != forget.Id), _lifetime.Token);
         }
         _workspace.SetLastCheckpoint(cacheKey, fingerprint);
+        return committed;
     }
 
     private SessionTab? FindSavedLiveDraft(WorkTab tab) =>
