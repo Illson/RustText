@@ -147,11 +147,11 @@ public partial class MainWindow
         if (!_workspace.Catalog.Workspaces.Any(item => item.Id == workspaceId))
             throw new KeyNotFoundException("Рабочее пространство не найдено.");
         var cachedView = _workspaceViews.TryGetValue(workspaceId, out var existingView) ? existingView : null;
-        var targetStorage = _workspace.GetStorage(workspaceId, _windowId);
+        var targetStorage = _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession);
         var targetState = cachedView is null ? await targetStorage.LoadSessionAsync(_lifetime.Token) : null;
         if (cachedView is null && targetState is null && targetStorage.HasSessionCheckpoint)
         {
-            _workspace.UnavailableSessions.Add(workspaceId + ":" + _windowId);
+            _workspace.UnavailableSessions.Add(StorageCacheKey(targetStorage));
             throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
         }
         if (cachedView is null && targetState is null && _windowId != WorkspaceCatalogStore.PrimaryWindowId)
@@ -161,12 +161,12 @@ public partial class MainWindow
             if (primaryState is not null)
             {
                 await CopyWorkspaceSessionAsync(_workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId),
-                    _workspace.GetStorage(workspaceId, _windowId));
-                targetState = await _workspace.GetStorage(workspaceId, _windowId).LoadSessionAsync(_lifetime.Token);
+                    _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession));
+                targetState = await _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession).LoadSessionAsync(_lifetime.Token);
             }
             else if (_workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId).HasSessionCheckpoint)
             {
-                _workspace.UnavailableSessions.Add(workspaceId + ":" + _windowId);
+                _workspace.UnavailableSessions.Add(StorageCacheKey(_workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId)));
                 throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
             }
         }
@@ -183,7 +183,7 @@ public partial class MainWindow
         _splitGrids.Clear();
 
         _workspaceId = workspaceId;
-        _closedTabs = _workspace.GetClosedTabs(_workspaceId, _windowId);
+        _closedTabs = _workspace.GetClosedTabs(SessionStorage);
 
         if (cachedView is { } view)
         {
@@ -254,7 +254,7 @@ public partial class MainWindow
         var name = await PromptAsync("Дублировать рабочее пространство", "Имя копии", source.Name + " (копия)");
         if (name is null) return;
         if (source.Id == _workspaceId) await SaveWorkspaceSessionAsync(excludeWindow: null);
-        var sourceStorage = _workspace.GetStorage(source.Id, _windowId);
+        var sourceStorage = _workspace.GetStorage(source.Id, _windowId, _shareDefaultSession);
         var state = await sourceStorage.LoadSessionAsync(_lifetime.Token);
         if (state is null && _windowId != WorkspaceCatalogStore.PrimaryWindowId)
         {
