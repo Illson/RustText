@@ -359,9 +359,15 @@ public partial class MainWindow
         var perFile = new TextBox { Text = (_settings.VersionFileLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
         var total = new TextBox { Text = (_settings.VersionTotalLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
         var autoUpdate = new CheckBox { Content = "Проверять обновления при запуске", IsChecked = _settings.AutoCheckUpdates };
+        var largeFiles = new ComboBox
+        {
+            ItemsSource = new[] { "Спрашивать", "Открывать как лог", "Открывать в редакторе" },
+            SelectedIndex = _settings.OpenLargeFilesAsLog switch { true => 1, false => 2, null => 0 }
+        };
         var body = DialogPanel(new TextBlock { Text = "Символов в заголовке пустой вкладки (1–200)" }, limit,
             new TextBlock { Text = "Лимит снимка файла, МиБ" }, perFile,
-            new TextBlock { Text = "Общий лимит снимков, МиБ" }, total, autoUpdate);
+            new TextBlock { Text = "Общий лимит снимков, МиБ" }, total,
+            new TextBlock { Text = "Файлы больше 100 МиБ" }, largeFiles, autoUpdate);
         var dialog = Dialog("Настройки", body);
         var warning = new TextBlock { Foreground = FocusTheme.Danger };
         body.Children.Add(warning);
@@ -376,7 +382,8 @@ public partial class MainWindow
                     UntitledTabLimit = length,
                     VersionFileLimitBytes = fileLimit * 1024 * 1024,
                     VersionTotalLimitBytes = totalLimit * 1024 * 1024,
-                    AutoCheckUpdates = autoUpdate.IsChecked == true
+                    AutoCheckUpdates = autoUpdate.IsChecked == true,
+                    OpenLargeFilesAsLog = largeFiles.SelectedIndex switch { 1 => true, 2 => false, _ => null }
                 };
                 _titleLimit = length;
                 dialog.Close(true);
@@ -389,12 +396,19 @@ public partial class MainWindow
 
         if (await dialog.ShowDialog<bool>(this))
         {
-            await _storage.SaveSettingsAsync(_settings, _lifetime.Token);
+            await SaveWorkspaceSettingsAsync(_settings);
             foreach (var tab in _tabs.Values)
             {
                 UpdateTab(tab);
             }
         }
+    }
+
+    private async Task SaveWorkspaceSettingsAsync(UserSettings settings)
+    {
+        await _storage.SaveSettingsAsync(settings, _lifetime.Token);
+        foreach (var window in _workspace.Windows)
+            window._settings = window._settings with { OpenLargeFilesAsLog = settings.OpenLargeFilesAsLog };
     }
 
     private async Task<string?> PromptAsync(string title, string description, string initial = "")

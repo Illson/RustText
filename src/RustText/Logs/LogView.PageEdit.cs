@@ -20,9 +20,10 @@ internal sealed partial class LogView
     private PageEdit? _pageEdit;
     private CancellationTokenSource? _pageWrite;
 
-    internal Func<string, string, long, CancellationToken, Task>? CommitDraftPage { get; set; }
+    internal Func<string, string, long, int, bool, CancellationToken, Task>? CommitDraftPage { get; set; }
     internal Action<string>? PreserveExternalPageEdit { get; init; }
     public bool HasPendingEdit => _pageWrite is not null || (_pageEdit is { } edit && _logText.Text != edit.Original);
+    private bool PageNavigationBlocked => EditsPagesByDefault ? HasPendingEdit : _pageEdit is not null;
 
     private Control BuildPageModeControls()
     {
@@ -36,9 +37,18 @@ internal sealed partial class LogView
         _cancelPageButton.Click += async (_, _) =>
         {
             if (_pageWrite is { } write) write.Cancel();
+            else if (EditsPagesByDefault && _pageEdit is { } edit)
+            {
+                SetPageText(edit.Original, _logText.CaretIndex);
+                SetStatus(PageEditHint);
+            }
             else await EndPageEditAsync();
         };
-        _logText.TextChanged += (_, _) => UpdatePageModeControls();
+        _logText.TextChanged += (_, _) =>
+        {
+            if (EditsPagesByDefault) RefreshButtons();
+            else UpdatePageModeControls();
+        };
         panel.Children.Add(_readModeLabel);
         panel.Children.Add(_editPageButton);
         panel.Children.Add(_savePageButton);
@@ -48,7 +58,7 @@ internal sealed partial class LogView
 
     private async Task TogglePageEditAsync()
     {
-        if (_closed || _busy || _page is not { } page) return;
+        if (_closed || _busy || EditsPagesByDefault || _page is not { } page) return;
         if (_pageEdit is not null)
         {
             if (HasPendingEdit) SetStatus("Сохраните или отмените правки страницы.");
@@ -60,33 +70,15 @@ internal sealed partial class LogView
         RefreshButtons();
         try
         {
-            var from = page.Rows.Count == 0 ? _reader.PreambleLength : page.Rows[0].StartOffset;
-            var to = Math.Max(from, page.NextOffset);
-            var encoding = DocumentFiles.GetEncoding(_reader.Encoding);
-            var expected = _fileStamp;
+            var reader = _reader;
+            var stamp = _fileStamp;
             var token = _closing.Token;
-            var text = await Task.Run(() =>
-            {
-                using var source = LogDataReader.Open(_path);
-                if (ReadFileStamp(_path, source) != expected) throw ChangedSincePageRead();
-                source.Position = from;
-                var bytes = new byte[checked((int)(to - from))];
-                source.ReadExactly(bytes);
-                token.ThrowIfCancellationRequested();
-                if (ReadFileStamp(_path, source) != expected) throw ChangedSincePageRead();
-                return encoding.GetString(bytes);
-            }, token);
+            var edit = await Task.Run(() => ReadPageEdit(page, reader, stamp, token), token);
             if (_closed) return;
-
-            _pageEdit = new(from, to, text, encoding, expected);
             _searchPanel.IsVisible = false;
-            _lineGutterScrollViewer.IsVisible = false;
-            _logText.MaxLength = EditCharacterLimit;
-            _logText.Text = text;
-            _logText.IsReadOnly = false;
-            _logText.CaretIndex = 0;
-            _logText.Focus();
-            SetStatus("Редактирование текущей страницы. Ctrl+S сохраняет изменения.");
+            BeginPageEdit(edit);
+            FocusPageEditor();
+            SetStatus(PageEditHint);
         }
         catch (OperationCanceledException) when (_closed) { }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or DecoderFallbackException)
@@ -100,15 +92,67 @@ internal sealed partial class LogView
         }
     }
 
+    private const string PageEditHint = "Ctrl+S сохраняет изменения страницы. Перед переходом сохраните или отмените правки.";
+
+    private PageEdit ReadPageEdit(LogPage page, LogDataReader reader, FileStamp expected, CancellationToken token,
+        long? caretOffset = null)
+    {
+        var from = page.Rows.Count == 0
+            ? Math.Min(expected.Length, Math.Max(reader.PreambleLength, page.StartOffset))
+            : page.Rows[0].StartOffset;
+        var to = Math.Max(from, page.NextOffset);
+        var encoding = DocumentFiles.GetEncoding(reader.Encoding);
+        using var source = LogDataReader.Open(_path);
+        if (ReadFileStamp(_path, source) != expected) throw ChangedSincePageRead();
+        source.Position = from;
+        var bytes = new byte[checked((int)(to - from))];
+        source.ReadExactly(bytes);
+        token.ThrowIfCancellationRequested();
+        if (ReadFileStamp(_path, source) != expected) throw ChangedSincePageRead();
+        var caret = caretOffset is { } offset
+            ? encoding.GetCharCount(bytes.AsSpan(0, (int)Math.Clamp(offset - from, 0, bytes.Length))) : 0;
+        return new(from, to, encoding.GetString(bytes), encoding, expected, caret);
+    }
+
+    private void BeginPageEdit(PageEdit edit)
+    {
+        _pageEdit = edit;
+        _lineGutterScrollViewer.IsVisible = false;
+        _logText.MaxLength = Math.Max(EditCharacterLimit, edit.Original.Length);
+        SetPageText(edit.Original, edit.InitialCaret);
+        _logText.IsReadOnly = false;
+    }
+
+    private void SetPageText(string text, int caret)
+    {
+        // Undo must never bring the previous page's text into the new page.
+        _logText.IsUndoEnabled = false;
+        _logText.Text = text;
+        _logText.IsUndoEnabled = true;
+        RestorePageCaret(caret, focus: false);
+    }
+
+    internal void FocusPageEditor() => _logText.Focus();
+
+    internal void RestorePageCaret(int caret, bool focus)
+    {
+        if (_pageEdit is null || _closed) return;
+        _logText.CaretIndex = Math.Clamp(caret, 0, _logText.Text?.Length ?? 0);
+        _logText.SelectionStart = _logText.SelectionEnd = _logText.CaretIndex;
+        if (focus) FocusPageEditor();
+    }
+
     public async Task SavePageEditAsync()
     {
-        if (_closed || _pageWrite is not null || _pageEdit is not { } edit || _logText.Text is not { } text) return;
+        if (_closed || _busy || _pageWrite is not null || _pageEdit is not { } edit || _logText.Text is not { } text) return;
         if (text == edit.Original)
         {
-            await EndPageEditAsync();
+            if (!EditsPagesByDefault) await EndPageEditAsync();
             return;
         }
 
+        var caret = _logText.CaretIndex;
+        var hadFocus = IsKeyboardFocusWithin;
         using var write = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
         _pageWrite = write;
         _logText.IsReadOnly = true;
@@ -123,7 +167,7 @@ internal sealed partial class LogView
             {
                 write.Token.ThrowIfCancellationRequested();
                 var publish = CommitDraftPage ?? throw new IOException("Черновик недоступен для сохранения.");
-                await publish(temporary, hash!, edit.From, write.Token);
+                await publish(temporary, hash!, edit.From, caret, hadFocus, write.Token);
             }
             else
             {
@@ -153,6 +197,7 @@ internal sealed partial class LogView
         if (committedInPlace && !_closed)
         {
             await EndPageEditAsync();
+            if (EditsPagesByDefault) RestorePageCaret(caret, hadFocus && IsKeyboardFocusWithin);
             StartIndexIfNeeded();
             LoadMinimapSamples();
             SetStatus("Страница сохранена.");
@@ -236,16 +281,19 @@ internal sealed partial class LogView
     {
         var editing = _pageEdit is not null;
         var saving = _pageWrite is not null;
-        _readModeLabel.Text = editing ? "РЕДАКТИРОВАНИЕ" : "ТОЛЬКО ЧТЕНИЕ";
+        _readModeLabel.Text = _isDraft ? "РЕДАКТИРОВАНИЕ ЧЕРНОВИКА"
+            : EditsPagesByDefault || editing ? "РЕДАКТИРОВАНИЕ" : "ТОЛЬКО ЧТЕНИЕ";
+        _editPageButton.IsVisible = !EditsPagesByDefault;
         _editPageButton.Content = editing ? "Только чтение" : "Редактировать";
         _editPageButton.IsEnabled = !_closed && !_busy && !saving && _page is not null;
         _savePageButton.IsVisible = editing && !saving;
-        _savePageButton.IsEnabled = HasPendingEdit;
+        _savePageButton.IsEnabled = !_busy && HasPendingEdit;
         _cancelPageButton.IsVisible = editing;
+        _cancelPageButton.IsEnabled = saving || !_busy && (!EditsPagesByDefault || HasPendingEdit);
         _cancelPageButton.Content = saving ? "Остановить сохранение" : "Отменить";
     }
 
     private static IOException ChangedSincePageRead() => new("Файл изменился на диске. Обновите страницу перед сохранением.");
 
-    private sealed record PageEdit(long From, long To, string Original, Encoding Encoding, FileStamp Stamp);
+    private sealed record PageEdit(long From, long To, string Original, Encoding Encoding, FileStamp Stamp, int InitialCaret);
 }

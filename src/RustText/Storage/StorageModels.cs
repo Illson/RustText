@@ -18,6 +18,7 @@ internal sealed record SessionState(List<SessionTab> Tabs, List<SessionTab>? Clo
 public sealed record UserSettings(int UntitledTabLimit = 10, int RecentFileLimit = 100, int VersionFileLimitBytes = 5 * 1024 * 1024, long VersionTotalLimitBytes = 100L * 1024 * 1024)
 {
     public bool AutoCheckUpdates { get; init; }
+    public bool? OpenLargeFilesAsLog { get; init; }
 }
 internal sealed record RecentFileEntry(
     string Path,

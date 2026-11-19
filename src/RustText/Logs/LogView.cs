@@ -36,7 +36,8 @@ internal sealed record LogTabState(
     LogFileIdentity? Identity = null,
     long Size = 0,
     LogFingerprint? Fingerprint = null,
-    bool? IndexOptIn = null);
+    bool? IndexOptIn = null,
+    bool EditPages = false);
 
 internal sealed record LogFileIdentity(ulong Volume, int[] Id);
 internal sealed record LogSystemTime(long SecsSinceEpoch, uint NanosSinceEpoch);
@@ -185,11 +186,12 @@ internal sealed partial class LogView : UserControl, IDisposable
     private long?[] _displaySourceLineNumbers = [];
 
     public LogView(string path, TextEncodingKind? encoding = null, LogTabState? state = null,
-        string? draftName = null, long? draftLineCount = null)
+        string? draftName = null, long? draftLineCount = null, long? initialDraftCaretBytes = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         _path = System.IO.Path.GetFullPath(path);
         _isDraft = draftName is not null;
+        EditsPagesByDefault = _isDraft || state?.EditPages == true;
         _savedLineCount = draftLineCount;
         _encodingOverride = encoding ?? state?.Encoding;
         _file = LogDataReader.Open(_path);
@@ -204,7 +206,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             ? savedHiddenOffset
             : _reader.AlignToNextLine(savedHiddenOffset);
         _wordWrap = state?.WordWrap ?? false;
-        _followEnd = !_isDraft && restoreState?.FollowEnd == true;
+        _followEnd = !EditsPagesByDefault && restoreState?.FollowEnd == true;
         _autoRefresh = !_isDraft && restoreState?.AutoRefresh != false;
         _indexOptIn = restoreState?.IndexOptIn == true;
         _indexPaused = restoreState?.IndexPaused == true
@@ -226,7 +228,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         _logText.LayoutUpdated += OnLogTextLayoutUpdated;
         RefreshButtons();
 
-        InitialPageLoad = LoadPageAsync(Math.Max(_hiddenOffset, restoreState?.Offset ?? _hiddenOffset), saveHistory: false, allowFollowEnd: bookmarkRestorable);
+        InitialPageLoad = LoadPageAsync(Math.Max(_hiddenOffset, restoreState?.Offset ?? _hiddenOffset), saveHistory: false,
+            allowFollowEnd: bookmarkRestorable, editCaretBytes: initialDraftCaretBytes);
         LoadMinimapSamples();
         StartIndexIfNeeded();
         if (_autoRefresh)
@@ -239,6 +242,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     public string Path => _path;
     public Task InitialPageLoad { get; }
+    public bool EditsPagesByDefault { get; }
     public bool IsReadOnly => _pageEdit is null;
     public bool AutoRefresh => _autoRefresh;
     public long? CurrentOffset => _page?.StartOffset;
@@ -274,7 +278,8 @@ internal sealed partial class LogView : UserControl, IDisposable
             _bookmarkIdentity,
             _fileStamp.Length,
             _bookmarkFingerprint,
-            _indexOptIn);
+            _indexOptIn,
+            EditsPagesByDefault);
     }
 
     private bool CanRestoreBookmark(LogTabState? state)
@@ -412,7 +417,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             await LoadPageAsync(hit.Offset, saveHistory: true, allowFollowEnd: false);
         }
 
-        if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && end > FirstDisplayedLineLength())
+        if (!EditsPagesByDefault && _page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && end > FirstDisplayedLineLength())
         {
             await LoadPageAsync(hit.Offset, saveHistory: false, allowFollowEnd: false,
                 maxPageBytes: MaximumSearchLineBytes);
@@ -440,6 +445,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     public void FocusSearch()
     {
+        if (PageNavigationBlocked) return;
         _searchPanel.IsVisible = true;
         _searchBox.Focus();
     }
@@ -757,7 +763,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async void OnLogKeyDown(object? sender, KeyEventArgs e)
     {
-        if (_closed || _pageEdit is not null) return;
+        if (_closed || PageNavigationBlocked) return;
 
         if (e.Key == Key.Home && e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
@@ -838,9 +844,9 @@ internal sealed partial class LogView : UserControl, IDisposable
     }
 
     private async Task LoadPageAsync(long offset, bool saveHistory = true, bool allowFollowEnd = true,
-        int maxPageBytes = LogDataReader.DefaultPageBytes, bool scrollToEnd = false)
+        int maxPageBytes = LogDataReader.DefaultPageBytes, bool scrollToEnd = false, long? editCaretBytes = null)
     {
-        if (_closed || _busy || _pageEdit is not null)
+        if (_closed || _busy || PageNavigationBlocked)
         {
             return;
         }
@@ -853,14 +859,26 @@ internal sealed partial class LogView : UserControl, IDisposable
             var requested = Math.Clamp(offset, _hiddenOffset, _file.Length);
             var reader = _reader;
             var token = _closing.Token;
-            var (page, firstLine) = await Task.Run(() =>
+            var stamp = _fileStamp;
+            var (page, firstLine, edit) = await Task.Run(() =>
             {
-                var result = reader.ReadPage(requested, maxPageBytes: maxPageBytes, cancellationToken: token);
+                var pageBytes = EditsPagesByDefault ? LogDataReader.DefaultPageBytes : maxPageBytes;
+                var start = editCaretBytes is { } byteCaret ? reader.GetPreviousPageOffset(byteCaret, token) : requested;
+                var result = reader.ReadPage(start, maxPageBytes: pageBytes, cancellationToken: token);
+                if (editCaretBytes is { } target && target > result.NextOffset)
+                    result = reader.ReadPage(target, maxPageBytes: pageBytes, cancellationToken: token);
                 var first = result.Rows.Count > 0 ? FindLineNumber(reader, result.Rows[0].StartOffset, token) : null;
-                return (result, first);
+                var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token, editCaretBytes) : null;
+                return (result, first, pageEdit);
             }, token);
             if (_closed)
             {
+                return;
+            }
+            // The user can still type in the current page while the next one is being read.
+            if (EditsPagesByDefault && HasPendingEdit)
+            {
+                SetStatus(PageEditHint);
                 return;
             }
 
@@ -875,23 +893,33 @@ internal sealed partial class LogView : UserControl, IDisposable
 
             _page = page;
             UpdateMinimapViewport();
-            var displayText = new StringBuilder();
-            for (var index = 0; index < page.Rows.Count; index++)
+            if (edit is not null)
             {
-                var row = page.Rows[index];
-                if (index > 0 && !row.StartsWithinLine)
-                {
-                    displayText.Append(Environment.NewLine);
-                }
-                displayText.Append(row.Text);
+                BeginPageEdit(edit);
             }
-            _logText.Text = displayText.ToString();
-            Dispatcher.UIThread.Post(() =>
+            else
             {
-                if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
-                scroll.Offset = new Vector(scroll.Offset.X,
-                    scrollToEnd ? Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height) : 0);
-            }, DispatcherPriority.Loaded);
+                var displayText = new StringBuilder();
+                for (var index = 0; index < page.Rows.Count; index++)
+                {
+                    var row = page.Rows[index];
+                    if (index > 0 && !row.StartsWithinLine)
+                    {
+                        displayText.Append(Environment.NewLine);
+                    }
+                    displayText.Append(row.Text);
+                }
+                _logText.Text = displayText.ToString();
+            }
+            if (editCaretBytes is null)
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
+                    scroll.Offset = new Vector(scroll.Offset.X,
+                        scrollToEnd ? Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height) : 0);
+                }, DispatcherPriority.Loaded);
+            }
             var rows = page.Rows.Count == 0 ? 0 : 1 + page.Rows.Skip(1).Count(row => !row.StartsWithinLine);
             _countLabel.Text = $"Строк на странице · {LineNumbers.Format(rows)}";
             if (_isDraft && !_indexOptIn && (KnownLineCount is null || (firstLine is null && rows > 0)))
@@ -903,7 +931,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             UpdatePageLineNumbers(page, firstLine);
             SetStatus(page.WasTruncated
                 ? "Файл изменился во время чтения. Позиция пересчитана по открытому файлу."
-                : string.Empty);
+                : EditsPagesByDefault ? PageEditHint : string.Empty);
             if (allowFollowEnd && _followEnd && page.HasMore)
             {
                 loadFollowEnd = true;
@@ -923,7 +951,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
         {
-            SetStatus($"Не удалось прочитать лог. {error.Message}");
+            SetStatus($"Не удалось загрузить страницу. {error.Message}");
         }
         finally
         {
@@ -943,7 +971,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task NavigateMinimapToRatioAsync(double ratio)
     {
-        if (_pageEdit is not null) return;
+        if (PageNavigationBlocked) return;
         ratio = Math.Clamp(ratio, 0, 1);
         if (_busy)
         {
@@ -994,7 +1022,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task NavigatePreviousAsync(bool scrollToEnd = false, bool adjacent = false)
     {
-        if (_page is not { } page || _busy || _closed)
+        if (_page is not { } page || _busy || _closed || PageNavigationBlocked)
         {
             return;
         }
@@ -1972,7 +2000,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private void RefreshButtons()
     {
         if (_closed) return;
-        var enabled = !_busy && _pageEdit is null;
+        var enabled = !_busy && !PageNavigationBlocked;
         UpdatePageModeControls();
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
         _followButton.Content = _followEnd ? "К концу" : "Следовать";
@@ -1998,16 +2026,16 @@ internal sealed partial class LogView : UserControl, IDisposable
         _endButton.IsEnabled = enabled && _page is not null;
         _middleButton.IsEnabled = enabled && _file.Length > 0;
         _pauseButton.IsVisible = !_isDraft;
-        _followButton.IsVisible = !_isDraft && _pageEdit is null;
-        _liveLabel.IsVisible = !_isDraft && _pageEdit is null;
+        _followButton.IsVisible = !EditsPagesByDefault && _pageEdit is null;
+        _liveLabel.IsVisible = !_isDraft && (_pageEdit is null || EditsPagesByDefault);
         _pauseButton.IsEnabled = !_closed;
         _followButton.IsEnabled = !_closed;
         _indexButton.IsEnabled = !_closed && (!_indexBuilding || _indexCancellation is not null);
         _cancelIndexButton.IsVisible = _indexBuilding;
         _cancelTrimButton.IsVisible = _trimCancellation is not null;
-        _hideButton.IsVisible = !_isDraft;
-        _revealButton.IsVisible = !_isDraft;
-        _trimButton.IsVisible = !_isDraft;
+        _hideButton.IsVisible = !EditsPagesByDefault;
+        _revealButton.IsVisible = !EditsPagesByDefault;
+        _trimButton.IsVisible = !EditsPagesByDefault;
         _hideButton.IsEnabled = enabled && _page?.Rows.Count > 0;
         _revealButton.IsEnabled = enabled && _hiddenOffset > 0;
         _trimButton.IsEnabled = enabled && _hiddenOffset > 0;

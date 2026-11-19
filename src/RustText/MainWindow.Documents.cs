@@ -20,8 +20,9 @@ namespace RustText.Demo;
 
 public partial class MainWindow
 {
-    private const long LogThreshold = 50L * 1024 * 1024;
+    private const long LargeFilePromptBytes = 100L * 1024 * 1024;
     private const int MaxEditorCharacters = 8 * 1024 * 1024;
+    // AvaloniaEdit keeps a document line object for every line, including empty ones.
     private const int MaxEditorLines = 50_000;
     private const int MaxEditorLineLength = 64 * 1024;
     private static readonly FilePickerFileType TextFiles = new("Текст и логи") { Patterns = ["*.txt", "*.log", "*.json", "*.xml"] };
@@ -77,7 +78,7 @@ public partial class MainWindow
         {
             try
             {
-                var request = PrepareOpen(path, asLog, encoding);
+                if (await PrepareOpenAsync(path, asLog, encoding) is not { } request) continue;
                 last = request.Tab;
                 if (request.IsNew || encoding is not null) pending.Add(request);
             }
@@ -90,15 +91,18 @@ public partial class MainWindow
             await GuardAsync(() => LoadOpenRequestAsync(request, encoding));
     }
 
-    private async Task<WorkTab> OpenPathAsync(string path, bool asLog = false, TextEncodingKind? encoding = null)
+    private Task<WorkTab?> OpenPathAsync(string path, bool asLog = false, TextEncodingKind? encoding = null) =>
+        OpenSinglePathAsync(path, asLog, encoding, editPages: false);
+
+    private async Task<WorkTab?> OpenSinglePathAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages)
     {
-        var request = PrepareOpen(path, asLog, encoding);
+        if (await PrepareOpenAsync(path, asLog, encoding, editPages) is not { } request) return null;
         Select(request.Tab);
         await LoadOpenRequestAsync(request, encoding);
         return request.Tab;
     }
 
-    private OpenRequest PrepareOpen(string path, bool asLog, TextEncodingKind? encoding)
+    private async Task<OpenRequest?> PrepareOpenAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages = false)
     {
         var fullPath = Path.GetFullPath(path);
         var file = new FileInfo(fullPath);
@@ -107,21 +111,64 @@ public partial class MainWindow
             throw new FileNotFoundException($"Файл не найден. {fullPath}", fullPath);
         }
 
-        var useLog = asLog || file.Length > LogThreshold;
-        var existing = _tabs.Values.FirstOrDefault(tab => SamePath(tab.Path, fullPath) && tab.IsLog == useLog);
+        var mode = editPages ? FileOpenMode.PagedEditor : asLog ? FileOpenMode.Log : FileOpenMode.Editor;
+        if (mode == FileOpenMode.Editor)
+        {
+            var existingEditor = _tabs.Values.FirstOrDefault(tab =>
+                tab.Recovery is null && tab.Deferred?.DraftOffset is null && SamePath(tab.Path, fullPath) && !tab.OpensAsLog);
+            if (existingEditor is not null) return new(existingEditor, false, mode);
+
+            if (file.Length > LargeFilePromptBytes)
+            {
+                var useLog = _settings.OpenLargeFilesAsLog ?? await ChooseLargeFileModeAsync(file);
+                if (useLog is null || _closed || _closing) return null;
+                mode = useLog == true ? FileOpenMode.Log : FileOpenMode.PagedEditor;
+            }
+            else if (file.Length > DocumentFiles.MaximumDocumentBytes)
+            {
+                mode = FileOpenMode.PagedEditor;
+            }
+        }
+
+        var existing = _tabs.Values.FirstOrDefault(tab =>
+            tab.Recovery is null && tab.Deferred?.DraftOffset is null
+            && SamePath(tab.Path, fullPath) && tab.OpensAsLog == (mode == FileOpenMode.Log));
         if (existing is not null)
         {
-            return new(existing, false, useLog);
+            return new(existing, false, mode);
         }
 
         var tab = AddTab(select: false);
         tab.Path = fullPath;
         tab.Encoding = encoding ?? TextEncodingKind.Utf8;
-        tab.PendingLog = useLog;
+        tab.PendingFileOpenMode = mode;
         tab.Loading = true;
         tab.Item.Content = new TextBlock { Text = "Ожидание загрузки…", Margin = new Thickness(18) };
         UpdateTab(tab);
-        return new(tab, true, useLog);
+        return new(tab, true, mode);
+    }
+
+    private async Task<bool?> ChooseLargeFileModeAsync(FileInfo file)
+    {
+        var remember = new CheckBox { Content = "Запомнить выбор" };
+        var body = DialogPanel(
+            new TextBlock { Text = $"{file.Name} · {file.Length / (1024d * 1024d):0.##} МиБ", TextWrapping = TextWrapping.Wrap },
+            new TextBlock
+            {
+                Text = "Для просмотра и поиска рекомендуем режим лога. В редакторе файл можно менять по страницам.",
+                TextWrapping = TextWrapping.Wrap
+            }, remember);
+        var dialog = Dialog("Открытие большого файла", body, 530);
+        var cancel = FocusButton(Button("Отмена", () => dialog.Close()));
+        cancel.IsCancel = true;
+        body.Children.Add(Row(
+            FocusButton(Button("Открыть как лог", () => dialog.Close(true)), primary: true),
+            FocusButton(Button("Открыть в редакторе", () => dialog.Close(false))), cancel));
+
+        var useLog = await dialog.ShowDialog<bool?>(this);
+        if (useLog is not null && remember.IsChecked == true)
+            await SaveWorkspaceSettingsAsync(_settings with { OpenLargeFilesAsLog = useLog });
+        return useLog;
     }
 
     private async Task LoadOpenRequestAsync(OpenRequest request, TextEncodingKind? encoding)
@@ -136,9 +183,12 @@ public partial class MainWindow
         }
         try
         {
-            if (request.AsLog)
+            if (request.Mode != FileOpenMode.Editor)
             {
-                AttachLog(tab, tab.Path!, encoding);
+                AttachLog(tab, tab.Path!, encoding, new LogTabState(encoding, WordWrap: _wordWrap,
+                    AutoRefresh: tab.AutoRefresh, EditPages: request.Mode == FileOpenMode.PagedEditor));
+                if (request.Mode == FileOpenMode.PagedEditor && ReferenceEquals(tab, ActiveTab))
+                    RestorePagedEditorCaret(tab, tab.Log!, null, focus: true);
             }
             else
             {
@@ -154,12 +204,14 @@ public partial class MainWindow
         }
         finally
         {
-            tab.PendingLog = false;
+            tab.PendingFileOpenMode = null;
             tab.Loading = false;
         }
     }
 
-    private sealed record OpenRequest(WorkTab Tab, bool IsNew, bool AsLog);
+    private enum FileOpenMode { Editor, PagedEditor, Log }
+
+    private sealed record OpenRequest(WorkTab Tab, bool IsNew, FileOpenMode Mode);
 
     private async Task LoadFileAsync(WorkTab tab, TextEncodingKind? encoding = null)
     {
@@ -210,6 +262,7 @@ public partial class MainWindow
         _ = DetachEditor(tab);
         tab.Log?.Close();
         tab.Log = null;
+        tab.Recovery = null;
         tab.OpeningPage = false;
         tab.LastWorked = DateTimeOffset.Now;
         var editor = new TextEditor
@@ -334,7 +387,7 @@ public partial class MainWindow
             e.Handled = true;
             StartLargeDraftPersistence(tab,
                 () => new ReplacingTextReader(snapshot.CreateReader(), start, length, insertion), editor, insertion,
-                start, length);
+                start);
         };
         editor.TextArea.TextEntering += textEnteringHandler;
         EventHandler<CanExecuteRoutedEventArgs> pasteCanExecute = (_, e) =>
@@ -402,7 +455,7 @@ public partial class MainWindow
                 var snapshot = editor.Document.CreateSnapshot();
                 StartLargeDraftPersistence(tab,
                     () => new ReplacingTextReader(snapshot.CreateReader(), start, length, text), editor, text,
-                    start, length);
+                    start);
                 return;
             }
 
@@ -435,9 +488,10 @@ public partial class MainWindow
         Func<TextReader> openReader,
         TextEditor? editor,
         string insertedText,
-        int selectionStart = 0,
-        int selectionLength = 0)
+        int selectionStart = 0)
     {
+        var hadFocus = editor?.TextArea.IsKeyboardFocusWithin == true;
+        var prefix = editor is not null && selectionStart > 0 ? editor.Document.GetText(0, selectionStart) : "";
         using var titleReader = openReader();
         var title = ReadUntitledTitle(titleReader);
         var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
@@ -470,6 +524,9 @@ public partial class MainWindow
                     UntitledName = title
                 };
                 saved = await _storage.SaveClosedDraftAsync(saved, openReader, source.Token);
+                long? byteCaret = editor is null
+                    ? null
+                    : await Task.Run(() => (long)Encoding.UTF8.GetByteCount(prefix) + Encoding.UTF8.GetByteCount(insertedText), source.Token);
                 saved = saved with { DraftOffset = 0 };
                 source.Token.ThrowIfCancellationRequested();
                 if (!_tabs.ContainsKey(tab.Id) || !ReferenceEquals(tab.Editor, editor))
@@ -485,7 +542,7 @@ public partial class MainWindow
                 {
                     _ = DetachEditor(tab);
                 }
-                AttachDraftPreview(tab, saved, _storage.GetDraftPath(saved)!);
+                AttachPagedDraftEditor(tab, saved, _storage.GetDraftPath(saved)!, focus: hadFocus, byteCaret: byteCaret);
                 UpdateTab(tab);
             }
             finally
@@ -718,9 +775,11 @@ public partial class MainWindow
         LogTabState? state = null,
         string? draftName = null,
         long? draftLineCount = null,
-        bool preserveEditorChanges = false)
+        bool preserveEditorChanges = false,
+        long? initialDraftCaretBytes = null)
     {
-        var log = new LogView(path, encoding, state ?? new LogTabState(AutoRefresh: tab.AutoRefresh), draftName, draftLineCount)
+        var log = new LogView(path, encoding, state ?? new LogTabState(AutoRefresh: tab.AutoRefresh), draftName, draftLineCount,
+            initialDraftCaretBytes)
         {
             WordWrap = state?.WordWrap ?? _wordWrap,
             PreserveExternalPageEdit = text => PreservePageDraft(tab, text)
@@ -1067,7 +1126,9 @@ public partial class MainWindow
         else
         {
             SetStatus(tab.Log?.StatusText is { Length: > 0 } message ? message : tab.Path);
-            FormatText.Text = tab.IsLog ? "Просмотр лога" : "";
+            FormatText.Text = tab.Log is { EditsPagesByDefault: true }
+                ? tab.Recovery is null ? "Редактор по страницам" : "Редактирование черновика"
+                : tab.IsLog ? "Просмотр лога" : "";
         }
     }
 
@@ -1165,8 +1226,11 @@ public partial class MainWindow
         public string? Path { get; set; }
         public TextEditor? Editor { get; set; }
         public LogView? Log { get; set; }
-        public bool IsLog => PendingLog || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
-        public bool PendingLog { get; set; }
+        public bool IsLog => PendingFileOpenMode is FileOpenMode.PagedEditor or FileOpenMode.Log
+            || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
+        public bool OpensAsLog => IsLog && !(Log?.EditsPagesByDefault
+            ?? Deferred?.Log?.EditPages ?? PendingFileOpenMode == FileOpenMode.PagedEditor);
+        public FileOpenMode? PendingFileOpenMode { get; set; }
         public SessionTab? Deferred { get => field; set { field = value; RefreshHeaderMark(); } }
         public SessionTab? Recovery { get; set; }
         public TextEncodingKind Encoding { get; set; }

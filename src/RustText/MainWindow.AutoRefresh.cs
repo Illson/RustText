@@ -1,5 +1,6 @@
 using Avalonia.Threading;
 using AvaloniaEdit.Document;
+using RustText.Demo.Logs;
 
 namespace RustText.Demo;
 
@@ -47,7 +48,7 @@ public partial class MainWindow
             var file = new FileInfo(watch.Path);
             if (!file.Exists) throw new FileNotFoundException("Файл отсутствует на диске.", watch.Path);
             LoadedDocument? loaded = null;
-            if (file.Length <= LogThreshold)
+            if (file.Length <= DocumentFiles.MaximumDocumentBytes)
             {
                 // Keep accepting edits until the disk snapshot is ready.
                 loaded = await DocumentFiles.ReadAsync(watch.Path, tab.Encoding, watch.Token);
@@ -64,8 +65,9 @@ public partial class MainWindow
             var dirty = tab.Dirty;
             if (loaded is null || IsOversizedEditorText(loaded.Text))
             {
-                // Construct the log before moving the draft: opening the replacement can fail.
-                AttachLog(tab, watch.Path, tab.Encoding, preserveEditorChanges: dirty);
+                // Open the paged editor before moving the draft: opening the replacement can fail.
+                AttachLog(tab, watch.Path, tab.Encoding, new LogTabState(tab.Encoding, WordWrap: _wordWrap,
+                    AutoRefresh: tab.AutoRefresh, EditPages: true), preserveEditorChanges: dirty);
                 if (dirty) tab.Log?.ReportPreservedExternalEdit();
             }
             else

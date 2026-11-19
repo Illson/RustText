@@ -34,7 +34,7 @@ internal sealed partial class LogView
 
     private void OnLogScrollbarScrolled(object? sender, ScrollEventArgs e)
     {
-        if (_closed || _busy || _pageEdit is not null || _page is not { } page) return;
+        if (_closed || _busy || PageNavigationBlocked || _page is not { } page) return;
         if (e.ScrollEventType == ScrollEventType.ThumbTrack)
         {
             _draggedPage = page;
@@ -57,7 +57,7 @@ internal sealed partial class LogView
 
     private LogPage? PageAtScrollBoundary(bool forward)
     {
-        if (_closed || _busy || _pageEdit is not null || _page is not { } page || _logScrollViewer is not { } scroll)
+        if (_closed || _busy || PageNavigationBlocked || _page is not { } page || _logScrollViewer is not { } scroll)
             return null;
 
         var edge = Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height);

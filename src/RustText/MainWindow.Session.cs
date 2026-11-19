@@ -201,8 +201,9 @@ public partial class MainWindow
         }
 
         var editor = tab.Editor;
-        var log = tab.Log?.CaptureState() ?? (tab.PendingLog
-            ? new LogTabState(tab.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh) : null);
+        var log = tab.Log?.CaptureState() ?? (tab.PendingFileOpenMode is FileOpenMode.PagedEditor or FileOpenMode.Log
+            ? new LogTabState(tab.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh,
+                EditPages: tab.PendingFileOpenMode == FileOpenMode.PagedEditor) : null);
         var caret = editor?.CaretOffset ?? 0;
         var selection = editor is null ? default : MultiCaretEditing.Primary(editor.TextArea);
         var selectionStart = selection.Start;
@@ -407,14 +408,14 @@ public partial class MainWindow
                 var draftPath = _storage.GetDraftPath(saved);
                 if (draftPath is not null && new FileInfo(draftPath).Length > LineGeneratorThreshold)
                 {
-                    AttachDraftPreview(tab, saved, draftPath);
+                    AttachPagedDraftEditor(tab, saved, draftPath);
                 }
                 else
                 {
                     var draft = await _storage.LoadDraftAsync(saved, token) ?? "";
-                    if (draftPath is not null && IsOversizedDraft(draft))
+                    if (draftPath is not null && IsOversizedEditorText(draft))
                     {
-                        AttachDraftPreview(tab, saved, draftPath);
+                        AttachPagedDraftEditor(tab, saved, draftPath);
                     }
                     else
                     {
@@ -450,8 +451,9 @@ public partial class MainWindow
             }
             else if (saved.Path is { } path)
             {
-                if (new FileInfo(path).Length > LogThreshold)
-                    AttachLog(tab, path, saved.Encoding);
+                if (new FileInfo(path).Length > DocumentFiles.MaximumDocumentBytes)
+                    AttachLog(tab, path, saved.Encoding,
+                        new LogTabState(saved.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh, EditPages: true));
                 else
                     AttachLoadedEditor(tab, await DocumentFiles.ReadAsync(path, saved.Encoding, token));
             }
@@ -535,45 +537,25 @@ public partial class MainWindow
         return index;
     }
 
-    private static bool IsOversizedDraft(string text)
-    {
-        var lines = 1;
-        var current = 0;
-        foreach (var character in text)
-        {
-            if (character == '\n')
-            {
-                current = 0;
-                if (++lines > 50_000)
-                {
-                    return true;
-                }
-            }
-            else if (++current > 64 * 1024)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private void AttachDraftPreview(WorkTab tab, SessionTab saved, string draftPath)
+    private void AttachPagedDraftEditor(WorkTab tab, SessionTab saved, string draftPath, int? pageCaret = null,
+        bool focus = false, long? byteCaret = null)
     {
         var name = saved.Path is { } path ? Path.GetFileName(path) : saved.UntitledName;
         var state = new LogTabState(TextEncodingKind.Utf8, saved.DraftOffset ?? 0, WordWrap: _wordWrap);
         var lineCount = saved.DraftOffset.HasValue ? saved.LineCount : null;
-        AttachLog(tab, draftPath, TextEncodingKind.Utf8, state, name ?? "Черновик", lineCount);
+        AttachLog(tab, draftPath, TextEncodingKind.Utf8, state, name ?? "Черновик", lineCount, initialDraftCaretBytes: byteCaret);
         tab.Recovery = saved;
         UpdateTab(tab);
-        tab.Log!.CommitDraftPage = async (temporary, hash, offset, token) =>
+        var editor = tab.Log!;
+        if (pageCaret is not null || focus) RestorePagedEditorCaret(tab, editor, pageCaret, focus);
+        editor.CommitDraftPage = async (temporary, hash, offset, caret, focusEditor, token) =>
         {
             await _workspace.SaveGate.WaitAsync(token);
             try
             {
                 var current = tab.Recovery ?? throw new IOException("Черновик недоступен.");
                 var edited = _storage.AdoptEditedDraft(current, temporary, hash) with { DraftOffset = offset, LineCount = null };
-                AttachDraftPreview(tab, edited, _storage.GetDraftPath(edited)!);
+                AttachPagedDraftEditor(tab, edited, _storage.GetDraftPath(edited)!, caret, focusEditor);
             }
             finally { _workspace.SaveGate.Release(); }
             await GuardAsync(async () =>
@@ -583,6 +565,17 @@ public partial class MainWindow
             });
         };
     }
+
+    private void RestorePagedEditorCaret(WorkTab tab, LogView editor, int? pageCaret, bool focus) => Run(async () =>
+    {
+        await editor.InitialPageLoad;
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            if (!ReferenceEquals(tab.Log, editor)) return;
+            if (pageCaret is { } caret) editor.RestorePageCaret(caret, focus: false);
+            if (focus && ReferenceEquals(tab, ActiveTab)) editor.FocusPageEditor();
+        }, DispatcherPriority.Loaded);
+    });
 
     private async Task SaveCurrentDraftCopyAsync(WorkTab tab)
     {
@@ -648,8 +641,9 @@ public partial class MainWindow
         if (saved is { Path: { } path, DraftRef: null })
         {
             var isLog = saved.Log is not null || saved.LogOffset is not null;
+            var opensAsLog = isLog && saved.Log?.EditPages != true;
             var existing = _tabs.Values.FirstOrDefault(tab =>
-                tab.IsLog == isLog && tab.Recovery is null && SamePath(tab.Path, path));
+                tab.OpensAsLog == opensAsLog && tab.Recovery is null && SamePath(tab.Path, path));
             if (existing is not null)
             {
                 if (existing.Loading)
@@ -658,7 +652,7 @@ public partial class MainWindow
                     return;
                 }
 
-                if (!existing.Dirty && existing.Deferred?.DraftRef is null)
+                if (!existing.Dirty && existing.Log?.HasPendingEdit != true && existing.Deferred?.DraftRef is null)
                 {
                     if (existing.Deferred is not null)
                     {
@@ -669,7 +663,7 @@ public partial class MainWindow
                     {
                         RestoreSavedLog(existing, path, saved);
                     }
-                    else
+                    else if (existing.Editor is not null)
                     {
                         await RestoreClosedEditorAsync(existing, path, saved);
                     }
@@ -754,17 +748,21 @@ public partial class MainWindow
     private async Task OpenRecentAsync(RecentFileEntry entry)
     {
         var encoding = entry.Log is { } bookmark ? bookmark.Encoding : entry.Encoding;
-        var tab = await OpenPathAsync(entry.Path, entry.ViewAsLog, encoding);
-        if (_tabs.TryGetValue(tab.Id, out var current) && ReferenceEquals(current, tab))
+        var tab = entry.Log?.EditPages == true
+            ? await OpenSinglePathAsync(entry.Path, asLog: false, encoding, editPages: true)
+            : await OpenPathAsync(entry.Path, entry.ViewAsLog, encoding);
+        if (tab is not null && _tabs.TryGetValue(tab.Id, out var current) && ReferenceEquals(current, tab))
         {
-            if (tab.Log is not null)
+            if (tab.Log is { } paged)
             {
-                if (tab.Log.HasPendingEdit || tab.Recovery is not null) return;
+                if (paged.HasPendingEdit || tab.Recovery is not null || entry.Log is null && entry.LogOffset is null) return;
                 var log = (entry.Log ?? new LogTabState(entry.Encoding, entry.LogOffset ?? 0)) with
                 {
-                    WordWrap = _wordWrap
+                    WordWrap = _wordWrap,
+                    EditPages = paged.EditsPagesByDefault
                 };
                 AttachLog(tab, entry.Path, encoding, log);
+                if (paged.EditsPagesByDefault) RestorePagedEditorCaret(tab, tab.Log!, null, focus: true);
             }
             else if (tab.Editor is not null)
             {

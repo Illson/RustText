@@ -88,7 +88,7 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
-    public Task RestoredFileAboveEditorLimitUsesLogView() => HeadlessTests.RunAsync(async profile =>
+    public Task RestoredFileAboveEditorLimitStaysEditableByPage() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "growing.txt");
         await File.WriteAllTextAsync(path, "first row\n");
@@ -101,9 +101,142 @@ public sealed class WorkspaceTests
             var log = Assert.IsType<LogView>(Property(ActiveTab(window), "Log"));
             await log.InitialPageLoad;
             Assert.StartsWith("first row", LogText(log).Text);
+            Assert.False(log.IsReadOnly);
         }
         finally { await CloseAsync(window); }
     });
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public Task LargeFileChoiceIsAppliedAndRememberedAcrossRestart(bool openAsLog) =>
+        HeadlessTests.RunAsync(async profile =>
+    {
+        var first = Path.Combine(profile, "first-large.txt");
+        var second = Path.Combine(profile, "second-large.txt");
+        await CreateFileWithLengthAsync(first, 128L * 1024 * 1024);
+        await CreateFileWithLengthAsync(second, 128L * 1024 * 1024);
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            var open = CallAsync(window, "OpenPathAsync", first, false, null);
+            var dialog = await WaitForLargeFileDialogAsync(window);
+            Assert.Empty(Tabs(window));
+            dialog.GetVisualDescendants().OfType<CheckBox>().Single().IsChecked = true;
+            Click(DialogButton(dialog, openAsLog ? "Открыть как лог" : "Открыть в редакторе"));
+            await open;
+            var log = Read<LogView>(ActiveTab(window), "Log");
+            await log.InitialPageLoad;
+            Assert.Equal(openAsLog, log.IsReadOnly);
+            Assert.Equal(openAsLog, (await StorageService.OpenForTesting(profile).LoadSettingsAsync()).OpenLargeFilesAsLog);
+        }
+        finally { await CloseAsync(window); }
+
+        window = await OpenWorkspaceAsync();
+        try
+        {
+            var restored = Read<LogView>(ActiveTab(window), "Log");
+            await restored.InitialPageLoad;
+            Assert.Equal(openAsLog, restored.IsReadOnly);
+            await CallAsync(window, "OpenPathAsync", second, false, null).WaitAsync(TimeSpan.FromSeconds(5));
+            var remembered = Read<LogView>(ActiveTab(window), "Log");
+            await remembered.InitialPageLoad;
+            Assert.Empty(window.OwnedWindows);
+            Assert.Equal(second, remembered.Path);
+            Assert.Equal(openAsLog, remembered.IsReadOnly);
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
+    public Task LargeFilePromptIsStrictlyAboveThresholdAndCancelDoesNotRemember() => HeadlessTests.RunAsync(async profile =>
+    {
+        const long threshold = 100L * 1024 * 1024;
+        var exact = Path.Combine(profile, "exact.txt");
+        var above = Path.Combine(profile, "above.txt");
+        await CreateFileWithLengthAsync(exact, threshold);
+        await CreateFileWithLengthAsync(above, threshold + 1);
+
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenPathAsync", exact, false, null).WaitAsync(TimeSpan.FromSeconds(5));
+            var editor = Read<LogView>(ActiveTab(window), "Log");
+            await editor.InitialPageLoad;
+            Assert.False(editor.IsReadOnly);
+            Assert.Empty(window.OwnedWindows);
+
+            var open = CallAsync(window, "OpenPathAsync", above, false, null);
+            var dialog = await WaitForLargeFileDialogAsync(window);
+            dialog.GetVisualDescendants().OfType<CheckBox>().Single().IsChecked = true;
+            Click(DialogButton(dialog, "Отмена"));
+            await open;
+            Assert.Single(Tabs(window));
+            Assert.Null((await StorageService.OpenForTesting(profile).LoadSettingsAsync()).OpenLargeFilesAsLog);
+
+            await CallAsync(window, "OpenPathAsync", above, true, null).WaitAsync(TimeSpan.FromSeconds(5));
+            var log = Read<LogView>(ActiveTab(window), "Log");
+            await log.InitialPageLoad;
+            Assert.True(log.IsReadOnly);
+            Assert.Empty(window.OwnedWindows);
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
+    public Task SavingNamedPagedEditorKeepsItEditableAndPreservesTheRestOfTheFile() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "paged-editor.txt");
+        var original = string.Concat(Enumerable.Repeat("строка\r\n", 200));
+        await File.WriteAllTextAsync(path, original);
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenSinglePathAsync", path, false, null, true);
+            var tab = ActiveTab(window);
+            var editor = Read<LogView>(tab, "Log");
+            await editor.InitialPageLoad;
+            var page = LogText(editor);
+            Assert.False(page.IsReadOnly);
+            await CallAsync(window, "RememberClosedAsync", tab, false, false);
+            var closed = Assert.Single((List<SessionTab>)Field(window, "_closedTabs"));
+            page.Text = "правка\r\n" + page.Text!["строка\r\n".Length..];
+            await CallAsync(window, "RestoreClosedAsync", closed);
+            Assert.Same(editor, Read<LogView>(ActiveTab(window), "Log"));
+            Assert.True(editor.HasPendingEdit);
+            await editor.SavePageEditAsync();
+            Assert.False(page.IsReadOnly);
+            Assert.False(editor.HasPendingEdit);
+            Assert.StartsWith("правка\r\n", page.Text);
+            Assert.Equal("правка\r\n" + original["строка\r\n".Length..], await File.ReadAllTextAsync(path));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    private static async Task CreateFileWithLengthAsync(string path, long length)
+    {
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat("test row\n", 200)));
+        using var file = File.OpenWrite(path);
+        file.SetLength(length);
+    }
+
+    private static async Task<Window> WaitForLargeFileDialogAsync(MainWindow window)
+    {
+        await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any(dialog =>
+            dialog.GetVisualDescendants().OfType<CheckBox>().Any(box => Equals(box.Content, "Запомнить выбор"))));
+        return Assert.Single(window.OwnedWindows);
+    }
+
+    private static Button DialogButton(Window dialog, string caption) =>
+        Assert.Single(dialog.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, caption));
 
     [Fact]
     public Task IdleLogReusesCheckpointUntilBookmarkChanges() => HeadlessTests.RunAsync(async profile =>
