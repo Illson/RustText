@@ -768,6 +768,129 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task CtrlXWithoutSelectionCutsTheCurrentLineAndUndoRestoresIt()
+        => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "cut-line.txt");
+        await File.WriteAllTextAsync(path, "alpha\nbeta\nlast");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.TextArea.Focus();
+            editor.CaretOffset = 7;
+            Press(window, Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            await HeadlessTests.WaitForAsync(() => editor.Text == "alpha\nlast");
+
+            var clipboard = await window.Clipboard!.TryGetDataAsync();
+            Assert.NotNull(clipboard);
+            Assert.Equal("beta" + Environment.NewLine, await clipboard.TryGetTextAsync());
+            editor.Undo();
+            Assert.Equal("alpha\nbeta\nlast", editor.Text);
+
+            editor.CaretOffset = editor.Text.Length;
+            Press(window, Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            await HeadlessTests.WaitForAsync(() => editor.Text == "alpha\nbeta");
+            clipboard = await window.Clipboard.TryGetDataAsync();
+            Assert.NotNull(clipboard);
+            Assert.Equal("last", await clipboard.TryGetTextAsync());
+            editor.Undo();
+            Assert.Equal("alpha\nbeta\nlast", editor.Text);
+
+            editor.Text = "alpha\nbeta\n";
+            editor.CaretOffset = editor.Text.Length;
+            Press(window, Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            Assert.Equal("alpha\nbeta\n", editor.Text);
+            clipboard = await window.Clipboard.TryGetDataAsync();
+            Assert.NotNull(clipboard);
+            Assert.Equal("last", await clipboard.TryGetTextAsync());
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task CtrlXWithMultipleEmptyCaretsDoesNotCutOnlyThePrimaryLine()
+        => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "multi-caret-cut.txt");
+        await File.WriteAllTextAsync(path, "first\nsecond\nthird");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.TextArea.Focus();
+            editor.CaretOffset = 1;
+            Press(window, Key.Down, RawInputModifiers.Control | RawInputModifiers.Alt, PhysicalKey.ArrowDown);
+            Assert.Equal(2, MultiCaretEditing.Count(editor.TextArea));
+            Press(window, Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            Assert.Equal("first\nsecond\nthird", editor.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task CtrlWheelChangesEditorFontSizeAndPlainWheelDoesNot()
+        => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "zoom.txt");
+        await File.WriteAllTextAsync(path, string.Join('\n', Enumerable.Range(1, 200).Select(index => $"line {index}")));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var original = editor.FontSize;
+            var point = editor.TranslatePoint(new Point(12, 12), window)!.Value;
+
+            window.MouseWheel(point, new Vector(0, 1));
+            Assert.Equal(original, editor.FontSize);
+            window.MouseWheel(point, new Vector(0, 1), RawInputModifiers.Control);
+            Assert.Equal(original + 1, editor.FontSize);
+            window.MouseWheel(point, new Vector(0, -1), RawInputModifiers.Control);
+            Assert.Equal(original, editor.FontSize);
+
+            var openLog = (Task?)Invoke(window, "OpenPathAsync", path, true, null);
+            Assert.NotNull(openLog);
+            await openLog;
+            await HeadlessTests.WaitForAsync(() => Property(ActiveTab(window), "Log") is LogView);
+            var log = Assert.IsType<LogView>(Property(ActiveTab(window), "Log"));
+            var logText = Assert.Single(log.GetVisualDescendants().OfType<TextBox>(), textBox => textBox.IsReadOnly);
+            var logPoint = logText.TranslatePoint(new Point(12, 12), window)!.Value;
+            var logOriginal = logText.FontSize;
+            window.MouseWheel(logPoint, new Vector(0, 1), RawInputModifiers.Control);
+            Assert.Equal(logOriginal + 1, logText.FontSize);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task FirstPointerDragSelectsText()
+        => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "pointer-selection.txt");
+        await File.WriteAllTextAsync(path, "first selection\nsecond line");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var view = editor.TextArea.TextView;
+            view.EnsureVisualLines();
+            var start = view.TranslatePoint(
+                view.GetVisualPosition(new TextViewPosition(1, 1), VisualYPosition.LineMiddle) - view.ScrollOffset,
+                window)!.Value;
+            var end = view.TranslatePoint(
+                view.GetVisualPosition(new TextViewPosition(1, 6), VisualYPosition.LineMiddle) - view.ScrollOffset,
+                window)!.Value;
+
+            window.MouseDown(start, MouseButton.Left);
+            window.MouseMove(end, RawInputModifiers.LeftMouseButton);
+            window.MouseUp(end, MouseButton.Left);
+
+            Assert.Equal("first", editor.SelectedText);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task AltClickTogglesCaretsAndUpAddsOneOnThePreviousLine() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "mouse.txt");

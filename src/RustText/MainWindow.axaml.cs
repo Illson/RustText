@@ -78,6 +78,7 @@ public partial class MainWindow : Window
         AddHandler(DragDrop.DropEvent, OnWindowDrop);
         AddHandler(PointerMovedEvent, TabDragMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
         AddHandler(PointerReleasedEvent, TabDragReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerWheelChangedEvent, OnWorkspacePointerWheel, RoutingStrategies.Tunnel, handledEventsToo: true);
         PointerCaptureLost += TabDragCaptureLost;
         AddHandler(KeyDownEvent, OnWorkspaceKey, RoutingStrategies.Tunnel);
         Closing += WindowClosing;

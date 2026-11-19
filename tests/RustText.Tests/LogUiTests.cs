@@ -115,6 +115,65 @@ public sealed class LogUiTests
     });
 
     [Fact]
+    public Task LogSelectionCanBeCopiedWhileReadOnly() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "select.log");
+        await File.WriteAllTextAsync(path, "first selection line\nsecond line");
+        var window = new MainWindow();
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+        await InvokeTask(window, "OpenPathAsync", path, true, null);
+        var log = (LogView)ActiveLog(window);
+        try
+        {
+            var text = (TextBox)Field(log, "_logText");
+            Assert.True(text.IsReadOnly);
+            await HeadlessTests.WaitForAsync(() => text.Text?.StartsWith("first", StringComparison.Ordinal) == true);
+            text.Focus();
+            text.SelectionStart = 0;
+            text.SelectionEnd = 5;
+            Assert.Equal("first", SelectedText(text));
+            window.KeyPress(Key.C, RawInputModifiers.Control, PhysicalKey.C, "c");
+            window.KeyRelease(Key.C, RawInputModifiers.Control, PhysicalKey.C, "c");
+            var clipboard = await window.Clipboard!.TryGetDataAsync();
+            Assert.NotNull(clipboard);
+            Assert.Equal("first", await clipboard.TryGetTextAsync());
+            Assert.True(text.IsReadOnly);
+        }
+        finally { await CloseMainWindowAsync(window); }
+    });
+
+    [Fact]
+    public Task CtrlXInWritablePageEditorCutsTheLastLineAndUndoRestoresIt() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "cut-page.log");
+        await File.WriteAllTextAsync(path, "first\r\nlast");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var text = (TextBox)Field(log, "_logText");
+            text.CaretIndex = text.Text!.Length;
+            window.KeyPress(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            window.KeyRelease(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            Assert.Equal("first\r\nlast", text.Text);
+
+            await InvokeTask(log, "TogglePageEditAsync");
+            Assert.False(log.IsReadOnly);
+            text.CaretIndex = text.Text!.Length;
+            window.KeyPress(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            window.KeyRelease(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            await HeadlessTests.WaitForAsync(() => text.Text == "first");
+            var clipboard = await window.Clipboard!.TryGetDataAsync();
+            Assert.NotNull(clipboard);
+            Assert.Equal("last", await clipboard.TryGetTextAsync());
+
+            text.Undo();
+            Assert.Equal("first\r\nlast", text.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public Task EditingADraftPublishesANewRecoveryAndCopyLivesInTabMenu() => HeadlessTests.RunAsync(async profile =>
     {
         const string row = "draft row\n";
