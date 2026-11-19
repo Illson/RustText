@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/RustText/RustText.csproj" />
+  <Project Path="tests/RustText.Tests/RustText.Tests.csproj" />
+</Solution>
