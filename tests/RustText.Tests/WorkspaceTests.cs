@@ -1503,6 +1503,37 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task ClosedDraftDocumentAndUndoBufferCanBeGarbageCollected() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "keep this one open");
+            var (tab, document) = CreateCollectibleDraft(window);
+            await CallAsync(window, "CloseTabAsync", tab);
+            Assert.Single((List<SessionTab>)Field(window, "_closedTabs"));
+            await HeadlessTests.WaitForAsync(() =>
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                return !document.IsAlive;
+            });
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (object Tab, WeakReference Document) CreateCollectibleDraft(MainWindow window)
+    {
+        Invoke(window, "NewTab", string.Concat(Enumerable.Repeat("a bounded log message\n", 6000)));
+        var tab = ActiveTab(window);
+        var document = Read<TextEditor>(tab, "Editor").Document;
+        document.Insert(5, string.Concat(Enumerable.Repeat("more text\n", 5000)));
+        return (tab, new WeakReference(document));
+    }
+
+    [Fact]
     public Task ClosedDraftsPastTheConfiguredAgeArchiveWhileOpenDraftsStayLive() => HeadlessTests.RunAsync(async profile =>
     {
         var window = await OpenWorkspaceAsync();
