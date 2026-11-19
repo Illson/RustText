@@ -95,6 +95,7 @@ internal sealed partial class LogView
         var filtered = _levelFilter.SelectedLevels != LogLevel.All;
         if (filtered) ShowFilteredViewport();
         else ShowSourceViewport();
+        RefreshButtons();
         _filterReading?.Cancel();
         if (!filtered)
         {

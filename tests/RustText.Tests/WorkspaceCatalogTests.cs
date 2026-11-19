@@ -43,6 +43,38 @@ public sealed class WorkspaceCatalogTests
     }
 
     [Fact]
+    public async Task RestoreDeletedWorkspaceWithNameCollisionUsesUniqueNameAndPreservesBothDirectories()
+    {
+        using var folder = new TempDirectory();
+        var store = new WorkspaceCatalogStore(folder.Path);
+        var originalName = new string('Ж', 80);
+        var deletedWorkspace = await store.CreateAsync(originalName);
+        var deletedDirectory = store.GetWorkspaceDirectory(deletedWorkspace.Id);
+        Directory.CreateDirectory(deletedDirectory);
+        await File.WriteAllTextAsync(Path.Combine(deletedDirectory, "saved.txt"), "deleted workspace data");
+        await store.DeleteAsync(deletedWorkspace.Id, retentionLimit: -1);
+
+        var activeWorkspace = await store.CreateAsync(originalName);
+        var activeDirectory = store.GetWorkspaceDirectory(activeWorkspace.Id);
+        Directory.CreateDirectory(activeDirectory);
+        await File.WriteAllTextAsync(Path.Combine(activeDirectory, "saved.txt"), "active workspace data");
+
+        var restored = await store.RestoreDeletedAsync(deletedWorkspace.Id);
+        var restoredWorkspace = Assert.Single(restored.Workspaces, workspace => workspace.Id == deletedWorkspace.Id);
+        var expectedName = new string('Ж', 80 - " (восстановлено)".Length) + " (восстановлено)";
+        Assert.Equal(expectedName, restoredWorkspace.Name);
+        Assert.InRange(restoredWorkspace.Name.Length, 1, 80);
+        Assert.Equal(originalName, Assert.Single(restored.Workspaces, workspace => workspace.Id == activeWorkspace.Id).Name);
+        Assert.Equal("deleted workspace data", await File.ReadAllTextAsync(Path.Combine(deletedDirectory, "saved.txt")));
+        Assert.Equal("active workspace data", await File.ReadAllTextAsync(Path.Combine(activeDirectory, "saved.txt")));
+        Assert.Empty(restored.DeletedWorkspaces ?? []);
+
+        var reloaded = await new WorkspaceCatalogStore(folder.Path).LoadAsync();
+        Assert.Equal(expectedName, Assert.Single(reloaded.Workspaces, workspace => workspace.Id == deletedWorkspace.Id).Name);
+        Assert.Empty(reloaded.DeletedWorkspaces ?? []);
+    }
+
+    [Fact]
     public async Task RetentionLimitRemovesExpiredWorkspaceData()
     {
         var profile = CreateProfile();

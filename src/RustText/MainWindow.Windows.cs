@@ -44,6 +44,16 @@ public partial class MainWindow
             return storage;
         }
 
+        public void ShareSession(string workspaceId, string windowId, StorageService storage) =>
+            SessionStores[(workspaceId, windowId)] = storage;
+
+        public void ReleaseSharedSession(string workspaceId, string windowId, StorageService storage)
+        {
+            var key = (workspaceId, windowId);
+            if (SessionStores.TryGetValue(key, out var existing) && ReferenceEquals(existing, storage))
+                SessionStores.Remove(key);
+        }
+
         public List<SessionTab> GetClosedTabs(StorageService storage)
         {
             var key = StorageCacheKey(storage);
@@ -119,14 +129,20 @@ public partial class MainWindow
     {
         if (!CanDragTab(tab)) return;
 
+        var workspaceId = _workspaceId;
         var windowId = "window:" + Guid.NewGuid().ToString("N");
-        var window = new MainWindow([], _workspace, _workspaceId, windowId,
-            shareDefaultSession: _workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId, restoreWorkspace: false)
+        var sharedStorage = workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId ? null : SessionStorage;
+        if (sharedStorage is not null)
+            _workspace.ShareSession(workspaceId, windowId, sharedStorage);
+        var window = new MainWindow([], _workspace, workspaceId, windowId,
+            shareDefaultSession: workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId, restoreWorkspace: false)
         {
             _fontSize = _fontSize,
             _wordWrap = _wordWrap,
             _recent = _recent
         };
+        if (sharedStorage is not null)
+            window.Closed += (_, _) => _workspace.ReleaseSharedSession(workspaceId, windowId, sharedStorage);
         if (dropPoint is { } point)
         {
             window.WindowStartupLocation = WindowStartupLocation.Manual;

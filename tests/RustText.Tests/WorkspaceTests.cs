@@ -26,6 +26,117 @@ namespace RustText.Tests;
 [Collection(HeadlessCollection.Name)]
 public sealed class WorkspaceTests
 {
+    [Fact]
+    public Task ClosingDetachedWindowRestoresInputInRemainingWindow() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "remaining.txt");
+        await File.WriteAllTextAsync(path, "original");
+        var primary = await OpenWorkspaceAsync(path);
+        MainWindow? detached = null;
+        try
+        {
+            var remainingEditor = Read<TextEditor>(ActiveTab(primary), "Editor");
+            Invoke(primary, "NewTab", "detached tab");
+            Invoke(primary, "OpenTabWindow", ActiveTab(primary), null);
+            detached = Assert.IsType<MainWindow>(primary.FindOtherWindow());
+
+            await CloseAsync(detached);
+
+            Assert.True(primary.IsVisible);
+            Assert.True(remainingEditor.IsEnabled);
+        }
+        finally
+        {
+            if (detached is { IsVisible: true }) await CloseAsync(detached);
+            if (primary.IsVisible) await CloseAsync(primary);
+        }
+    });
+
+    [Fact]
+    public Task ClosingWindowReleasesCachedEditorsAndLogPages() => HeadlessTests.RunAsync(async profile =>
+    {
+        var textPath = Path.Combine(profile, "cached.txt");
+        var logPath = Path.Combine(profile, "cached.log");
+        await File.WriteAllTextAsync(textPath, "editor to release");
+        await File.WriteAllTextAsync(logPath, "[INFO] cached log");
+        var catalog = new WorkspaceCatalogStore(profile);
+        var target = await catalog.CreateAsync("Other workspace");
+        var window = await OpenWorkspaceAsync(textPath);
+        try
+        {
+            var editorTab = ActiveTab(window);
+            Assert.NotNull(Property(editorTab, "FileWatch"));
+            await CallAsync(window, "OpenSinglePathAsync", logPath, true, null, false);
+            var logTab = ActiveTab(window);
+            var log = Read<LogView>(logTab, "Log");
+            await log.InitialPageLoad;
+            await CallAsync(window, "SwitchWorkspaceAsync", target.Id);
+            Assert.Empty(Tabs(window));
+            Assert.NotNull(Property(editorTab, "Editor"));
+
+            await CloseAsync(window);
+
+            Assert.Null(Property(editorTab, "Editor"));
+            Assert.Null(Property(editorTab, "FileWatch"));
+            Assert.Empty((IEnumerable<Action>)Property(editorTab, "EditorSubscriptions")!);
+            Assert.Null(Property(logTab, "Log"));
+            Assert.Empty(LogText(log).Text!);
+        }
+        finally { if (window.IsVisible) await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ExternalReloadKeepsRecoveryDraftInTheCachedWorkspace() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "external.txt");
+        await File.WriteAllTextAsync(path, "original");
+        var catalog = new WorkspaceCatalogStore(profile);
+        var target = await catalog.CreateAsync("Independent workspace");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var source = ActiveTab(window);
+            Read<TextEditor>(source, "Editor").Document.Insert(0, "local ");
+            await SwitchKeepingDraftsAsync(window, target.Id);
+            await File.WriteAllTextAsync(path, "external");
+            await HeadlessTests.WaitForAsync(() => Read<TextEditor>(source, "Editor").Text == "external");
+
+            Assert.Empty(Tabs(window));
+            await CallAsync(window, "SwitchWorkspaceAsync", WorkspaceCatalogStore.DefaultWorkspaceId);
+            var recovery = Assert.Single(Tabs(window), tab => Property(tab, "Path") is null);
+            Assert.Equal("local original", Read<TextEditor>(recovery, "Editor").Text);
+            Assert.Equal("external", Read<TextEditor>(source, "Editor").Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task OversizedPageRecoveryUsesItsCachedWorkspaceStorage() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "external.log");
+        await File.WriteAllTextAsync(path, "original page");
+        var catalog = new WorkspaceCatalogStore(profile);
+        var target = await catalog.CreateAsync("Independent workspace");
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenSinglePathAsync", path, true, null, false);
+            var source = ActiveTab(window);
+            await Read<LogView>(source, "Log").InitialPageLoad;
+            await CallAsync(window, "SwitchWorkspaceAsync", target.Id);
+            var recoveredText = new string('x', 64 * 1024 + 1);
+            Invoke(window, "PreservePageDraft", source, recoveredText);
+
+            Assert.Empty(Tabs(window));
+            await CallAsync(window, "SwitchWorkspaceAsync", WorkspaceCatalogStore.DefaultWorkspaceId);
+            var recovery = Assert.Single(Tabs(window), tab => Property(tab, "Path") is null);
+            await HeadlessTests.WaitForAsync(() => Property(recovery, "Recovery") is SessionTab);
+            var saved = Read<SessionTab>(recovery, "Recovery");
+            Assert.Equal(recoveredText, await StorageService.OpenForTesting(profile).LoadDraftAsync(saved));
+        }
+        finally { await CloseAsync(window); }
+    });
+
     [Theory]
     [InlineData(false, 21d, false, 21d)]
     [InlineData(null, null, true, 15d)]

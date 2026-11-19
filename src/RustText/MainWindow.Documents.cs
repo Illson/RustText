@@ -608,6 +608,8 @@ public partial class MainWindow
         string insertedText,
         int selectionStart = 0)
     {
+        var (tabs, storage) = FindTabWorkspace(tab)
+            ?? throw new InvalidOperationException("Рабочее пространство черновика закрыто.");
         var hadFocus = editor?.TextArea.IsKeyboardFocusWithin == true;
         var prefix = editor is not null && selectionStart > 0 ? editor.Document.GetText(0, selectionStart) : "";
         using var titleReader = openReader();
@@ -632,6 +634,7 @@ public partial class MainWindow
             {
                 await _workspace.SaveGate.WaitAsync(source.Token);
                 saveGateAcquired = true;
+                if (!ReferenceEquals(FindTabWorkspace(tab)?.Tabs, tabs)) return;
                 var saved = CaptureTab(tab) with
                 {
                     SelectionStart = selectionStart + insertedText.Length,
@@ -641,13 +644,13 @@ public partial class MainWindow
                     DraftOffset = 0,
                     UntitledName = title
                 };
-                saved = await SessionStorage.SaveClosedDraftAsync(saved, openReader, source.Token);
+                saved = await storage.SaveClosedDraftAsync(saved, openReader, source.Token);
                 long? byteCaret = editor is null
                     ? null
                     : await Task.Run(() => (long)Encoding.UTF8.GetByteCount(prefix) + Encoding.UTF8.GetByteCount(insertedText), source.Token);
                 saved = saved with { DraftOffset = 0 };
                 source.Token.ThrowIfCancellationRequested();
-                if (!_tabs.ContainsKey(tab.Id) || !ReferenceEquals(tab.Editor, editor))
+                if (!ReferenceEquals(FindTabWorkspace(tab)?.Tabs, tabs) || !ReferenceEquals(tab.Editor, editor))
                 {
                     return;
                 }
@@ -660,7 +663,7 @@ public partial class MainWindow
                 {
                     _ = DetachEditor(tab);
                 }
-                AttachPagedDraftEditor(tab, saved, SessionStorage.GetDraftPath(saved)!, focus: hadFocus, byteCaret: byteCaret);
+                AttachPagedDraftEditor(tab, saved, storage.GetDraftPath(saved)!, focus: hadFocus, byteCaret: byteCaret);
                 UpdateTab(tab);
             }
             finally

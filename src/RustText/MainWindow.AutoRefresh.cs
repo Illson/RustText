@@ -125,7 +125,7 @@ public partial class MainWindow
     {
         if (IsOversizedEditorText(text))
         {
-            var draft = AddTab(group: RecoveryGroup(source), select: false);
+            var draft = AddRecoveryTab(source);
             StartLargeDraftPersistence(draft, () => new StringReader(text), null, text);
         }
         else
@@ -135,13 +135,28 @@ public partial class MainWindow
         }
     }
 
-    // Watchers continue to run in cached workspaces. Make their recovery drafts visible.
-    private Group RecoveryGroup(WorkTab source) =>
-        _tabs.TryGetValue(source.Id, out var visible) && ReferenceEquals(source, visible) ? source.Group : _active;
+    private (Dictionary<long, WorkTab> Tabs, StorageService Storage)? FindTabWorkspace(WorkTab tab)
+    {
+        if (_tabs.TryGetValue(tab.Id, out var active) && ReferenceEquals(active, tab))
+            return (_tabs, SessionStorage);
+        foreach (var view in _workspaceViews.Values)
+        {
+            if (view.Tabs.TryGetValue(tab.Id, out var cached) && ReferenceEquals(cached, tab))
+                return (view.Tabs, view.Storage);
+        }
+        return null;
+    }
+
+    private WorkTab AddRecoveryTab(WorkTab source)
+    {
+        var (tabs, _) = FindTabWorkspace(source)
+            ?? throw new InvalidOperationException("Рабочее пространство исходной вкладки закрыто.");
+        return AddTabTo(tabs, source.Group, id: null, select: false);
+    }
 
     private WorkTab AddExternalDraft(WorkTab source, TextDocument document)
     {
-        var draft = AddTab(group: RecoveryGroup(source), select: false);
+        var draft = AddRecoveryTab(source);
         draft.Encoding = source.Encoding;
         draft.Ending = source.Ending;
         draft.OriginalEndings = source.OriginalEndings;

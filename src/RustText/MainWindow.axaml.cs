@@ -10,6 +10,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using AvaloniaEdit;
 using RustText.Demo.Logs;
 
 namespace RustText.Demo;
@@ -236,12 +237,14 @@ public partial class MainWindow : Window
         return group;
     }
 
-    private WorkTab AddTab(long? id = null, Group? group = null, bool select = true)
+    private WorkTab AddTab(long? id = null, Group? group = null, bool select = true) =>
+        AddTabTo(_tabs, group ?? _active, id, select);
+
+    private WorkTab AddTabTo(Dictionary<long, WorkTab> tabs, Group group, long? id, bool select)
     {
-        group ??= _active;
         var tab = new WorkTab(id ?? NextId(), group);
         _workspace.NextId = Math.Max(_workspace.NextId, tab.Id);
-        _tabs.Add(tab.Id, tab);
+        tabs.Add(tab.Id, tab);
         var label = new TextBlock
         {
             Text = "Без имени", TextTrimming = TextTrimming.CharacterEllipsis,
@@ -635,24 +638,31 @@ public partial class MainWindow : Window
         }
 
         _closing = true;
-        var closingEditors = _workspace.Windows
-            .Where(window => !window._closed && window._workspaceId == _workspaceId && window.SharesSessionWith(this))
-            .SelectMany(window => window._tabs.Values)
-            .Select(tab => tab.Editor)
-            .Where(editor => editor is not null)
-            .Select(editor => (Editor: editor!, WasEnabled: editor!.IsEnabled))
-            .ToArray();
-        foreach (var (editor, _) in closingEditors) editor.IsEnabled = false;
         CancelTabDrag();
         _checkpoint.Stop();
         var closeGateHeld = false;
+        var switchGateHeld = false;
         var sessionSaved = false;
+        (TextEditor Editor, bool WasEnabled)[] closingEditors = [];
         WorkTab[] archivedTabs = [];
         var priorHistory = new List<(int Index, SessionTab Tab)>();
         try
         {
             await _workspace.CloseGate.WaitAsync();
             closeGateHeld = true;
+            await _workspace.WorkspaceSwitchGate.WaitAsync();
+            switchGateHeld = true;
+            if (_closed) return;
+
+            closingEditors = _workspace.Windows
+                .Where(window => !window._closed && window.SharesSessionWith(this))
+                .SelectMany(window => window._tabs.Values)
+                .Select(tab => tab.Editor)
+                .OfType<TextEditor>()
+                .Select(editor => (editor, editor.IsEnabled))
+                .ToArray();
+            foreach (var (editor, _) in closingEditors) editor.IsEnabled = false;
+
             if (FindOtherSessionWindow() is not null)
             {
                 archivedTabs = TabsInVisualOrder().ToArray();
@@ -703,12 +713,9 @@ public partial class MainWindow : Window
         }
         finally
         {
-            if (closeGateHeld)
-            {
-                _workspace.CloseGate.Release();
-            }
-            if (!_closed)
-                foreach (var (editor, wasEnabled) in closingEditors) editor.IsEnabled = wasEnabled;
+            foreach (var (editor, wasEnabled) in closingEditors) editor.IsEnabled = wasEnabled;
+            if (switchGateHeld) _workspace.WorkspaceSwitchGate.Release();
+            if (closeGateHeld) _workspace.CloseGate.Release();
         }
     }
 
@@ -719,12 +726,17 @@ public partial class MainWindow : Window
         _idleUnloadTimer?.Stop();
         _lifetime.Cancel();
         _searchCancellation?.Cancel();
-        foreach (var tab in _tabs.Values)
-        {
-            tab.LoadCancellation?.Cancel();
-            tab.Log?.Close();
-            DetachEditor(tab);
-        }
+        foreach (var tab in LoadedWorkspaceTabs().ToArray()) ReleaseTabContents(tab);
+        _workspaceViews.Clear();
+    }
+
+    private void ReleaseTabContents(WorkTab tab)
+    {
+        tab.LoadCancellation?.Cancel();
+        tab.Log?.Close();
+        tab.Log = null;
+        DetachEditor(tab);
+        tab.Item.Content = null;
     }
 
     private void HomeClicked(object? sender, RoutedEventArgs e) => Run(ShowHomeAsync);

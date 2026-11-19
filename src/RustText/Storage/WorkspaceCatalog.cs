@@ -244,6 +244,9 @@ internal sealed class WorkspaceCatalogStore
             var deleted = (catalog.DeletedWorkspaces ?? []).FirstOrDefault(item => item.Workspace.Id == id)
                 ?? throw new KeyNotFoundException("Удалённое рабочее пространство не найдено.");
             if (catalog.Workspaces.Any(item => item.Id == id)) throw new InvalidOperationException("Рабочее пространство уже восстановлено.");
+            var restoredWorkspace = deleted.Workspace;
+            if (catalog.Workspaces.Any(item => string.Equals(item.Name, restoredWorkspace.Name, StringComparison.OrdinalIgnoreCase)))
+                restoredWorkspace = restoredWorkspace with { Name = CreateUniqueRestoredName(catalog, restoredWorkspace.Name) };
 
             var archiveRoot = Path.Combine(_directory, "deleted");
             var archivedPath = string.IsNullOrEmpty(deleted.DirectoryName)
@@ -266,7 +269,7 @@ internal sealed class WorkspaceCatalogStore
             {
                 var updated = catalog with
                 {
-                    Workspaces = [.. catalog.Workspaces, deleted.Workspace],
+                    Workspaces = [.. catalog.Workspaces, restoredWorkspace],
                     DeletedWorkspaces = catalog.DeletedWorkspaces!.Where(item => item.Workspace.Id != id).ToList()
                 };
                 await SaveCoreAsync(updated, cancellationToken).ConfigureAwait(false);
@@ -426,6 +429,19 @@ internal sealed class WorkspaceCatalogStore
     {
         if (catalog.Workspaces.Any(item => item.Id != exceptId && string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("Рабочее пространство с таким именем уже существует.");
+    }
+
+    private static string CreateUniqueRestoredName(WorkspaceCatalog catalog, string originalName)
+    {
+        for (var suffixIndex = 1; ; suffixIndex++)
+        {
+            var suffix = suffixIndex == 1 ? " (восстановлено)" : $" (восстановлено {suffixIndex})";
+            var prefixLength = Math.Min(originalName.Length, MaximumNameLength - suffix.Length);
+            if (prefixLength > 0 && char.IsHighSurrogate(originalName[prefixLength - 1])) prefixLength--;
+            var candidate = originalName[..prefixLength].TrimEnd() + suffix;
+            if (!catalog.Workspaces.Any(item => string.Equals(item.Name, candidate, StringComparison.OrdinalIgnoreCase)))
+                return candidate;
+        }
     }
 
     private void EnsureNoReparsePoints(string path)

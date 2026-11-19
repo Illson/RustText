@@ -2239,6 +2239,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             _previousButton.IsEnabled = !_busy && _filterReading is null && _filterHistory.Count > 0;
             _nextButton.IsEnabled = !_busy && _filterReading is null && _filterNext.HasValue;
+            _followButton.IsEnabled = false;
             _startButton.IsEnabled = _endButton.IsEnabled = _middleButton.IsEnabled = false;
             _openSearchButton.IsEnabled = _timeButton.IsEnabled = false;
             _searchButton.IsEnabled = _moreButton.IsEnabled = false;

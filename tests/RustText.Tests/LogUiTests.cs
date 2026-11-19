@@ -213,6 +213,33 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task FollowControlIsDisabledWhileFilteredAndRestoredWithoutChangingItsState(bool followEnd) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels-follow.log");
+        await File.WriteAllTextAsync(path, "Info first\nError second\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, FollowEnd: followEnd));
+        try
+        {
+            var follow = (Button)Field(log, "_followButton");
+            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            var panel = (LogLevelFilterPanel)Field(log, "_levelFilter")!;
+            panel.SetLevels(LogLevel.Error);
+            await HeadlessTests.WaitForAsync(() => !follow.IsEnabled
+                && ((TextBox)Field(log, "_filteredLogText")).Text == "Error second");
+            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+
+            panel.SetLevels(LogLevel.All);
+            await HeadlessTests.WaitForAsync(() => follow.IsEnabled);
+            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Fact]
     public Task InlineLevelFilterRefreshesAfterAnErrorIsAppended() => HeadlessTests.RunAsync(async profile =>
     {

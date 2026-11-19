@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform;
+using AvaloniaEdit;
 
 namespace RustText.Demo;
 
@@ -102,24 +103,25 @@ public partial class MainWindow
     {
         if (_workspaceSwitchPending || _closing || _closed) return;
         _workspaceSwitchPending = true;
-        var editorStates = LoadedWorkspaceTabs().Select(tab => tab.Editor)
-            .Where(editor => editor is not null)
-            .Select(editor => (Editor: editor!, editor!.IsEnabled))
-            .ToArray();
-        foreach (var (editor, _) in editorStates) editor.IsEnabled = false;
+        (TextEditor Editor, bool WasEnabled)[] editorStates = [];
         var gateHeld = false;
         try
         {
             await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
             gateHeld = true;
+            editorStates = LoadedWorkspaceTabs().Select(tab => tab.Editor)
+                .OfType<TextEditor>()
+                .Select(editor => (editor, editor.IsEnabled))
+                .ToArray();
+            foreach (var (editor, _) in editorStates) editor.IsEnabled = false;
             await SwitchWorkspaceCoreAsync(workspaceId);
         }
         finally
         {
-            if (gateHeld) _workspace.WorkspaceSwitchGate.Release();
-            _workspaceSwitchPending = false;
             if (!_closing && !_closed)
-                foreach (var (editor, isEnabled) in editorStates) editor.IsEnabled = isEnabled;
+                foreach (var (editor, wasEnabled) in editorStates) editor.IsEnabled = wasEnabled;
+            _workspaceSwitchPending = false;
+            if (gateHeld) _workspace.WorkspaceSwitchGate.Release();
         }
     }
 
@@ -403,12 +405,7 @@ public partial class MainWindow
         foreach (var window in _workspace.Windows)
         {
             if (!window._workspaceViews.Remove(workspaceId, out var view)) continue;
-            foreach (var tab in view.Tabs.Values)
-            {
-                window.DetachEditor(tab);
-                tab.Log?.Close();
-                tab.Log = null;
-            }
+            foreach (var tab in view.Tabs.Values) window.ReleaseTabContents(tab);
         }
 
         foreach (var key in _workspace.SessionStores.Keys.Where(key => key.WorkspaceId == workspaceId).ToArray())
