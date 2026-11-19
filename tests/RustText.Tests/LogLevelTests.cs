@@ -80,26 +80,8 @@ public sealed class LogLevelTests
                 .Any(presenter => presenter.Text?.StartsWith("INFO info-1", StringComparison.Ordinal) == true && presenter.Bounds.Height > 0));
             var presenter = log.GetVisualDescendants().OfType<TextPresenter>().Single(p => p.Text?.StartsWith("INFO info-1") == true);
             var origin = presenter.TranslatePoint(default, log)!.Value;
-            var width = (int)log.Bounds.Width;
-            var height = (int)log.Bounds.Height;
-            using (var bitmap = new RenderTargetBitmap(new PixelSize(width, height)))
-            using (var pixels = new WriteableBitmap(new PixelSize(width, height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul))
-            using (var frame = pixels.Lock())
-            {
-                bitmap.Render(log);
-                bitmap.CopyPixels(frame);
-                var x = (int)origin.X + 220; // Sample the band beyond the end of the short message.
-                var lineHeight = presenter.TextLayout.TextLines[0].Height;
-                var info = Pixel((int)(origin.Y + lineHeight * .5));
-                var error = Pixel((int)(origin.Y + lineHeight * 1.5));
-                Assert.True(error.R > info.R && error.G < info.G, $"Error band {error}, info band {info}");
-
-                Color Pixel(int y)
-                {
-                    var sample = frame.Address + y * frame.RowBytes + x * 4;
-                    return Color.FromRgb(Marshal.ReadByte(sample, 2), Marshal.ReadByte(sample, 1), Marshal.ReadByte(sample));
-                }
-            }
+            var lineHeight = presenter.TextLayout.TextLines[0].Height;
+            AssertSeverityBands(log, (int)origin.X + 220, (int)(origin.Y + lineHeight * .5), (int)(origin.Y + lineHeight * 1.5));
             var open = log.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Уровни…"));
             open.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
             var dialog = Assert.Single(owner.OwnedWindows);
@@ -121,6 +103,47 @@ public sealed class LogLevelTests
         }
         finally { foreach (var dialog in owner.OwnedWindows.ToArray()) dialog.Close(); owner.Close(); }
     });
+
+    [Fact]
+    public Task EditableLogPaintsSeverityPastTheEndOfEachRow() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "editable-bands.log");
+        await File.WriteAllTextAsync(path, "plain line\nINFO ok\n[ERR] disk full");
+        var window = new MainWindow([path]);
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<AvaloniaEdit.TextEditor>()
+                .Any(editor => editor.TextArea.TextView is { VisualLinesValid: true } view && view.VisualLines.Count >= 3));
+            var view = window.GetVisualDescendants().OfType<AvaloniaEdit.TextEditor>().Single().TextArea.TextView;
+            int CenterY(int index) => (int)(view.VisualLines[index].VisualTop - view.VerticalOffset + view.VisualLines[index].Height / 2);
+            AssertSeverityBands(view, 220, CenterY(1), CenterY(2));
+        }
+        finally
+        {
+            window.Close();
+            await HeadlessTests.WaitForAsync(() => !window.IsVisible);
+        }
+    });
+
+    private static void AssertSeverityBands(Visual visual, int x, int infoY, int errorY)
+    {
+        var size = new PixelSize((int)visual.Bounds.Width, (int)visual.Bounds.Height);
+        using var bitmap = new RenderTargetBitmap(size);
+        using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+        using var frame = pixels.Lock();
+        bitmap.Render(visual);
+        bitmap.CopyPixels(frame);
+        var info = ReadPixel(infoY);
+        var error = ReadPixel(errorY);
+        Assert.True(error.R > info.R && error.G < info.G, $"Error band {error}, info band {info}");
+
+        Color ReadPixel(int y)
+        {
+            var location = frame.Address + y * frame.RowBytes + x * 4;
+            return Color.FromRgb(Marshal.ReadByte(location, 2), Marshal.ReadByte(location, 1), Marshal.ReadByte(location));
+        }
+    }
 
     private static Button Button(Window dialog, string caption) => dialog.GetVisualDescendants()
         .OfType<Button>().Single(button => Equals(button.Content, caption));

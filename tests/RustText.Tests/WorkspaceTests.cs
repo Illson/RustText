@@ -858,6 +858,13 @@ public sealed class WorkspaceTests
             var logOriginal = logText.FontSize;
             window.MouseWheel(logPoint, new Vector(0, 1), RawInputModifiers.Control);
             Assert.Equal(logOriginal + 1, logText.FontSize);
+
+            Invoke(window, "ResizeText", 48d);
+            window.MouseWheel(logPoint, new Vector(0, 1), RawInputModifiers.Control);
+            Assert.Equal(48d, logText.FontSize);
+            Invoke(window, "ResizeText", -48d);
+            window.MouseWheel(logPoint, new Vector(0, -1), RawInputModifiers.Control);
+            Assert.Equal(8d, logText.FontSize);
         }
         finally { await CloseAsync(window); }
     });

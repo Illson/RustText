@@ -10,10 +10,9 @@ namespace RustText.Demo;
 public partial class MainWindow
 {
     private static readonly ConcurrentDictionary<string, byte> ArchivedDraftOperations = new(StringComparer.Ordinal);
-    private DraftArchiveService? _draftArchiveService;
     private bool _archivingClosedDrafts;
 
-    private DraftArchiveService DraftArchive => _draftArchiveService ??= new(_storage.RootDirectory);
+    private DraftArchiveService DraftArchive => _storage.DraftArchive;
 
     private async Task ArchiveClosedDraftsAsync()
     {
@@ -217,7 +216,7 @@ public partial class MainWindow
                     await DraftArchive.RemoveAsync(entry, _lifetime.Token);
                     await RefreshAsync();
                 })));
-                var title = new TextBlock { Text = entry.DisplayName, FontWeight = FontWeight.SemiBold,
+                var title = new TextBlock { Text = entry.Tab.CustomTitle ?? entry.DisplayName, FontWeight = FontWeight.SemiBold,
                     TextTrimming = TextTrimming.CharacterEllipsis };
                 var description = new TextBlock
                 {

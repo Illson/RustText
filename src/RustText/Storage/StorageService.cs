@@ -54,6 +54,8 @@ internal sealed class StorageService
     internal static StorageService OpenForTesting(string profileBaseDirectory) =>
         new(profileBaseDirectory, hasProfileOverride: false);
 
+    private DraftArchiveService? _draftArchive;
+    public DraftArchiveService DraftArchive => _draftArchive ??= new(_root);
     public string RootDirectory => _root;
     public static string GetProfileBaseDirectory()
     {

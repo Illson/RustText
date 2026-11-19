@@ -284,7 +284,9 @@ public partial class MainWindow
         editor.TextArea.SelectionBrush = FocusTheme.Selection;
         editor.Options.ShowBoxForControlCharacters = true;
         editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
-        editor.TextArea.TextView.LineTransformers.Add(new LogLevelColorizer());
+        var logLevels = new LogLevelColorizer();
+        editor.TextArea.TextView.LineTransformers.Add(logLevels);
+        editor.TextArea.TextView.BackgroundRenderers.Add(logLevels);
         tab.Editor = editor;
         SetSyntax(editor, tab.Path);
         if (resetDirtyState)

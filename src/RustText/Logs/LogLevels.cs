@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Avalonia;
 using Avalonia.Media;
 using AvaloniaEdit.Document;
 using AvaloniaEdit.Rendering;
@@ -65,15 +66,32 @@ internal static partial class LogLevels
     };
 }
 
-internal sealed class LogLevelColorizer : DocumentColorizingTransformer
+internal sealed class LogLevelColorizer : DocumentColorizingTransformer, IBackgroundRenderer
 {
     public bool Enabled { get; set; }
+
+    public KnownLayer Layer => KnownLayer.Background;
+
+    public void Draw(TextView view, DrawingContext drawingContext)
+    {
+        if (!Enabled || !view.VisualLinesValid || view.Document is not { } document) return;
+        using var tint = drawingContext.PushOpacity(0.16);
+        foreach (var visual in view.VisualLines)
+        {
+            var level = Classify(document, visual.FirstDocumentLine);
+            if (level == LogLevel.Other) continue;
+            var bounds = new Rect(0, visual.VisualTop - view.VerticalOffset, view.Bounds.Width, visual.Height);
+            drawingContext.FillRectangle(LogLevels.Brush(level), bounds);
+        }
+    }
+
+    private static LogLevel Classify(TextDocument document, DocumentLine line) =>
+        LogLevels.Classify(document.GetText(line.Offset, Math.Min(line.Length, 1024)));
 
     protected override void ColorizeLine(DocumentLine line)
     {
         if (!Enabled || line.Length == 0) return;
-        var prefix = CurrentContext.Document.GetText(line.Offset, Math.Min(line.Length, 1024));
-        var level = LogLevels.Classify(prefix);
+        var level = Classify(CurrentContext.Document, line);
         if (level != LogLevel.Other)
             ChangeLinePart(line.Offset, line.EndOffset, element => element.TextRunProperties.SetForegroundBrush(LogLevels.Brush(level)));
     }
