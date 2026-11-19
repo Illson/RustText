@@ -1585,7 +1585,8 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
-        if (_closed || _busy || _pageEdit is not null || !_autoRefresh)
+        if (_closed || _busy || _pageWrite is not null || !_autoRefresh
+            || (_pageEdit is not null && PreserveExternalPageEdit is null))
         {
             return;
         }
@@ -1603,6 +1604,8 @@ internal sealed partial class LogView : UserControl, IDisposable
                 ? TryReadObservedDigest(_fileStamp.Length) : null;
             var appended = _observedDigest is { } expected && previousContent is not null
                 && expected.AsSpan().SequenceEqual(previousContent);
+            if (!appended) ResetFileHandle();
+            var preservedDraft = ExitPageEditForExternalRefresh();
             if (appended)
             {
                 _fileStamp = now;
@@ -1613,19 +1616,21 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
             else
             {
-                ResetFileHandle();
                 SetStatus("Файл был заменён, очищен или перезаписан. Позиция и индекс сброшены.");
                 await LoadPageAsync(0, saveHistory: false);
             }
             ApplyLargeLogIndexOptInPolicy();
             StartIndexIfNeeded();
             LoadMinimapSamples();
+            if (preservedDraft) ReportPreservedExternalEdit();
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             SetStatus($"Не удалось проверить лог. {error.Message}");
         }
     }
+
+    internal void ReportPreservedExternalEdit() => SetStatus(MainWindow.ExternalDraftStatus);
 
     private void ApplyLargeLogIndexOptInPolicy()
     {
@@ -1992,7 +1997,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _startButton.IsEnabled = enabled && _page is not null;
         _endButton.IsEnabled = enabled && _page is not null;
         _middleButton.IsEnabled = enabled && _file.Length > 0;
-        _pauseButton.IsVisible = !_isDraft && _pageEdit is null;
+        _pauseButton.IsVisible = !_isDraft;
         _followButton.IsVisible = !_isDraft && _pageEdit is null;
         _liveLabel.IsVisible = !_isDraft && _pageEdit is null;
         _pauseButton.IsEnabled = !_closed;

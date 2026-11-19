@@ -1,4 +1,5 @@
 using Avalonia.Threading;
+using AvaloniaEdit.Document;
 
 namespace RustText.Demo;
 
@@ -30,6 +31,7 @@ public partial class MainWindow
             if (tab.FileWatch is { } existing && SamePath(existing.Path, path)) return;
             tab.FileWatch?.Dispose();
             tab.FileWatch = new EditorFileWatch(path, (watch, attempt) => RefreshEditorFileAsync(tab, watch, attempt));
+            tab.FileWatch.Schedule(force: true);
             return;
         }
         tab.FileWatch?.Dispose();
@@ -40,43 +42,38 @@ public partial class MainWindow
     {
         if (!IsCurrent() || tab.Editor is not { } editor || tab.Stamp is not { } stamp) return false;
         if (tab.Saving || tab.Loading) return true;
-        var revision = tab.Revision;
         try
         {
             var file = new FileInfo(watch.Path);
             if (!file.Exists) throw new FileNotFoundException("Файл отсутствует на диске.", watch.Path);
-            if (tab.Dirty)
+            LoadedDocument? loaded = null;
+            if (file.Length <= LogThreshold)
             {
-                var unchanged = file.Length == stamp.Length && file.LastWriteTimeUtc == stamp.LastWriteUtc
-                    && await DocumentFiles.GetStampAsync(watch.Path, watch.Token) == stamp;
-                if (IsCurrent() && tab.Stamp == stamp)
-                    ReportDiskState(unchanged ? null : "Файл изменён на диске. Несохранённые правки сохранены в редакторе.");
-                return false;
+                // Keep accepting edits until the disk snapshot is ready.
+                loaded = await DocumentFiles.ReadAsync(watch.Path, tab.Encoding, watch.Token);
+                if (!IsCurrent() || tab.Stamp != stamp || !ReferenceEquals(tab.Editor, editor)) return false;
+                if (tab.Saving || tab.Loading) return true;
+                if (loaded.Stamp.Sha256 == stamp.Sha256)
+                {
+                    tab.Stamp = loaded.Stamp;
+                    if (tab.DiskStatus != ExternalDraftStatus) ReportDiskState(null);
+                    return false;
+                }
             }
 
-            if (file.Length > LogThreshold)
+            var dirty = tab.Dirty;
+            if (loaded is null || IsOversizedEditorText(loaded.Text))
             {
-                AttachLog(tab, watch.Path, tab.Encoding);
-                return false;
-            }
-
-            // Keep the old view while the new snapshot is read. Check again before publishing it.
-            var loaded = await DocumentFiles.ReadAsync(watch.Path, tab.Encoding, watch.Token);
-            if (!IsCurrent() || tab.Stamp != stamp || !ReferenceEquals(tab.Editor, editor)) return false;
-            if (tab.Saving) return true;
-            if (tab.Dirty || tab.Revision != revision)
-            {
-                if (loaded.Stamp != stamp) ReportDiskState("Файл изменён на диске. Несохранённые правки сохранены в редакторе.");
-            }
-            else if (loaded.Stamp != stamp)
-            {
-                if (IsOversizedEditorText(loaded.Text)) AttachLog(tab, watch.Path, tab.Encoding);
-                else await ApplyEditorReloadAsync(tab, editor, Task.FromResult(loaded));
+                // Construct the log before moving the draft: opening the replacement can fail.
+                AttachLog(tab, watch.Path, tab.Encoding, preserveEditorChanges: dirty);
+                if (dirty) tab.Log?.ReportPreservedExternalEdit();
             }
             else
             {
-                ReportDiskState(null);
+                ReplaceEditorFromDisk(tab, editor, loaded, dirty ? ExternalDraftStatus : null, preserveEditorChanges: dirty);
             }
+
+            if (dirty) Run(SaveSessionAsync);
         }
         catch (OperationCanceledException) when (watch.Token.IsCancellationRequested) { }
         catch (IOException error) when (IsCurrent())
@@ -102,6 +99,40 @@ public partial class MainWindow
                 if (ReferenceEquals(tab, ActiveTab)) UpdateStatus(tab);
             }
         }
+    }
+
+    internal const string ExternalDraftStatus = "Файл обновлён с диска. Локальные правки перенесены в отдельную вкладку-черновик.";
+
+    private void PreserveEditorDraft(WorkTab source, SessionTab view)
+    {
+        var document = DetachEditor(source)!;
+        var draft = AddExternalDraft(source, document);
+        RestoreEditorView(draft, view);
+    }
+
+    private void PreservePageDraft(WorkTab source, string text)
+    {
+        if (IsOversizedEditorText(text))
+        {
+            var draft = AddTab(group: source.Group, select: false);
+            StartLargeDraftPersistence(draft, () => new StringReader(text), null, text);
+        }
+        else
+        {
+            AddExternalDraft(source, new TextDocument(text));
+            Run(SaveSessionAsync);
+        }
+    }
+
+    private WorkTab AddExternalDraft(WorkTab source, TextDocument document)
+    {
+        var draft = AddTab(group: source.Group, select: false);
+        draft.Encoding = source.Encoding;
+        draft.Ending = source.Ending;
+        draft.OriginalEndings = source.OriginalEndings;
+        draft.RestoredDirty = draft.Dirty = true;
+        AttachEditor(draft, document);
+        return draft;
     }
 
     private sealed class EditorFileWatch : IDisposable

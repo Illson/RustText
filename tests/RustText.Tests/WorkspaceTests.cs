@@ -5,9 +5,12 @@ using Avalonia.Headless;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Input.Platform;
+using Avalonia.Input.Raw;
 using Avalonia.Media;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
+using AvaloniaEdit.Rendering;
 using RustText.Demo;
 using RustText.Demo.Editor;
 using RustText.Demo.Logs;
@@ -210,7 +213,7 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
-    public Task AutoRefreshMenuPersistsTheFlagAndProtectsUnsavedChanges() => HeadlessTests.RunAsync(async profile =>
+    public Task AutoRefreshMenuPersistsTheFlagAndMovesUnsavedChangesToDraft() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "toggle.txt");
         await File.WriteAllTextAsync(path, "before");
@@ -235,9 +238,209 @@ public sealed class WorkspaceTests
             var editor = Read<TextEditor>(tab, "Editor");
             editor.Document.Insert(editor.Document.TextLength, " + local");
             await File.WriteAllTextAsync(path, "another external value");
-            await HeadlessTests.WaitForAsync(() => Property(tab, "DiskStatus") is string message && message.Contains("изменён на диске"));
-            Assert.Equal("changed while paused + local", editor.Text);
-            Assert.Same(editor, Read<TextEditor>(tab, "Editor"));
+            await HeadlessTests.WaitForAsync(() => Read<TextEditor>(tab, "Editor").Text == "another external value");
+            var draft = Assert.Single(Tabs(window), candidate => Property(candidate, "Path") is null);
+            Assert.Equal("changed while paused + local", Read<TextEditor>(draft, "Editor").Text);
+            Assert.True(Read<bool>(draft, "Dirty"));
+            Assert.Same(tab, ActiveTab(window));
+            Assert.Equal(MainWindow.ExternalDraftStatus, Property(tab, "DiskStatus"));
+            Assert.True(Read<bool>(tab, "AutoRefresh"));
+
+            await File.AppendAllTextAsync(path, "\nnext external line");
+            await HeadlessTests.WaitForAsync(() => Read<TextEditor>(tab, "Editor").Text.EndsWith("next external line"));
+            Assert.Single(Tabs(window), candidate => Property(candidate, "Path") is null);
+            await CallAsync(window, "SaveSessionAsync");
+            var storage = StorageService.OpenForTesting(profile);
+            var session = await storage.LoadSessionAsync();
+            var savedDraft = Assert.Single(session!.Tabs, candidate => candidate.Path is null);
+            Assert.Equal("changed while paused + local", await File.ReadAllTextAsync(storage.GetDraftPath(savedDraft)!));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task RepeatedClipboardPasteKeepsFocusAndAdvancesTheCaret() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "paste.txt");
+        await File.WriteAllTextAsync(path, "αoldω");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.TextArea.Focus();
+            editor.Select(1, 3);
+            editor.CaretOffset = 4;
+            await window.Clipboard!.SetTextAsync("Ж");
+
+            // Hold Control and repeat the same key-down event before releasing V.
+            for (var index = 0; index < 4; index++)
+                window.KeyPress(Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            window.KeyRelease(Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+
+            await HeadlessTests.WaitForAsync(() => editor.Text == "αЖЖЖЖω");
+            Assert.True(editor.TextArea.IsKeyboardFocusWithin);
+            Assert.Equal(5, editor.CaretOffset);
+            Assert.Equal(0, editor.SelectionLength);
+            window.KeyTextInput("!");
+            Assert.Equal("αЖЖЖЖ!ω", editor.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task VerticalCaretsEditUnicodeAndUndoAsOneOperation() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "columns.txt");
+        await File.WriteAllTextAsync(path, "abc\nx\nabc");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.TextArea.Focus();
+            editor.CaretOffset = 2;
+            const RawInputModifiers controlAlt = RawInputModifiers.Control | RawInputModifiers.Alt;
+            Press(window, Key.Down, controlAlt, PhysicalKey.ArrowDown);
+            Press(window, Key.Down, controlAlt, PhysicalKey.ArrowDown);
+            Assert.Equal(3, MultiCaretEditing.Count(editor.TextArea));
+            Assert.Equal(8, editor.CaretOffset);
+
+            window.KeyTextInput("🙂");
+            Assert.Equal("ab🙂c\nx🙂\nab🙂c", editor.Text);
+            Press(window, Key.Back, RawInputModifiers.None, PhysicalKey.Backspace);
+            Assert.Equal("abc\nx\nabc", editor.Text);
+
+            editor.Undo();
+            Assert.Equal("ab🙂c\nx🙂\nab🙂c", editor.Text);
+            Assert.Equal(3, MultiCaretEditing.Count(editor.TextArea));
+            editor.Undo();
+            Assert.Equal("abc\nx\nabc", editor.Text);
+            editor.Redo();
+            Assert.Equal("ab🙂c\nx🙂\nab🙂c", editor.Text);
+            Assert.Equal(14, editor.CaretOffset);
+
+            Press(window, Key.Left, RawInputModifiers.Shift, PhysicalKey.ArrowLeft);
+            Assert.Equal(new[] { 2, 2, 2 }, editor.TextArea.Selection.Segments.Select(segment => segment.Length));
+            Press(window, Key.Escape, RawInputModifiers.None, PhysicalKey.Escape);
+            Assert.Equal(1, MultiCaretEditing.Count(editor.TextArea));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task OccurrenceSelectionsCopyCutAndPasteByDocumentOrder() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "occurrences.txt");
+        await File.WriteAllTextAsync(path, "foo\nfoo and foo");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.TextArea.Focus();
+            editor.CaretOffset = 5;
+            Press(window, Key.D, RawInputModifiers.Control, PhysicalKey.D, "d");
+            Assert.Equal("foo", editor.SelectedText);
+            Press(window, Key.D, RawInputModifiers.Control, PhysicalKey.D, "d");
+            Assert.Equal(2, MultiCaretEditing.Count(editor.TextArea));
+            Press(window, Key.L, RawInputModifiers.Control | RawInputModifiers.Shift, PhysicalKey.L, "L");
+            Assert.Equal(3, MultiCaretEditing.Count(editor.TextArea));
+
+            ApplicationCommands.Copy.Execute(null, editor.TextArea);
+            var copied = await window.Clipboard!.TryGetDataAsync();
+            Assert.NotNull(copied);
+            Assert.Equal(string.Join(Environment.NewLine, new[] { "foo", "foo", "foo" }), await copied.TryGetTextAsync());
+
+            ApplicationCommands.Cut.Execute(null, editor.TextArea);
+            Assert.Equal("\n and ", editor.Text);
+            Assert.Equal(3, MultiCaretEditing.Count(editor.TextArea));
+            await window.Clipboard.SetTextAsync("1\r\n2\r\n3");
+            Press(window, Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            await HeadlessTests.WaitForAsync(() => editor.Text == "1\n2 and 3");
+            Assert.True(editor.TextArea.IsKeyboardFocusWithin);
+
+            await window.Clipboard.SetTextAsync("!");
+            Press(window, Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            await HeadlessTests.WaitForAsync(() => editor.Text == "1!\n2! and 3!");
+            Assert.Equal(3, MultiCaretEditing.Count(editor.TextArea));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task AltClickTogglesCaretsAndUpAddsOneOnThePreviousLine() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "mouse.txt");
+        await File.WriteAllTextAsync(path, "aaa\nbbb\nccc");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.TextArea.Focus();
+            editor.CaretOffset = 9;
+            Press(window, Key.Up, RawInputModifiers.Control | RawInputModifiers.Alt, PhysicalKey.ArrowUp);
+            Assert.Equal(2, MultiCaretEditing.Count(editor.TextArea));
+            var view = editor.TextArea.TextView;
+            view.EnsureVisualLines();
+            var location = new TextViewPosition(1, 3);
+            var point = view.TranslatePoint(view.GetVisualPosition(location, VisualYPosition.LineMiddle) - view.ScrollOffset, window)!.Value;
+            window.MouseDown(point, MouseButton.Left, RawInputModifiers.Alt);
+            window.MouseUp(point, MouseButton.Left, RawInputModifiers.Alt);
+            Assert.Equal(3, MultiCaretEditing.Count(editor.TextArea));
+            window.MouseDown(point, MouseButton.Left, RawInputModifiers.Alt);
+            window.MouseUp(point, MouseButton.Left, RawInputModifiers.Alt);
+            Assert.Equal(2, MultiCaretEditing.Count(editor.TextArea));
+            window.KeyTextInput("!");
+            Assert.Equal("aaa\nb!bb\nc!cc", editor.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ExternalLogAppendKeepsRefreshingAfterPageTyping() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "live.log");
+        await File.WriteAllTextAsync(path, "initial\n");
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenPathAsync", path, true, null);
+            var tab = ActiveTab(window);
+            var log = Read<LogView>(tab, "Log");
+            await log.InitialPageLoad;
+            await EditLogPageAsync(log, "unedited on disk, edited here");
+            Assert.True(log.HasPendingEdit);
+            await File.AppendAllTextAsync(path, "appended\n");
+
+            await HeadlessTests.WaitForAsync(() => log.IsReadOnly && LogText(log).Text!.Contains("appended"));
+            Assert.True(log.AutoRefresh);
+            var draft = Assert.Single(Tabs(window), candidate => Property(candidate, "Path") is null);
+            Assert.Equal("unedited on disk, edited here", Read<TextEditor>(draft, "Editor").Text);
+            Assert.Same(tab, ActiveTab(window));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ExternalRefreshKeepsADirtyDraftWhenTheFileSwitchesToLogView() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "growing.txt");
+        await File.WriteAllTextAsync(path, "short");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Insert(5, " + local");
+            await File.WriteAllTextAsync(path, new string('x', 65_537));
+
+            await HeadlessTests.WaitForAsync(() => Property(tab, "Log") is LogView);
+            var log = Read<LogView>(tab, "Log");
+            await log.InitialPageLoad;
+            Assert.False(Read<bool>(tab, "Dirty"));
+            Assert.True(log.AutoRefresh);
+            Assert.StartsWith("xxx", LogText(log).Text);
+            var draft = Assert.Single(Tabs(window), candidate => Property(candidate, "Path") is null);
+            Assert.Equal("short + local", Read<TextEditor>(draft, "Editor").Text);
+            Assert.Same(tab, ActiveTab(window));
         }
         finally { await CloseAsync(window); }
     });
@@ -728,6 +931,12 @@ public sealed class WorkspaceTests
     });
 
     private static Border TabSurface(TabItem item) => Assert.Single(item.GetVisualDescendants().OfType<Border>(), border => border.Name == "TabSurface");
+    private static void Press(MainWindow window, Key key, RawInputModifiers modifiers, PhysicalKey physicalKey, string? symbol = null)
+    {
+        window.KeyPress(key, modifiers, physicalKey, symbol);
+        window.KeyRelease(key, modifiers, physicalKey, symbol);
+    }
+
     private static Color SolidColor(IBrush? brush) => Assert.IsAssignableFrom<ISolidColorBrush>(brush).Color;
 
     private static async Task<MainWindow> OpenWorkspaceAsync(params string[] paths)

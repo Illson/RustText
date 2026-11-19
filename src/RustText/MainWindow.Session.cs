@@ -6,6 +6,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using RustText.Demo.Editor;
 using RustText.Demo.Logs;
 
 namespace RustText.Demo;
@@ -203,8 +204,9 @@ public partial class MainWindow
         var log = tab.Log?.CaptureState() ?? (tab.PendingLog
             ? new LogTabState(tab.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh) : null);
         var caret = editor?.CaretOffset ?? 0;
-        var selectionStart = editor?.SelectionStart ?? 0;
-        var selectionLength = editor?.SelectionLength ?? 0;
+        var selection = editor is null ? default : MultiCaretEditing.Primary(editor.TextArea);
+        var selectionStart = selection.Start;
+        var selectionLength = selection.Length;
         var lineEndings = tab.OriginalEndings.IsDefaultOrEmpty ? null : tab.OriginalEndings.Select(value => (byte)value).ToArray();
         return new SessionTab(tab.Id, tab.Path, tab.Encoding, selectionStart, selectionLength,
             caret < selectionStart + selectionLength, editor?.HorizontalOffset ?? 0, editor?.VerticalOffset ?? 0,
@@ -736,9 +738,10 @@ public partial class MainWindow
 
         var editor = tab.Editor;
         var log = tab.Log?.CaptureState();
-        var entry = new RecentFileEntry(path, tab.Encoding, tab.IsLog, editor?.SelectionStart ?? 0,
-            editor?.SelectionLength ?? 0, log?.Offset, editor?.Document.LineCount,
-            Reversed: editor is not null && editor.CaretOffset < editor.SelectionStart + editor.SelectionLength,
+        var selection = editor is null ? default : MultiCaretEditing.Primary(editor.TextArea);
+        var entry = new RecentFileEntry(path, tab.Encoding, tab.IsLog, selection.Start,
+            selection.Length, log?.Offset, editor?.Document.LineCount,
+            Reversed: editor is not null && editor.CaretOffset < selection.End,
             ScrollX: editor?.HorizontalOffset ?? 0,
             ScrollY: editor?.VerticalOffset ?? 0,
             JsonValidationDisabled: tab.JsonDisabled,

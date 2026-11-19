@@ -21,6 +21,7 @@ internal sealed partial class LogView
     private CancellationTokenSource? _pageWrite;
 
     internal Func<string, string, long, CancellationToken, Task>? CommitDraftPage { get; set; }
+    internal Action<string>? PreserveExternalPageEdit { get; init; }
     public bool HasPendingEdit => _pageWrite is not null || (_pageEdit is { } edit && _logText.Text != edit.Original);
 
     private Control BuildPageModeControls()
@@ -208,12 +209,27 @@ internal sealed partial class LogView
     private async Task EndPageEditAsync()
     {
         if (_closed || _pageEdit is not { } edit) return;
+        ClearPageEdit();
+        await LoadPageAsync(edit.From, saveHistory: false, allowFollowEnd: false);
+        RefreshButtons();
+    }
+
+    private bool ExitPageEditForExternalRefresh()
+    {
+        if (_pageEdit is not { } edit) return false;
+        var text = _logText.Text ?? "";
+        var modified = text != edit.Original;
+        if (modified) PreserveExternalPageEdit!(text);
+        ClearPageEdit();
+        return modified;
+    }
+
+    private void ClearPageEdit()
+    {
         _pageEdit = null;
         _logText.IsReadOnly = true;
         _logText.MaxLength = 0;
         _lineGutterScrollViewer.IsVisible = true;
-        await LoadPageAsync(edit.From, saveHistory: false, allowFollowEnd: false);
-        RefreshButtons();
     }
 
     private void UpdatePageModeControls()

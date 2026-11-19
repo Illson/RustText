@@ -226,9 +226,10 @@ public partial class MainWindow
 
         var query = TextOperations.BuildRegex(CurrentQuery());
         _highlightPattern = query;
-        var same = _searchFocus is { } focused && ReferenceEquals(focused.Tab, tab) && focused.Hit.Offset == editor.SelectionStart;
-        var offset = backward ? editor.SelectionStart
-            : same ? Math.Min(editor.Document.TextLength, editor.SelectionStart + Math.Max(1, editor.SelectionLength))
+        var selection = MultiCaretEditing.Primary(editor.TextArea);
+        var same = _searchFocus is { } focused && ReferenceEquals(focused.Tab, tab) && focused.Hit.Offset == selection.Start;
+        var offset = backward ? selection.Start
+            : same ? Math.Min(editor.Document.TextLength, selection.Start + Math.Max(1, selection.Length))
             : editor.CaretOffset;
         var text = editor.Text;
         var revision = tab.Revision;
@@ -261,6 +262,7 @@ public partial class MainWindow
         var replacement = _replacement.Text ?? "";
         if (!all)
         {
+            MultiCaretEditing.CollapseToPrimary(editor.TextArea);
             var offset = editor.SelectionStart;
             var selection = editor.SelectedText;
             var match = query.Match(editor.Text, offset);
@@ -284,6 +286,7 @@ public partial class MainWindow
 
         if (result.Count > 0)
         {
+            MultiCaretEditing.CollapseToPrimary(editor.TextArea);
             editor.Document.Replace(0, editor.Document.TextLength, result.Text);
         }
 

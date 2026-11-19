@@ -95,6 +95,8 @@ public partial class MainWindow
 
         if (e.Key == Key.Escape && PanelHost.IsVisible)
         {
+            if (ActiveTab?.Editor is { IsKeyboardFocusWithin: true } editor
+                && MultiCaretEditing.Count(editor.TextArea) > 1) return;
             CloseSearchPanel();
             e.Handled = true;
             return;
@@ -192,6 +194,7 @@ public partial class MainWindow
             return;
         }
 
+        MultiCaretEditing.CollapseToPrimary(editor.TextArea);
         var start = editor.SelectionLength > 0 ? editor.SelectionStart : 0;
         var length = editor.SelectionLength > 0 ? editor.SelectionLength : editor.Document.TextLength;
         var revision = tab.Revision;
