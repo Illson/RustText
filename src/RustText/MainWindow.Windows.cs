@@ -23,6 +23,8 @@ public partial class MainWindow
         public TabDrag? Drag;
     }
 
+    private IEnumerable<WorkTab> LoadedWorkspaceTabs() => _tabs.Values;
+
     private sealed record SavedLiveDraft(WeakReference<TextDocument> Document, long Revision, SessionTab Saved);
 
     internal MainWindow? FindOtherWindow() =>

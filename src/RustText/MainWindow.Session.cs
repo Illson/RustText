@@ -419,9 +419,12 @@ public partial class MainWindow
                     }
                     else
                     {
-                        AttachEditor(tab, draft);
-                        tab.Dirty = draft.Length != 0 || tab.Path is not null;
-                        tab.RestoredDirty = tab.Dirty;
+                        if (!TryShareFileEditor(tab, saved.Encoding, draft))
+                        {
+                            AttachEditor(tab, draft);
+                            tab.Dirty = draft.Length != 0 || tab.Path is not null;
+                            tab.RestoredDirty = tab.Dirty;
+                        }
                         if (tab.Stamp is null && tab.Path is { } original && File.Exists(original))
                         {
                             try
@@ -451,11 +454,14 @@ public partial class MainWindow
             }
             else if (saved.Path is { } path)
             {
-                if (new FileInfo(path).Length > DocumentFiles.MaximumDocumentBytes)
-                    AttachLog(tab, path, saved.Encoding,
-                        new LogTabState(saved.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh, EditPages: true));
-                else
-                    AttachLoadedEditor(tab, await DocumentFiles.ReadAsync(path, saved.Encoding, token));
+                if (!TryShareFileEditor(tab, saved.Encoding))
+                {
+                    if (new FileInfo(path).Length > DocumentFiles.MaximumDocumentBytes)
+                        AttachLog(tab, path, saved.Encoding,
+                            new LogTabState(saved.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh, EditPages: true));
+                    else
+                        AttachLoadedEditor(tab, await DocumentFiles.ReadAsync(path, saved.Encoding, token));
+                }
             }
             else
             {

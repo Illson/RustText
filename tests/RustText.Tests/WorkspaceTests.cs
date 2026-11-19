@@ -1387,6 +1387,51 @@ public sealed class WorkspaceTests
         window.KeyRelease(key, modifiers, physicalKey, symbol);
     }
 
+    [Fact]
+    public Task FileViewsShareEditsAndSaveStateAndPreserveOneDraftOnExternalChange() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "shared.txt");
+        await File.WriteAllTextAsync(path, "original");
+        var first = await OpenWorkspaceAsync(path);
+        MainWindow? second = null;
+        try
+        {
+            var firstTab = ActiveTab(first);
+            var originalEditor = Read<TextEditor>(firstTab, "Editor");
+            originalEditor.Document.Insert(0, "local ");
+            Invoke(first, "NewTab", "scratch");
+            Invoke(first, "OpenTabWindow", ActiveTab(first), null);
+            second = Assert.IsType<MainWindow>(first.FindOtherWindow());
+            await CallAsync(second, "OpenPathAsync", path, false, null);
+            var secondTab = ActiveTab(second);
+            var secondEditor = Read<TextEditor>(secondTab, "Editor");
+            Assert.Same(originalEditor.Document, secondEditor.Document);
+            Assert.Equal("local original", secondEditor.Text);
+            Assert.True(Read<bool>(secondTab, "Dirty"));
+            secondEditor.Document.UndoStack.Undo();
+            Assert.Equal("original", originalEditor.Text);
+            secondEditor.Document.Insert(0, "saved ");
+            await CallAsync(second, "SaveAsync", false);
+            Assert.Equal("saved original", await File.ReadAllTextAsync(path));
+            Assert.False(Read<bool>(firstTab, "Dirty"));
+            Assert.False(Read<bool>(secondTab, "Dirty"));
+            Assert.Equal(Property(firstTab, "Stamp"), Property(secondTab, "Stamp"));
+
+            originalEditor.Document.Insert(0, "new ");
+            await File.WriteAllTextAsync(path, "external");
+            await HeadlessTests.WaitForAsync(() => Read<TextEditor>(firstTab, "Editor").Text == "external"
+                && Read<TextEditor>(secondTab, "Editor").Text == "external");
+            Assert.Same(Read<TextEditor>(firstTab, "Editor").Document, Read<TextEditor>(secondTab, "Editor").Document);
+            Assert.Single(Tabs(first).Concat(Tabs(second)), tab => Property(tab, "Path") is null
+                && Read<TextEditor>(tab, "Editor").Text == "new saved original");
+        }
+        finally
+        {
+            if (second is { IsVisible: true }) await CloseAsync(second);
+            if (first.IsVisible) await CloseAsync(first);
+        }
+    });
+
     private static Color SolidColor(IBrush? brush) => Assert.IsAssignableFrom<ISolidColorBrush>(brush).Color;
 
     private static async Task<MainWindow> OpenWorkspaceAsync(params string[] paths)
