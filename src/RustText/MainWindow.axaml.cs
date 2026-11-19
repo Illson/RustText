@@ -9,13 +9,13 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using RustText.Demo.Logs;
 
 namespace RustText.Demo;
 
 public partial class MainWindow : Window
 {
-    private static readonly DataFormat<string> TabDrag = DataFormat.CreateStringApplicationFormat("rusttext-tab");
     private readonly string[] _startupPaths;
     private readonly List<Grid> _splitGrids = [];
     private readonly Dictionary<long, WorkTab> _tabs = [];
@@ -23,11 +23,11 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _checkpoint;
     private Group _root;
     private Group _active;
-    private long _nextId;
     private bool _home;
     private bool _closing;
     private bool _closed;
     private bool _restoreFinished;
+    private bool _closeAfterStartupValidation;
     private bool _wordWrap = true;
     private double _fontSize = FocusTheme.EditorFontSize;
     private int _titleLimit = 10;
@@ -38,10 +38,24 @@ public partial class MainWindow : Window
     {
     }
 
-    internal MainWindow(string[] startupPaths)
+    internal MainWindow(string[] startupPaths) : this(startupPaths, null)
     {
+    }
+
+    private MainWindow(string[] startupPaths, WorkspaceSession? workspace)
+    {
+        _workspace = workspace ?? new WorkspaceSession();
+        _storage = _workspace.Storage;
+        _closedTabs = _workspace.ClosedTabs;
+        _restoreWorkspace = workspace is null;
+        _workspace.Windows.Add(this);
+        Closed += (_, _) => _workspace.Windows.Remove(this);
         _startupPaths = startupPaths;
         InitializeComponent();
+        PropertyChanged += CaptionStateChanged;
+        ToolTip.SetTip(CaptionMinimize, "Свернуть");
+        ToolTip.SetTip(CaptionMaximize, "Развернуть");
+        ToolTip.SetTip(CaptionClose, "Закрыть окно");
         _root = _active = MakeGroup();
         BuildMenus();
         BuildSearchPanel();
@@ -54,16 +68,17 @@ public partial class MainWindow : Window
                 _refreshHome?.Invoke();
             }
 
-            if (_sessionGate.CurrentCount > 0)
+            if (_workspace.SaveGate.CurrentCount > 0)
             {
                 Run(SaveSessionAsync);
             }
-
-            Run(CheckActiveFileAsync);
         };
         DragDrop.SetAllowDrop(this, true);
         AddHandler(DragDrop.DragOverEvent, OnWindowDragOver);
         AddHandler(DragDrop.DropEvent, OnWindowDrop);
+        AddHandler(PointerMovedEvent, TabDragMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerReleasedEvent, TabDragReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+        PointerCaptureLost += TabDragCaptureLost;
         AddHandler(KeyDownEvent, OnWorkspaceKey, RoutingStrategies.Tunnel);
         Closing += WindowClosing;
         ShowGroups();
@@ -72,15 +87,30 @@ public partial class MainWindow : Window
     protected override async void OnOpened(EventArgs e)
     {
         base.OnOpened(e);
+        EnsureIdleUnloadTimer();
+        if (!_restoreWorkspace)
+        {
+            _restoreFinished = true;
+            _checkpoint.Start();
+            return;
+        }
+
         await GuardAsync(async () =>
         {
             await RestoreSessionAsync();
+            if (_closed) return;
+            if (_closeAfterStartupValidation)
+            {
+                Close();
+                return;
+            }
             await OpenPathsAsync(_startupPaths);
-            if (_tabs.Count == 0)
+            if (!_closed && _tabs.Count == 0)
             {
                 await ShowHomeAsync();
             }
         });
+        if (_closed || _closing) return;
         _restoreFinished = true;
         _checkpoint.Start();
         if (_settings.AutoCheckUpdates && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
@@ -147,43 +177,35 @@ public partial class MainWindow : Window
         }, RoutingStrategies.Tunnel);
         group.Tabs.DoubleTapped += (_, e) =>
         {
-            if (ReferenceEquals(e.Source, group.Tabs) || e.Source is Border { Name: "TabBar" })
+            var inTabBar = false;
+            for (var visual = e.Source as Visual; visual is not null; visual = visual.GetVisualParent())
+            {
+                if (visual is TabItem || visual is Avalonia.Controls.Button || visual is Avalonia.Controls.Primitives.ScrollBar)
+                {
+                    break;
+                }
+
+                if (visual is Border { Name: "TabBar" })
+                {
+                    inTabBar = true;
+                    break;
+                }
+            }
+
+            if (inTabBar)
             {
                 _active = group;
                 NewTab();
             }
         };
-        DragDrop.SetAllowDrop(group.View, true);
-        AddTabDrop(group.View, group, null);
         return group;
-    }
-
-    private void AddTabDrop(Control control, Group group, WorkTab? insertBefore)
-    {
-        DragDrop.SetAllowDrop(control, true);
-        control.AddHandler(DragDrop.DragOverEvent, (_, e) =>
-        {
-            if (e.DataTransfer.TryGetValue(TabDrag) is not null)
-            {
-                e.DragEffects = DragDropEffects.Move;
-                e.Handled = true;
-            }
-        });
-        control.AddHandler(DragDrop.DropEvent, (_, e) =>
-        {
-            if (long.TryParse(e.DataTransfer.TryGetValue(TabDrag), out var id) && _tabs.TryGetValue(id, out var tab))
-            {
-                MoveTab(tab, insertBefore?.Group ?? group, insertBefore);
-                e.Handled = true;
-            }
-        });
     }
 
     private WorkTab AddTab(long? id = null, Group? group = null, bool select = true)
     {
         group ??= _active;
         var tab = new WorkTab(id ?? NextId(), group);
-        _nextId = Math.Max(_nextId, tab.Id);
+        _workspace.NextId = Math.Max(_workspace.NextId, tab.Id);
         _tabs.Add(tab.Id, tab);
         var label = new TextBlock
         {
@@ -195,60 +217,68 @@ public partial class MainWindow : Window
             Text = "●", FontSize = 9, Foreground = FocusTheme.Accent, Opacity = 0,
             VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false
         };
-        var close = Button("×", () => Run(() => CloseTabAsync(tab)));
+        var close = Button("", () => Run(() => CloseTabAsync(tab)));
+        close.Content = new Avalonia.Controls.Shapes.Path
+        {
+            Width = 12, Height = 12, Data = Geometry.Parse("M 2,2 L 10,10 M 10,2 L 2,10"),
+            Stroke = FocusTheme.Muted, StrokeThickness = 1.65, StrokeLineCap = PenLineCap.Round
+        };
         close.Classes.Add("focus-icon");
         AutomationProperties.SetName(close, "Закрыть вкладку");
         ToolTip.SetTip(close, "Закрыть вкладку");
         var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 5 };
         header.Children.Add(label);
-        Grid.SetColumn(dirtyMark, 1);
-        header.Children.Add(dirtyMark);
+        var loadMark = new TextBlock
+        {
+            IsVisible = false, FontSize = 12, Foreground = FocusTheme.Accent,
+            VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center,
+            IsHitTestVisible = false
+        };
+        var marks = new Grid { Width = 13, Background = Brushes.Transparent };
+        dirtyMark.HorizontalAlignment = HorizontalAlignment.Center;
+        marks.Children.Add(dirtyMark);
+        marks.Children.Add(loadMark);
+        Grid.SetColumn(marks, 1);
+        header.Children.Add(marks);
         Grid.SetColumn(close, 2);
         header.Children.Add(close);
         tab.Label = label;
         tab.DirtyMark = dirtyMark;
+        tab.LoadMark = loadMark;
+        tab.HeaderMarks = marks;
         tab.Item.Classes.Add("focus-tab");
         tab.Item.Header = header;
-        tab.Item.ContextMenu = new ContextMenu
+        var saveCopy = Command("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab)));
+        var autoRefresh = Command("Автообновление с диска", () => SetTabAutoRefresh(tab, !TabAutoRefresh(tab)));
+        autoRefresh.ToggleType = MenuItemToggleType.CheckBox;
+        var context = new ContextMenu
         {
             Items =
             {
                 Command("Показать в Проводнике", () => RevealTab(tab)),
                 Command("Скопировать путь", () => Run(() => CopyTextAsync(tab.Path))),
+                saveCopy,
+                autoRefresh,
+                Command("Переместить в новое окно", () => OpenTabWindow(tab)),
                 Command("Закрыть", () => Run(() => CloseTabAsync(tab)))
             }
         };
-        PointerPressedEventArgs? pressed = null;
-        Point origin = default;
-        header.AddHandler(PointerPressedEvent, (_, e) =>
+        context.Opening += (_, _) =>
         {
-            if (e.GetCurrentPoint(header).Properties.IsLeftButtonPressed)
-            {
-                pressed = e;
-                origin = e.GetPosition(header);
-            }
-        }, RoutingStrategies.Tunnel);
-        header.PointerReleased += (_, _) => pressed = null;
-        header.PointerMoved += async (_, e) =>
-        {
-            if (pressed is { } start && e.GetCurrentPoint(header).Properties.IsLeftButtonPressed)
-            {
-                var distance = e.GetPosition(header) - origin;
-                if (Math.Abs(distance.X) + Math.Abs(distance.Y) >= 8)
-                {
-                    pressed = null;
-                    var data = new DataTransfer();
-                    data.Add(DataTransferItem.Create(TabDrag, tab.Id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-                    await DragDrop.DoDragDropAsync(start, data, DragDropEffects.Move);
-                }
-            }
+            saveCopy.IsVisible = tab.Recovery is not null;
+            saveCopy.IsEnabled = tab.Log?.HasPendingEdit != true;
+            autoRefresh.IsVisible = tab.Path is not null && tab.Recovery is null;
+            autoRefresh.IsEnabled = !tab.Loading;
+            autoRefresh.IsChecked = TabAutoRefresh(tab);
         };
-        header.DoubleTapped += (_, e) =>
+        tab.Item.ContextMenu = context;
+        RegisterTabDrag(tab, close);
+        tab.Item.DoubleTapped += (_, e) =>
         {
+            if (IsWithin(e.Source as Visual, close)) return;
             e.Handled = true;
-            Run(() => CloseTabAsync(tab));
+            if (_draggedTabId != tab.Id) Run(() => CloseTabAsync(tab));
         };
-        AddTabDrop(header, group, tab);
         group.Tabs.Items.Add(tab.Item);
         if (select)
         {
@@ -466,7 +496,7 @@ public partial class MainWindow : Window
         group.Tabs.SelectedItem is TabItem item ? _tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, item)) : null;
 
     private WorkTab? ActiveTab => _home ? null : SelectedIn(_active);
-    private long NextId() => ++_nextId;
+    private long NextId() => ++_workspace.NextId;
 
     private void ActivateTab(WorkTab tab)
     {
@@ -476,7 +506,8 @@ public partial class MainWindow : Window
         }
 
         _active = tab.Group;
-        if (tab.Deferred is not null && !tab.Loading)
+        tab.LastWorked = DateTimeOffset.Now;
+        if (tab.Deferred is not null && !tab.Loading && !tab.CheckingSession && !_mountingSessionTabs)
         {
             Run(() => ActivateDeferredAsync(tab));
         }
@@ -521,36 +552,119 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_validatingStartupSession)
+        {
+            if (_tabs.Values.Any(tab => !tab.CheckingSession && (tab.Dirty || tab.Saving || tab.Log?.HasPendingEdit == true)))
+            {
+                _closeAfterStartupValidation = true;
+                e.Cancel = true;
+            }
+            else
+            {
+                CloseWorkspaceContents();
+            }
+            return;
+        }
+
         e.Cancel = true;
         if (_closing)
         {
             return;
         }
 
-        _closing = true;
-        _checkpoint.Stop();
-        try
+        if (_tabs.Values.Any(tab => tab.Closing))
         {
-            await SaveSessionAsync();
+            SetStatus("Дождитесь сохранения закрываемой вкладки.");
+            return;
         }
-        catch (Exception error) when (IsUserError(error))
+        if (_tabs.Values.FirstOrDefault(tab => tab.Saving || tab.Log?.HasPendingEdit == true) is { } pending)
         {
-            SetStatus($"Не удалось записать сессию. {error.Message}");
-            _closing = false;
-            _checkpoint.Start();
+            Select(pending);
+            SetStatus("Завершите сохранение или отмените правки страницы перед закрытием окна.");
             return;
         }
 
-        _closed = true;
+        _closing = true;
+        CancelTabDrag();
+        _checkpoint.Stop();
+        var closeGateHeld = false;
+        var sessionSaved = false;
+        WorkTab[] archivedTabs = [];
+        var priorHistory = new List<(int Index, SessionTab Tab)>();
+        try
+        {
+            await _workspace.CloseGate.WaitAsync();
+            closeGateHeld = true;
+            if (FindOtherWindow() is not null)
+            {
+                archivedTabs = TabsInVisualOrder().ToArray();
+                var closingIds = archivedTabs.Select(tab => tab.Id).ToHashSet();
+                for (var index = 0; index < _closedTabs.Count; index++)
+                {
+                    if (closingIds.Contains(_closedTabs[index].Id))
+                    {
+                        priorHistory.Add((index, _closedTabs[index]));
+                    }
+                }
+
+                foreach (var tab in archivedTabs)
+                    await RememberClosedAsync(tab, preserveUnsavedText: true, deferHistoryLimit: true);
+
+                await SaveWorkspaceSessionAsync(excludeWindow: this);
+                if (_closedTabs.Count > 100)
+                {
+                    _closedTabs.RemoveRange(100, _closedTabs.Count - 100);
+                    RefreshHistoryMenus();
+                }
+            }
+            else
+            {
+                await SaveSessionAsync();
+            }
+            sessionSaved = true;
+
+            CloseWorkspaceContents();
+            Close();
+        }
+        catch (Exception error) when (IsUserError(error) && !sessionSaved)
+        {
+            if (archivedTabs.Length != 0)
+            {
+                var closingIds = archivedTabs.Select(tab => tab.Id).ToHashSet();
+                _closedTabs.RemoveAll(item => closingIds.Contains(item.Id));
+                foreach (var (index, tab) in priorHistory.OrderBy(entry => entry.Index))
+                {
+                    _closedTabs.Insert(Math.Clamp(index, 0, _closedTabs.Count), tab);
+                }
+                RefreshHistoryMenus();
+            }
+
+            SetStatus($"Не удалось записать сессию. {error.Message}");
+            _closing = false;
+            _checkpoint.Start();
+        }
+        finally
+        {
+            if (closeGateHeld)
+            {
+                _workspace.CloseGate.Release();
+            }
+        }
+    }
+
+    private void CloseWorkspaceContents()
+    {
+        _closing = _closed = true;
+        CancelTabDrag();
+        _idleUnloadTimer?.Stop();
         _lifetime.Cancel();
         _searchCancellation?.Cancel();
         foreach (var tab in _tabs.Values)
         {
             tab.LoadCancellation?.Cancel();
             tab.Log?.Close();
+            DetachEditor(tab);
         }
-
-        Close();
     }
 
     private void HomeClicked(object? sender, RoutedEventArgs e) => Run(ShowHomeAsync);
@@ -588,7 +702,6 @@ public partial class MainWindow : Window
 
     private void SetCaption(string? document)
     {
-        ActiveCaption.Text = document;
         Title = document is null ? "RustText" : $"{document} — RustText";
     }
 

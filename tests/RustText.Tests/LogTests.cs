@@ -53,6 +53,32 @@ public sealed class LogTests
     }
 
     [Fact]
+    public void ReadPage_StopsAtEndAfterConsumingCrLfAcrossPageBoundary()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "page-boundary.log");
+        const int pageBytes = 32;
+        var prefix = new string('a', pageBytes - 1);
+        const string tail = "tail";
+        File.WriteAllText(path, prefix + "\r\n" + tail, new UTF8Encoding(false));
+
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        var page = reader.ReadPage(0, maxFrameBytes: pageBytes, maxPageBytes: pageBytes);
+        var last = reader.ReadPage(page.NextOffset, maxFrameBytes: pageBytes, maxPageBytes: pageBytes);
+        var eof = reader.ReadPage(last.NextOffset);
+
+        Assert.Equal(prefix, Assert.Single(page.Rows).Text);
+        Assert.Equal((long)pageBytes + 1, page.NextOffset);
+        Assert.True(page.HasMore);
+        Assert.Equal(tail, Assert.Single(last.Rows).Text);
+        Assert.Equal(file.Length, last.NextOffset);
+        Assert.False(last.HasMore);
+        Assert.Empty(eof.Rows);
+        Assert.Equal(file.Length, eof.NextOffset);
+    }
+
+    [Fact]
     public void GetEndOffset_1000CrDelimitedRowsReturnsLastEighty()
     {
         using var directory = new TempDirectory();
@@ -67,6 +93,29 @@ public sealed class LogTests
         Assert.Equal("row 921", page.Rows[0].Text);
         Assert.Equal("row 1000", page.Rows[^1].Text);
         Assert.False(page.HasMore);
+    }
+
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8, false, 1)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, true, 2)]
+    [InlineData(TextEncodingKind.Utf16BigEndian, true, 2)]
+    public void SparseScanCountsCrLfAcrossBlocksAndCanResume(TextEncodingKind encoding, bool preamble, int unit)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "index.log");
+        const int block = 256 * 1024;
+        File.WriteAllBytes(path, Encode(new string('a', block / unit - 1) + "\r\nsecond\rthird\nfourth", encoding, preamble));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        var points = new List<LogLineCheckpoint>();
+
+        var complete = reader.ScanLineBreaks(default, file.Length, points.Add, CancellationToken.None);
+        Assert.Equal(file.Length, complete.Offset);
+        Assert.Equal(3L, complete.Lines);
+        var first = points[0];
+        Assert.Equal(reader.PreambleLength + block, first.Offset);
+        Assert.Equal(1L, first.Lines);
+        Assert.Equal(complete, reader.ScanLineBreaks(first, file.Length, null, CancellationToken.None));
     }
 
     private static byte[] Encode(string text, TextEncodingKind encoding, bool preamble)

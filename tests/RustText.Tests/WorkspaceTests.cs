@@ -18,6 +18,63 @@ namespace RustText.Tests;
 public sealed class WorkspaceTests
 {
     [Fact]
+    public Task ExternalChangesReloadAnInactiveFileAndKeepTheView() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "watched.txt");
+        var other = Path.Combine(profile, "other.txt");
+        await File.WriteAllTextAsync(path, "before: retained selection");
+        await File.WriteAllTextAsync(other, "active document");
+        var window = await OpenWorkspaceAsync(path, other);
+        try
+        {
+            var watched = Tabs(window).Single(tab => Equals(Property(tab, "Path"), path));
+            var original = Read<TextEditor>(watched, "Editor");
+            original.Select(8, 8);
+            var temporary = Path.Combine(profile, "replacement.tmp");
+            await File.WriteAllTextAsync(temporary, "after:  retained selection");
+            File.Move(temporary, path, overwrite: true);
+            await HeadlessTests.WaitForAsync(() => Read<TextEditor>(watched, "Editor").Text == "after:  retained selection");
+            Assert.Equal(other, Property(ActiveTab(window), "Path"));
+            Assert.Equal(8, Read<TextEditor>(watched, "Editor").SelectionStart);
+            Assert.Equal(8, Read<TextEditor>(watched, "Editor").SelectionLength);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task AutoRefreshMenuPersistsTheFlagAndProtectsUnsavedChanges() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "toggle.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var context = Assert.IsType<ContextMenu>(Read<TabItem>(tab, "Item").ContextMenu);
+            var refresh = Assert.Single(context.Items.OfType<MenuItem>(), item => Equals(item.Header, "Автообновление с диска"));
+            Assert.Equal(MenuItemToggleType.CheckBox, refresh.ToggleType);
+            refresh.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Assert.False(Read<bool>(tab, "AutoRefresh"));
+            await File.WriteAllTextAsync(path, "changed while paused");
+            await Task.Delay(700);
+            Assert.Equal("before", Read<TextEditor>(tab, "Editor").Text);
+            await CallAsync(window, "SaveSessionAsync");
+            var saved = await StorageService.OpenForTesting(profile).LoadSessionAsync();
+            Assert.False(Assert.Single(saved!.Tabs).AutoRefresh);
+
+            refresh.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => Read<TextEditor>(tab, "Editor").Text == "changed while paused");
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Insert(editor.Document.TextLength, " + local");
+            await File.WriteAllTextAsync(path, "another external value");
+            await HeadlessTests.WaitForAsync(() => Property(tab, "DiskStatus") is string message && message.Contains("изменён на диске"));
+            Assert.Equal("changed while paused + local", editor.Text);
+            Assert.Same(editor, Read<TextEditor>(tab, "Editor"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task ReloadKeepsNewTypingAndUndo() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "reload.txt");
@@ -115,13 +172,120 @@ public sealed class WorkspaceTests
 
             Assert.Single(Tabs(window));
             Assert.Equal("остаётся в окне", Read<TextEditor>(ActiveTab(window), "Editor").Text);
-            Assert.Same(editor, Read<TextEditor>(tab, "Editor"));
+            Assert.Null(Property(tab, "Editor"));
+            Assert.Equal(0, editor.Document.TextLength);
         }
         finally
         {
             await CloseAsync(window);
         }
     });
+
+    [Fact]
+    public Task ClosingDetachedWindowKeepsDirtyTabsInHistoryInsteadOfTransferringThem() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "move.txt");
+            await File.WriteAllTextAsync(path, "исходный документ");
+            var original = await OpenWorkspaceAsync(path);
+            MainWindow? detached = null;
+            try
+            {
+                var tab = Tabs(original).Single(candidate => Equals(Property(candidate, "Path"), path));
+                var editor = Read<TextEditor>(tab, "Editor");
+                var document = editor.Document;
+                document.Insert(document.TextLength, " + правка");
+                Assert.True(document.UndoStack.CanUndo);
+                Invoke(original, "NewTab", "сохранённая вкладка исходного окна");
+                Invoke(original, "Select", tab);
+
+                var item = Read<TabItem>(tab, "Item");
+                var move = item.ContextMenu!.Items.OfType<MenuItem>()
+                    .Single(menu => Equals(menu.Header, "Переместить в новое окно"));
+                move.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                detached = Assert.IsType<MainWindow>(original.FindOtherWindow());
+                Assert.Single(Tabs(original));
+                var movedTab = ActiveTab(detached);
+                Assert.Same(document, Read<TextEditor>(movedTab, "Editor").Document);
+                Assert.Equal("исходный документ + правка", document.Text);
+                Assert.True(Read<bool>(movedTab, "Dirty"));
+                Invoke(detached, "NewTab", "несохранённый черновик отдельного окна");
+
+                detached.Close();
+                await HeadlessTests.WaitForAsync(() => (bool)Field(detached, "_closed"));
+                Assert.False(detached.IsVisible);
+                Assert.True(original.IsVisible);
+                Assert.Single(Tabs(original));
+                Assert.Equal("сохранённая вкладка исходного окна", Read<TextEditor>(ActiveTab(original), "Editor").Text);
+
+                var closed = ((System.Collections.IEnumerable)Field(original, "_closedTabs")).Cast<object>().ToArray();
+                var closedFile = Assert.Single(closed, saved => Equals(Property(saved, "Path"), path));
+                Assert.NotNull(Property(closedFile, "DraftRef"));
+                var closedUntitled = Assert.Single(closed, saved =>
+                    Property(saved, "UntitledName") is string name && name.StartsWith("несохранён", StringComparison.Ordinal));
+                Assert.NotNull(Property(closedUntitled, "DraftRef"));
+
+                await CallAsync(original, "SaveSessionAsync");
+                await CloseAsync(original);
+                original = await OpenWorkspaceAsync();
+
+                closed = ((System.Collections.IEnumerable)Field(original, "_closedTabs")).Cast<object>().ToArray();
+                closedFile = Assert.Single(closed, saved => Equals(Property(saved, "Path"), path));
+                closedUntitled = Assert.Single(closed, saved =>
+                    Property(saved, "UntitledName") is string name && name.StartsWith("несохранён", StringComparison.Ordinal));
+                await CallAsync(original, "RestoreClosedAsync", closedFile);
+                await HeadlessTests.WaitForAsync(() => Tabs(original).Any(candidate =>
+                    Equals(Property(candidate, "Path"), path)
+                    && Property(candidate, "Editor") is TextEditor restored && restored.Text == "исходный документ + правка"));
+                var restoredFile = Tabs(original).Single(candidate => Equals(Property(candidate, "Path"), path));
+                Assert.True(Read<bool>(restoredFile, "Dirty"));
+
+                await CallAsync(original, "RestoreClosedAsync", closedUntitled);
+                await HeadlessTests.WaitForAsync(() => Tabs(original).Any(candidate =>
+                    Property(candidate, "Editor") is TextEditor restored && restored.Text == "несохранённый черновик отдельного окна"));
+            }
+            finally
+            {
+                if (detached is { IsVisible: true }) await CloseAsync(detached);
+                if (original.IsVisible) await CloseAsync(original);
+            }
+        });
+
+    [Fact]
+    public Task MovingFinalTabToNewWindowClosesEmptySourceAndLastCloseRestoresSession() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "last-tab.txt");
+            await File.WriteAllTextAsync(path, "финальный документ");
+            var original = await OpenWorkspaceAsync(path);
+            MainWindow? detached = null;
+            MainWindow? reopened = null;
+            try
+            {
+                var tab = ActiveTab(original);
+                var move = Read<TabItem>(tab, "Item").ContextMenu!.Items.OfType<MenuItem>()
+                    .Single(menu => Equals(menu.Header, "Переместить в новое окно"));
+                move.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+
+                detached = Assert.IsType<MainWindow>(original.FindOtherWindow());
+                await HeadlessTests.WaitForAsync(() => (bool)Field(original, "_closed"));
+                Assert.False(original.IsVisible);
+                Assert.Single(Tabs(detached));
+                Assert.Equal("финальный документ", Read<TextEditor>(ActiveTab(detached), "Editor").Text);
+
+                await CloseAsync(detached);
+                reopened = await OpenWorkspaceAsync();
+                await HeadlessTests.WaitForAsync(() => Tabs(reopened).Any(candidate =>
+                    Equals(Property(candidate, "Path"), path)
+                    && Property(candidate, "Editor") is TextEditor editor && editor.Text == "финальный документ"));
+            }
+            finally
+            {
+                if (detached is { IsVisible: true }) await CloseAsync(detached);
+                if (reopened is { IsVisible: true }) await CloseAsync(reopened);
+                if (original.IsVisible) await CloseAsync(original);
+            }
+        });
 
     [Fact]
     public Task SplitButtonsAndClosingNestedGroupsPreserveDraftOrderAndActiveTabAfterRestart() =>
@@ -257,7 +421,7 @@ public sealed class WorkspaceTests
             final.KeyRelease(Key.T, shortcut, PhysicalKey.T, "t");
             await HeadlessTests.WaitForAsync(() => Property(ActiveTab(final), "Editor") is TextEditor editor && editor.Text == recentText);
 
-            var closedMenu = (MenuItem)Field(final, "_closedMenu");
+            var closedMenu = (MenuItem)Field(final, "_closedDraftsMenu");
             var older = Assert.Single(closedMenu.Items.OfType<MenuItem>(), item =>
                 item.Header is string title && title.StartsWith("ранний", StringComparison.Ordinal));
             older.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
@@ -409,7 +573,9 @@ public sealed class WorkspaceTests
     private static async Task CloseAsync(MainWindow window)
     {
         window.Close();
-        await HeadlessTests.WaitForAsync(() => !window.IsVisible);
+        await HeadlessTests.WaitForAsync(() => !window.IsVisible ||
+            window.FindControl<TextBlock>("StatusText")?.Text?.StartsWith("Не удалось записать сессию.", StringComparison.Ordinal) == true);
+        Assert.False(window.IsVisible, window.FindControl<TextBlock>("StatusText")?.Text);
     }
 
     private static object ActiveTab(MainWindow window) => Property(window, "ActiveTab", Private)!;

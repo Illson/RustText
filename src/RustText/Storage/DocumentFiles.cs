@@ -150,7 +150,7 @@ public static class DocumentFiles
         catch (DecoderFallbackException ex) { throw new InvalidDataException($"Файл не соответствует {kind}.", ex); }
     }
 
-    private static Encoding GetEncoding(TextEncodingKind kind) => kind switch
+    internal static Encoding GetEncoding(TextEncodingKind kind) => kind switch
     {
         TextEncodingKind.Utf8 or TextEncodingKind.Utf8Bom => new UTF8Encoding(false, true),
         TextEncodingKind.Utf16LittleEndian => new UnicodeEncoding(false, false, true),

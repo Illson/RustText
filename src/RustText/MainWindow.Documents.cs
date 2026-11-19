@@ -3,11 +3,13 @@ using System.Text;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using AvaloniaEdit;
+using AvaloniaEdit.Document;
 using AvaloniaEdit.Highlighting;
 using RustText.Demo.Editor;
 using RustText.Demo.Logs;
@@ -18,12 +20,21 @@ namespace RustText.Demo;
 public partial class MainWindow
 {
     private const long LogThreshold = 50L * 1024 * 1024;
+    private const int MaxEditorCharacters = 8 * 1024 * 1024;
+    private const int MaxEditorLines = 50_000;
+    private const int MaxEditorLineLength = 64 * 1024;
     private static readonly FilePickerFileType TextFiles = new("Текст и логи") { Patterns = ["*.txt", "*.log", "*.json", "*.xml"] };
     private bool _confirmingTabClose;
 
     private void NewTab(string text = "")
     {
         var tab = AddTab();
+        if (IsOversizedEditorText(text))
+        {
+            StartLargeDraftPersistence(tab, () => new StringReader(text), null, text);
+            return;
+        }
+
         AttachEditor(tab, text);
         if (text.Length > 0)
         {
@@ -59,13 +70,33 @@ public partial class MainWindow
 
     private async Task OpenPathsAsync(IEnumerable<string> paths, bool asLog = false, TextEncodingKind? encoding = null)
     {
+        var pending = new List<OpenRequest>();
+        WorkTab? last = null;
         foreach (var path in paths)
         {
-            await GuardAsync(() => OpenPathAsync(path, asLog, encoding));
+            try
+            {
+                var request = PrepareOpen(path, asLog, encoding);
+                last = request.Tab;
+                if (request.IsNew || encoding is not null) pending.Add(request);
+            }
+            catch (Exception error) when (IsUserError(error)) { SetStatus(error.Message); }
         }
+        if (last is null) return;
+        Select(last);
+        await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
+        foreach (var request in pending)
+            await GuardAsync(() => LoadOpenRequestAsync(request, encoding));
     }
 
     private async Task OpenPathAsync(string path, bool asLog = false, TextEncodingKind? encoding = null)
+    {
+        var request = PrepareOpen(path, asLog, encoding);
+        Select(request.Tab);
+        await LoadOpenRequestAsync(request, encoding);
+    }
+
+    private OpenRequest PrepareOpen(string path, bool asLog, TextEncodingKind? encoding)
     {
         var fullPath = Path.GetFullPath(path);
         var file = new FileInfo(fullPath);
@@ -78,23 +109,34 @@ public partial class MainWindow
         var existing = _tabs.Values.FirstOrDefault(tab => SamePath(tab.Path, fullPath) && tab.IsLog == useLog);
         if (existing is not null)
         {
-            Select(existing);
-            if (encoding is not null && (existing.Editor is not null || existing.Log is not null) && !existing.Dirty)
-            {
-                await ReloadAsync(existing, encoding);
-            }
-
-            return;
+            return new(existing, false, useLog);
         }
 
-        var tab = AddTab();
+        var tab = AddTab(select: false);
         tab.Path = fullPath;
         tab.Encoding = encoding ?? TextEncodingKind.Utf8;
+        tab.PendingLog = useLog;
+        tab.Loading = true;
+        tab.Item.Content = new TextBlock { Text = "Ожидание загрузки…", Margin = new Thickness(18) };
+        UpdateTab(tab);
+        return new(tab, true, useLog);
+    }
+
+    private async Task LoadOpenRequestAsync(OpenRequest request, TextEncodingKind? encoding)
+    {
+        var tab = request.Tab;
+        if (_closed || !_tabs.TryGetValue(tab.Id, out var current) || !ReferenceEquals(tab, current)) return;
+        if (!request.IsNew)
+        {
+            if (encoding is not null && !tab.Loading && !tab.Dirty)
+                await ReloadAsync(tab, encoding);
+            return;
+        }
         try
         {
-            if (useLog)
+            if (request.AsLog)
             {
-                AttachLog(tab, fullPath, encoding);
+                AttachLog(tab, tab.Path!, encoding);
             }
             else
             {
@@ -105,10 +147,17 @@ public partial class MainWindow
         }
         catch
         {
-            RemoveTab(tab);
+            if (_tabs.TryGetValue(tab.Id, out current) && ReferenceEquals(tab, current)) RemoveTab(tab);
             throw;
         }
+        finally
+        {
+            tab.PendingLog = false;
+            tab.Loading = false;
+        }
     }
+
+    private sealed record OpenRequest(WorkTab Tab, bool IsNew, bool AsLog);
 
     private async Task LoadFileAsync(WorkTab tab, TextEncodingKind? encoding = null)
     {
@@ -143,12 +192,27 @@ public partial class MainWindow
 
     private void AttachEditor(WorkTab tab, string text)
     {
+        var document = new TextDocument(text);
+        document.UndoStack.MarkAsOriginalFile();
+        AttachEditor(tab, document, resetDirtyState: true);
+    }
+
+    private void AttachEditor(WorkTab tab, TextDocument document)
+    {
+        AttachEditor(tab, document, resetDirtyState: false);
+    }
+
+    private void AttachEditor(WorkTab tab, TextDocument document, bool resetDirtyState)
+    {
+        EnsureIdleUnloadTimer();
+        _ = DetachEditor(tab);
         tab.Log?.Close();
         tab.Log = null;
+        tab.OpeningPage = false;
         tab.LastWorked = DateTimeOffset.Now;
         var editor = new TextEditor
         {
-            Text = text,
+            Document = document,
             FontFamily = new FontFamily("Cascadia Mono, Consolas, monospace"),
             FontSize = _fontSize,
             Background = FocusTheme.Editor,
@@ -160,17 +224,20 @@ public partial class MainWindow
             HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
         };
+        GroupedLineNumberMargin.ReplaceExisting(editor);
         editor.TextArea.SelectionBrush = FocusTheme.Selection;
         editor.Options.ShowBoxForControlCharacters = true;
         editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
         tab.Editor = editor;
         SetSyntax(editor, tab.Path);
-        tab.RestoredDirty = false;
-        tab.Dirty = false;
+        if (resetDirtyState)
+        {
+            tab.RestoredDirty = false;
+            tab.Dirty = false;
+        }
         tab.Highlights = new SearchHighlights(editor);
         editor.TextArea.TextView.BackgroundRenderers.Add(tab.Highlights);
-        var undoStack = editor.Document.UndoStack;
-        undoStack.MarkAsOriginalFile();
+        var undoStack = document.UndoStack;
 
         var warning = new TextBlock
         {
@@ -213,7 +280,7 @@ public partial class MainWindow
         Grid.SetColumn(minimap, 1);
         grid.Children.Add(minimap);
         tab.Item.Content = grid;
-        undoStack.PropertyChanged += (_, e) =>
+        System.ComponentModel.PropertyChangedEventHandler undoHandler = (_, e) =>
         {
             if (e.PropertyName == nameof(undoStack.IsOriginalFile) && ReferenceEquals(tab.Editor, editor))
             {
@@ -221,7 +288,8 @@ public partial class MainWindow
                 UpdateTab(tab);
             }
         };
-        editor.TextChanged += (_, _) =>
+        undoStack.PropertyChanged += undoHandler;
+        EventHandler textChangedHandler = (_, _) =>
         {
             tab.Revision++;
             tab.LastWorked = DateTimeOffset.Now;
@@ -236,24 +304,375 @@ public partial class MainWindow
                 RefreshSearchHighlights();
             }
         };
-        editor.TextArea.Caret.PositionChanged += (_, _) =>
+        editor.TextChanged += textChangedHandler;
+        EventHandler caretHandler = (_, _) =>
         {
             if (ReferenceEquals(tab, ActiveTab))
             {
                 UpdateStatus(tab);
             }
         };
+        editor.TextArea.Caret.PositionChanged += caretHandler;
+        EventHandler<Avalonia.Input.TextInputEventArgs> textEnteringHandler = (_, e) =>
+        {
+            if (e.Text is not { Length: > 0 } insertion || tab.Loading
+                || !WouldExceedEditorLimits(editor, insertion))
+            {
+                return;
+            }
+
+            var start = editor.SelectionStart;
+            var length = editor.SelectionLength;
+            var snapshot = document.CreateSnapshot();
+            e.Handled = true;
+            StartLargeDraftPersistence(tab,
+                () => new ReplacingTextReader(snapshot.CreateReader(), start, length, insertion), editor, insertion,
+                start, length);
+        };
+        editor.TextArea.TextEntering += textEnteringHandler;
+        EventHandler<CanExecuteRoutedEventArgs> pasteCanExecute = (_, e) =>
+        {
+            e.CanExecute = editor.IsEnabled;
+            e.Handled = true;
+        };
+        EventHandler<ExecutedRoutedEventArgs> pasteExecuted = (_, e) =>
+        {
+            e.Handled = true;
+            if (editor.IsEnabled)
+            {
+                Run(() => PasteSafelyAsync(tab, editor));
+            }
+        };
+        var pasteBinding = new RoutedCommandBinding(ApplicationCommands.Paste, pasteExecuted, pasteCanExecute);
+        editor.TextArea.CommandBindings.Insert(0, pasteBinding);
+        tab.EditorSubscriptions =
+        [
+            () => undoStack.PropertyChanged -= undoHandler,
+            () => editor.TextChanged -= textChangedHandler,
+            () => editor.TextArea.Caret.PositionChanged -= caretHandler,
+            () => editor.TextArea.TextEntering -= textEnteringHandler,
+            () => editor.TextArea.CommandBindings.Remove(pasteBinding)
+        ];
+        tab.Minimap = minimap;
+        WatchEditorFile(tab);
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
     }
 
-    private void AttachLog(WorkTab tab, string path, TextEncodingKind? encoding = null, LogTabState? state = null)
+    private async Task PasteSafelyAsync(WorkTab tab, TextEditor editor)
     {
-        tab.Log?.Close();
+        var start = editor.SelectionStart;
+        var length = editor.SelectionLength;
+        var snapshot = editor.Document.CreateSnapshot();
+        var topLevel = TopLevel.GetTopLevel(editor);
+        if (topLevel?.Clipboard is not { } clipboard)
+        {
+            return;
+        }
+
+        editor.IsEnabled = false;
+        var persistenceStarted = false;
+        try
+        {
+            var transfer = await clipboard.TryGetDataAsync();
+            var text = transfer is null ? null : await transfer.TryGetTextAsync();
+            if (string.IsNullOrEmpty(text) || !ReferenceEquals(tab.Editor, editor))
+            {
+                return;
+            }
+
+            if (WouldExceedEditorLimits(editor, text))
+            {
+                StartLargeDraftPersistence(tab,
+                    () => new ReplacingTextReader(snapshot.CreateReader(), start, length, text), editor, text,
+                    start, length);
+                persistenceStarted = true;
+                return;
+            }
+
+            editor.IsEnabled = true;
+            editor.TextArea.PerformTextInput(NormalizeBoundedPaste(editor, text));
+        }
+        finally
+        {
+            if (!persistenceStarted && ReferenceEquals(tab.Editor, editor))
+            {
+                editor.IsEnabled = true;
+            }
+        }
+    }
+
+    private static string NormalizeBoundedPaste(TextEditor editor, string text)
+    {
+        if (text.Contains('\r'))
+        {
+            text = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        }
+        if (editor.Options.ConvertTabsToSpaces && text.Contains('\t'))
+        {
+            text = text.Replace("\t", new string(' ', Math.Max(1, editor.Options.IndentationSize)), StringComparison.Ordinal);
+        }
+        return text;
+    }
+
+    private void StartLargeDraftPersistence(
+        WorkTab tab,
+        Func<TextReader> openReader,
+        TextEditor? editor,
+        string insertedText,
+        int selectionStart = 0,
+        int selectionLength = 0)
+    {
+        using var titleReader = openReader();
+        var title = ReadUntitledTitle(titleReader);
+        var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        tab.LoadCancellation?.Cancel();
+        tab.LoadCancellation = source;
+        tab.Loading = true;
+        if (editor is not null)
+        {
+            editor.IsEnabled = false;
+        }
+        else
+        {
+            tab.Item.Content = new TextBlock { Text = "Сохраняю большой черновик…", Margin = new Thickness(16) };
+        }
+
+        Run(async () =>
+        {
+            var saveGateAcquired = false;
+            try
+            {
+                await _workspace.SaveGate.WaitAsync(source.Token);
+                saveGateAcquired = true;
+                var saved = CaptureTab(tab) with
+                {
+                    SelectionStart = selectionStart + insertedText.Length,
+                    SelectionLength = 0,
+                    Reversed = false,
+                    LineCount = null,
+                    DraftOffset = 0,
+                    UntitledName = title
+                };
+                saved = await _storage.SaveClosedDraftAsync(saved, openReader, source.Token);
+                saved = saved with { DraftOffset = 0 };
+                source.Token.ThrowIfCancellationRequested();
+                if (!_tabs.ContainsKey(tab.Id) || !ReferenceEquals(tab.Editor, editor))
+                {
+                    return;
+                }
+
+                tab.Dirty = true;
+                tab.RestoredDirty = true;
+                tab.Revision++;
+                tab.LastWorked = DateTimeOffset.Now;
+                if (editor is not null)
+                {
+                    _ = DetachEditor(tab);
+                }
+                AttachDraftPreview(tab, saved, _storage.GetDraftPath(saved)!);
+                UpdateTab(tab);
+            }
+            finally
+            {
+                tab.Loading = false;
+                if (ReferenceEquals(tab.LoadCancellation, source))
+                {
+                    tab.LoadCancellation = null;
+                }
+                if (editor is not null && ReferenceEquals(tab.Editor, editor))
+                {
+                    editor.IsEnabled = true;
+                }
+                if (saveGateAcquired)
+                {
+                    _workspace.SaveGate.Release();
+                }
+                source.Dispose();
+            }
+        });
+    }
+
+    private static bool WouldExceedEditorLimits(TextEditor editor, string insertion)
+    {
+        var document = editor.Document;
+        var start = editor.SelectionStart;
+        var end = start + editor.SelectionLength;
+        var projectedCharacters = document.TextLength - editor.SelectionLength + insertion.Length;
+        if (projectedCharacters > MaxEditorCharacters)
+        {
+            return true;
+        }
+
+        var firstLine = document.GetLineByOffset(Math.Clamp(start, 0, document.TextLength));
+        var lastLine = document.GetLineByOffset(Math.Clamp(end, 0, document.TextLength));
+        var projectedLines = document.LineCount - (lastLine.LineNumber - firstLine.LineNumber);
+        var insertedLines = 0;
+        var longestInsertedLine = 0;
+        var currentLineLength = 0;
+        var previousCarriageReturn = false;
+        foreach (var character in insertion)
+        {
+            if (character == '\r')
+            {
+                insertedLines++;
+                longestInsertedLine = Math.Max(longestInsertedLine, currentLineLength);
+                currentLineLength = 0;
+                previousCarriageReturn = true;
+            }
+            else if (character == '\n')
+            {
+                if (!previousCarriageReturn)
+                {
+                    insertedLines++;
+                    longestInsertedLine = Math.Max(longestInsertedLine, currentLineLength);
+                    currentLineLength = 0;
+                }
+                previousCarriageReturn = false;
+            }
+            else
+            {
+                currentLineLength++;
+                previousCarriageReturn = false;
+            }
+        }
+        longestInsertedLine = Math.Max(longestInsertedLine, currentLineLength);
+        if (projectedLines + insertedLines > MaxEditorLines || longestInsertedLine > MaxEditorLineLength)
+        {
+            return true;
+        }
+
+        if (insertedLines == 0)
+        {
+            var lineSelectionLength = start < firstLine.EndOffset && end > firstLine.Offset
+                ? Math.Min(end, firstLine.EndOffset) - Math.Max(start, firstLine.Offset)
+                : 0;
+            return firstLine.Length - lineSelectionLength + insertion.Length > MaxEditorLineLength;
+        }
+
+        return false;
+    }
+
+    private static bool IsOversizedEditorText(string text)
+    {
+        if (text.Length > MaxEditorCharacters)
+        {
+            return true;
+        }
+
+        var lineLength = 0;
+        var lineCount = 1;
+        var previousCarriageReturn = false;
+        foreach (var character in text)
+        {
+            if (character == '\r')
+            {
+                if (lineLength > MaxEditorLineLength || ++lineCount > MaxEditorLines)
+                {
+                    return true;
+                }
+                lineLength = 0;
+                previousCarriageReturn = true;
+            }
+            else if (character == '\n')
+            {
+                if (!previousCarriageReturn)
+                {
+                    if (lineLength > MaxEditorLineLength || ++lineCount > MaxEditorLines)
+                    {
+                        return true;
+                    }
+                    lineLength = 0;
+                }
+                previousCarriageReturn = false;
+            }
+            else if (++lineLength > MaxEditorLineLength)
+            {
+                return true;
+            }
+            else
+            {
+                previousCarriageReturn = false;
+            }
+        }
+        return false;
+    }
+
+    private static string ReadUntitledTitle(TextReader reader)
+    {
+        var buffer = new char[1600];
+        var count = 0;
+        while (count < buffer.Length)
+        {
+            var read = reader.Read(buffer, count, buffer.Length - count);
+            if (read == 0) break;
+            var newline = buffer.AsSpan(count, read).IndexOfAny('\r', '\n');
+            count += newline >= 0 ? newline : read;
+            if (newline >= 0) break;
+        }
+        var firstLine = new string(buffer, 0, count).Trim();
+        if (firstLine.Length == 0) return "Без имени";
+        var builder = new StringBuilder();
+        foreach (var rune in firstLine.EnumerateRunes().Take(10)) builder.Append(rune);
+        return builder.ToString();
+    }
+
+    private AvaloniaEdit.Document.TextDocument? DetachEditor(WorkTab tab)
+    {
+        tab.FileWatch?.Dispose();
+        tab.FileWatch = null;
+        if (tab.Editor is not { } editor)
+        {
+            return null;
+        }
+
+        tab.JsonCancellation?.Cancel();
+        tab.JsonCancellation = null;
+        foreach (var unsubscribe in tab.EditorSubscriptions)
+        {
+            unsubscribe();
+        }
+        tab.EditorSubscriptions = [];
+        if (tab.Highlights is { } highlights)
+        {
+            editor.TextArea.TextView.BackgroundRenderers.Remove(highlights);
+        }
+        tab.Highlights = null;
+        tab.Minimap?.Dispose();
+        tab.Minimap = null;
+        var document = editor.Document;
+        editor.Document = new TextDocument();
         tab.Editor = null;
-        var log = new LogView(path, encoding, state) { WordWrap = state?.WordWrap ?? _wordWrap };
+        tab.JsonBanner = null;
+        tab.JsonMessage = null;
+        return document;
+    }
+
+    private void AttachLog(
+        WorkTab tab,
+        string path,
+        TextEncodingKind? encoding = null,
+        LogTabState? state = null,
+        string? draftName = null,
+        long? draftLineCount = null)
+    {
+        var log = new LogView(path, encoding, state ?? new LogTabState(AutoRefresh: tab.AutoRefresh), draftName, draftLineCount)
+        {
+            WordWrap = state?.WordWrap ?? _wordWrap
+        };
+        tab.Log?.Close();
+        _ = DetachEditor(tab);
         log.SetTextSize(_fontSize);
         tab.Log = log;
+        tab.OpeningPage = !log.InitialPageLoad.IsCompleted;
+        if (tab.OpeningPage)
+        {
+            Run(async () =>
+            {
+                try { await log.InitialPageLoad; }
+                finally { if (ReferenceEquals(tab.Log, log)) tab.OpeningPage = false; }
+            });
+        }
         log.StatusChanged += status =>
         {
             if (ReferenceEquals(tab, ActiveTab))
@@ -267,7 +686,7 @@ public partial class MainWindow
 
     private async Task ReloadAsync(WorkTab tab, TextEncodingKind? encoding = null)
     {
-        if (tab.Path is not { } path)
+        if (tab.Path is not { } path || tab.Saving)
         {
             return;
         }
@@ -277,9 +696,10 @@ public partial class MainWindow
             throw new InvalidOperationException("Сначала сохраните изменения.");
         }
 
-        if (tab.Log is not null)
+        if (tab.Log is { } log)
         {
-            AttachLog(tab, path, encoding);
+            if (log.HasPendingEdit) throw new IOException("Сохраните или отмените правки страницы.");
+            if (tab.Recovery is null) AttachLog(tab, path, encoding, log.CaptureState() with { Encoding = encoding });
             return;
         }
 
@@ -324,11 +744,23 @@ public partial class MainWindow
 
     private async Task SaveAsync(bool saveAs = false)
     {
-        if (ActiveTab is not { Editor: { } editor } tab)
+        if (ActiveTab is not { } tab || tab.Saving)
         {
             return;
         }
+        if (tab.Log is { IsReadOnly: false } log && !saveAs)
+        {
+            await log.SavePageEditAsync();
+            return;
+        }
+        if (tab.Editor is not { } editor) return;
+        tab.Saving = true;
+        try { await SaveEditorAsync(tab, editor, saveAs); }
+        finally { tab.Saving = false; }
+    }
 
+    private async Task SaveEditorAsync(WorkTab tab, TextEditor editor, bool saveAs)
+    {
         var path = tab.Path;
         FileStamp? expected = tab.Stamp;
         if (saveAs || path is null)
@@ -366,6 +798,7 @@ public partial class MainWindow
         tab.Path = path;
         SetSyntax(editor, path);
         tab.Stamp = stamp;
+        WatchEditorFile(tab);
         if (iconPosition is not null)
         {
             _ = iconPosition.RestoreAsync(path, stamp);
@@ -390,44 +823,64 @@ public partial class MainWindow
 
     private async Task CloseTabAsync(WorkTab tab)
     {
-        if (!_tabs.ContainsKey(tab.Id) || _confirmingTabClose)
+        if (_closing || !_tabs.ContainsKey(tab.Id) || _confirmingTabClose || tab.Closing || tab.CheckingSession)
         {
             return;
         }
 
-        if (tab is { Dirty: true, Path: { } path, Recovery: null })
+        if (tab.Saving || tab.Log?.HasPendingEdit == true)
         {
-            var body = DialogPanel(new TextBlock
-            {
-                Text = $"Вкладка «{Path.GetFileName(path)}» содержит несохранённый текст.",
-                TextWrapping = TextWrapping.Wrap
-            });
-            var dialog = Dialog("Закрыть без сохранения?", body);
-            var cancel = FocusButton(Button("Отмена", () => dialog.Close(false)));
-            cancel.IsCancel = true;
-            var discard = Button("Закрыть", () => dialog.Close(true));
-            discard.Classes.Add("focus-danger");
-            body.Children.Add(Row(cancel, discard));
-            _confirmingTabClose = true;
-            try
-            {
-                if (!await dialog.ShowDialog<bool>(this))
-                {
-                    return;
-                }
-            }
-            finally
-            {
-                _confirmingTabClose = false;
-            }
+            Select(tab);
+            SetStatus("Завершите сохранение или отмените правки страницы перед закрытием.");
+            return;
         }
 
-        await RememberClosedAsync(tab);
-        await RecordRecentAsync(tab);
-        RemoveTab(tab);
-        if (_tabs.Count == 0)
+        tab.Closing = true;
+        try
         {
-            await ShowHomeAsync();
+            if (tab is { Dirty: true, Path: { } path, Recovery: null })
+            {
+                var body = DialogPanel(new TextBlock
+                {
+                    Text = $"Вкладка «{Path.GetFileName(path)}» содержит несохранённый текст.",
+                    TextWrapping = TextWrapping.Wrap
+                });
+                var dialog = Dialog("Закрыть без сохранения?", body);
+                var cancel = FocusButton(Button("Отмена", () => dialog.Close(false)));
+                cancel.IsCancel = true;
+                var discard = Button("Закрыть", () => dialog.Close(true));
+                discard.Classes.Add("focus-danger");
+                body.Children.Add(Row(cancel, discard));
+                _confirmingTabClose = true;
+                try
+                {
+                    if (!await dialog.ShowDialog<bool>(this))
+                    {
+                        return;
+                    }
+                }
+                finally
+                {
+                    _confirmingTabClose = false;
+                }
+            }
+
+            if (!_tabs.ContainsKey(tab.Id) || _closing)
+            {
+                return;
+            }
+
+            await RememberClosedAsync(tab);
+            await RecordRecentAsync(tab);
+            RemoveTab(tab);
+            if (_tabs.Count == 0)
+            {
+                await ShowHomeAsync();
+            }
+        }
+        finally
+        {
+            tab.Closing = false;
         }
     }
 
@@ -436,6 +889,8 @@ public partial class MainWindow
         tab.LoadCancellation?.Cancel();
         tab.JsonCancellation?.Cancel();
         tab.Log?.Close();
+        tab.Log = null;
+        _ = DetachEditor(tab);
         _tabs.Remove(tab.Id);
         tab.Group.Tabs.Items.Remove(tab.Item);
         if (ReferenceEquals(_active, tab.Group) && SelectedIn(_active) is { } next)
@@ -484,7 +939,7 @@ public partial class MainWindow
     {
         var title = tab.Path is { } path ? Path.GetFileName(path) : UntitledName(tab);
         tab.Label.Text = title;
-        tab.DirtyMark.Opacity = tab.Dirty ? 1 : 0;
+        tab.RefreshHeaderMark();
         AutomationProperties.SetName(tab.Item, title + (tab.Dirty ? ", изменено" : ""));
         ToolTip.SetTip(tab.Label, tab.Path ?? title);
         if (ReferenceEquals(tab, ActiveTab))
@@ -497,7 +952,7 @@ public partial class MainWindow
     {
         if (tab.Editor?.Document is not { } document || document.TextLength == 0)
         {
-            return "Без имени";
+            return (tab.Deferred ?? tab.Recovery)?.UntitledName ?? "Без имени";
         }
 
         var line = document.GetLineByNumber(1);
@@ -523,7 +978,7 @@ public partial class MainWindow
         {
             var status = tab.Dirty ? "Изменено" : "Сохранено";
             SetStatus($"{status} · {tab.Path ?? "Без имени"}{(tab.DiskStatus is { } disk ? $" · {disk}" : "")}");
-            FormatText.Text = $"Стр. {editor.TextArea.Caret.Line}, стлб. {editor.TextArea.Caret.Column} · {EncodingName(tab.Encoding)} · {tab.Ending}";
+            FormatText.Text = $"Стр. {LineNumbers.Format(editor.TextArea.Caret.Line)}, стлб. {LineNumbers.Format(editor.TextArea.Caret.Column)} · {EncodingName(tab.Encoding)} · {tab.Ending}";
         }
         else
         {
@@ -621,11 +1076,14 @@ public partial class MainWindow
         public TabItem Item { get; } = new();
         public TextBlock Label { get; set; } = null!;
         public TextBlock DirtyMark { get; set; } = null!;
+        public TextBlock LoadMark { get; set; } = null!;
+        public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }
         public TextEditor? Editor { get; set; }
         public LogView? Log { get; set; }
-        public bool IsLog => Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
-        public SessionTab? Deferred { get; set; }
+        public bool IsLog => PendingLog || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
+        public bool PendingLog { get; set; }
+        public SessionTab? Deferred { get => field; set { field = value; RefreshHeaderMark(); } }
         public SessionTab? Recovery { get; set; }
         public TextEncodingKind Encoding { get; set; }
         public LineEndingKind Ending { get; set; } = OperatingSystem.IsWindows() ? LineEndingKind.CrLf : LineEndingKind.Lf;
@@ -634,15 +1092,35 @@ public partial class MainWindow
         public string? DiskStatus { get; set; }
         public bool Dirty { get; set; }
         public bool RestoredDirty { get; set; }
-        public bool Loading { get; set; }
+        public bool Loading { get => field; set { field = value; RefreshHeaderMark(); } }
+        public bool CheckingSession { get => field; set { field = value; RefreshHeaderMark(); } }
+        public bool OpeningPage { get => field; set { field = value; RefreshHeaderMark(); } }
+        public bool Closing { get; set; }
+        public bool Saving { get; set; }
+        public bool AutoRefresh { get; set; } = true;
+        public EditorFileWatch? FileWatch { get; set; }
         public bool JsonDisabled { get; set; }
         public long Revision { get; set; }
         public DateTimeOffset LastWorked { get; set; } = DateTimeOffset.Now;
         public SearchHighlights? Highlights { get; set; }
+        public DocumentMinimap? Minimap { get; set; }
+        public List<Action> EditorSubscriptions { get; set; } = [];
         public JsonProblem? JsonError { get; set; }
         public Border? JsonBanner { get; set; }
         public TextBlock? JsonMessage { get; set; }
         public CancellationTokenSource? JsonCancellation { get; set; }
         public CancellationTokenSource? LoadCancellation { get; set; }
+
+        public void RefreshHeaderMark()
+        {
+            var loading = Loading || CheckingSession || OpeningPage;
+            var waiting = Deferred is not null;
+            LoadMark.IsVisible = loading || waiting;
+            LoadMark.Text = loading ? "↻" : "◷";
+            DirtyMark.Opacity = !LoadMark.IsVisible && Dirty ? 1 : 0;
+            var status = loading ? "Загрузка вкладки" : waiting ? "Загрузится при выборе" : null;
+            AutomationProperties.SetName(LoadMark, status);
+            ToolTip.SetTip(HeaderMarks, status);
+        }
     }
 }

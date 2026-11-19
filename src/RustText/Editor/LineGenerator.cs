@@ -7,6 +7,7 @@ namespace RustText.Demo.Editor;
 internal sealed class LineGenerator(string template, long rows)
 {
     internal const long TabByteLimit = 8 * 1024 * 1024;
+    internal const long TabLineLimit = 50_000;
     private const string Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static readonly Regex Placeholders = new(@"\{(int_from_[^{}]*|guid|rand_string(?:_[^{}]*)?)\}",
         RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(400));
@@ -23,9 +24,9 @@ internal sealed class LineGenerator(string template, long rows)
 
     public async Task<string> GenerateTextAsync(IProgress<double>? progress, CancellationToken token)
     {
-        if (EstimateBytes() > TabByteLimit)
+        if (EstimateBytes() > TabByteLimit || rows > TabLineLimit)
         {
-            throw new InvalidDataException("Результат превышает 8 МиБ. Сохраните его в файл.");
+            throw new InvalidDataException("Результат превышает ограничение для вкладки. Сохраните его в файл.");
         }
 
         using var writer = new StringWriter(CultureInfo.InvariantCulture);

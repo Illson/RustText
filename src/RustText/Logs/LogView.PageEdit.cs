@@ -1,0 +1,235 @@
+using System.Security.Cryptography;
+using System.Text;
+using Avalonia.Controls;
+using Avalonia.Layout;
+
+namespace RustText.Demo.Logs;
+
+internal sealed partial class LogView
+{
+    private const int EditCharacterLimit = 256 * 1024;
+    private readonly TextBlock _readModeLabel = new()
+    {
+        FontSize = 11,
+        Foreground = FocusTheme.Muted,
+        VerticalAlignment = VerticalAlignment.Center,
+    };
+    private readonly Button _editPageButton = new() { Content = "Редактировать" };
+    private readonly Button _savePageButton = new() { Content = "Сохранить страницу" };
+    private readonly Button _cancelPageButton = new() { Content = "Отменить" };
+    private PageEdit? _pageEdit;
+    private CancellationTokenSource? _pageWrite;
+
+    internal Func<string, string, long, CancellationToken, Task>? CommitDraftPage { get; set; }
+    public bool HasPendingEdit => _pageWrite is not null || (_pageEdit is { } edit && _logText.Text != edit.Original);
+
+    private Control BuildPageModeControls()
+    {
+        var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        SetButtonStyle(_editPageButton, "focus-quiet");
+        SetButtonStyle(_savePageButton, "focus-primary");
+        SetButtonStyle(_cancelPageButton, "focus-quiet");
+        ToolTip.SetTip(_editPageButton, "Открыть текущую страницу для правок");
+        _editPageButton.Click += async (_, _) => await TogglePageEditAsync();
+        _savePageButton.Click += async (_, _) => await SavePageEditAsync();
+        _cancelPageButton.Click += async (_, _) =>
+        {
+            if (_pageWrite is { } write) write.Cancel();
+            else await EndPageEditAsync();
+        };
+        _logText.TextChanged += (_, _) => UpdatePageModeControls();
+        panel.Children.Add(_readModeLabel);
+        panel.Children.Add(_editPageButton);
+        panel.Children.Add(_savePageButton);
+        panel.Children.Add(_cancelPageButton);
+        return panel;
+    }
+
+    private async Task TogglePageEditAsync()
+    {
+        if (_closed || _busy || _page is not { } page) return;
+        if (_pageEdit is not null)
+        {
+            if (HasPendingEdit) SetStatus("Сохраните или отмените правки страницы.");
+            else await EndPageEditAsync();
+            return;
+        }
+
+        _busy = true;
+        RefreshButtons();
+        try
+        {
+            var from = page.Rows.Count == 0 ? _reader.PreambleLength : page.Rows[0].StartOffset;
+            var to = Math.Max(from, page.NextOffset);
+            var encoding = DocumentFiles.GetEncoding(_reader.Encoding);
+            var expected = _fileStamp;
+            var token = _closing.Token;
+            var text = await Task.Run(() =>
+            {
+                using var source = LogDataReader.Open(_path);
+                if (ReadFileStamp(_path, source) != expected) throw ChangedSincePageRead();
+                source.Position = from;
+                var bytes = new byte[checked((int)(to - from))];
+                source.ReadExactly(bytes);
+                token.ThrowIfCancellationRequested();
+                if (ReadFileStamp(_path, source) != expected) throw ChangedSincePageRead();
+                return encoding.GetString(bytes);
+            }, token);
+            if (_closed) return;
+
+            _pageEdit = new(from, to, text, encoding, expected);
+            _searchPanel.IsVisible = false;
+            _lineGutterScrollViewer.IsVisible = false;
+            _logText.MaxLength = EditCharacterLimit;
+            _logText.Text = text;
+            _logText.IsReadOnly = false;
+            _logText.CaretIndex = 0;
+            _logText.Focus();
+            SetStatus("Редактирование текущей страницы. Ctrl+S сохраняет изменения.");
+        }
+        catch (OperationCanceledException) when (_closed) { }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or DecoderFallbackException)
+        {
+            if (!_closed) SetStatus($"Не удалось открыть страницу для правок. {error.Message}");
+        }
+        finally
+        {
+            _busy = false;
+            if (!_closed) RefreshButtons();
+        }
+    }
+
+    public async Task SavePageEditAsync()
+    {
+        if (_closed || _pageWrite is not null || _pageEdit is not { } edit || _logText.Text is not { } text) return;
+        if (text == edit.Original)
+        {
+            await EndPageEditAsync();
+            return;
+        }
+
+        using var write = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
+        _pageWrite = write;
+        _logText.IsReadOnly = true;
+        RefreshButtons();
+        SetStatus("Сохранение страницы…");
+        var temporary = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(_path)!, $".rusttext-page-{Guid.NewGuid():N}.pending");
+        var committedInPlace = false;
+        try
+        {
+            var hash = await Task.Run(() => StageEditedPage(edit, text, temporary, write.Token), write.Token);
+            if (_isDraft)
+            {
+                write.Token.ThrowIfCancellationRequested();
+                var publish = CommitDraftPage ?? throw new IOException("Черновик недоступен для сохранения.");
+                await publish(temporary, hash!, edit.From, write.Token);
+            }
+            else
+            {
+                committedInPlace = true;
+                ResetFileHandle();
+            }
+        }
+        catch (OperationCanceledException) when (write.IsCancellationRequested)
+        {
+            if (!_closed) SetStatus("Сохранение страницы отменено.");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or EncoderFallbackException)
+        {
+            if (!_closed) SetStatus($"Не удалось сохранить страницу. {error.Message}");
+        }
+        finally
+        {
+            try { File.Delete(temporary); } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            _pageWrite = null;
+            if (!_closed)
+            {
+                _logText.IsReadOnly = false;
+                RefreshButtons();
+            }
+        }
+
+        if (committedInPlace && !_closed)
+        {
+            await EndPageEditAsync();
+            StartIndexIfNeeded();
+            LoadMinimapSamples();
+            SetStatus("Страница сохранена.");
+        }
+    }
+
+    private string? StageEditedPage(PageEdit edit, string text, string temporary, CancellationToken token)
+    {
+        var replacement = edit.Encoding.GetBytes(text);
+        using var source = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+            1024 * 1024, FileOptions.SequentialScan);
+        if (ReadFileStamp(_path, source) != edit.Stamp) throw ChangedSincePageRead();
+        source.Position = edit.From;
+        var originalBytes = new byte[checked((int)(edit.To - edit.From))];
+        source.ReadExactly(originalBytes);
+        if (!originalBytes.AsSpan().SequenceEqual(edit.Encoding.GetBytes(edit.Original))) throw ChangedSincePageRead();
+        source.Position = 0;
+        using var digest = _isDraft ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
+        using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024))
+        {
+            var buffer = new byte[1024 * 1024];
+            CopyRange(edit.From);
+            Write(replacement);
+            source.Position = edit.To;
+            CopyRange(edit.Stamp.Length - edit.To);
+            output.Flush(flushToDisk: true);
+
+            void CopyRange(long remaining)
+            {
+                while (remaining > 0)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var count = (int)Math.Min(remaining, buffer.Length);
+                    source.ReadExactly(buffer.AsSpan(0, count));
+                    Write(buffer.AsSpan(0, count));
+                    remaining -= count;
+                }
+            }
+
+            void Write(ReadOnlySpan<byte> data)
+            {
+                output.Write(data);
+                digest?.AppendData(data);
+            }
+        }
+
+        token.ThrowIfCancellationRequested();
+        if (ReadFileStamp(_path, source) != edit.Stamp) throw ChangedSincePageRead();
+        if (digest is not null) return Convert.ToHexString(digest.GetHashAndReset());
+        File.Replace(temporary, _path, destinationBackupFileName: null);
+        return null;
+    }
+
+    private async Task EndPageEditAsync()
+    {
+        if (_closed || _pageEdit is not { } edit) return;
+        _pageEdit = null;
+        _logText.IsReadOnly = true;
+        _logText.MaxLength = 0;
+        _lineGutterScrollViewer.IsVisible = true;
+        await LoadPageAsync(edit.From, saveHistory: false, allowFollowEnd: false);
+        RefreshButtons();
+    }
+
+    private void UpdatePageModeControls()
+    {
+        var editing = _pageEdit is not null;
+        var saving = _pageWrite is not null;
+        _readModeLabel.Text = editing ? "РЕДАКТИРОВАНИЕ" : "ТОЛЬКО ЧТЕНИЕ";
+        _editPageButton.Content = editing ? "Только чтение" : "Редактировать";
+        _editPageButton.IsEnabled = !_closed && !_busy && !saving && _page is not null;
+        _savePageButton.IsVisible = editing && !saving;
+        _savePageButton.IsEnabled = HasPendingEdit;
+        _cancelPageButton.IsVisible = editing;
+        _cancelPageButton.Content = saving ? "Остановить сохранение" : "Отменить";
+    }
+
+    private static IOException ChangedSincePageRead() => new("Файл изменился на диске. Обновите страницу перед сохранением.");
+
+    private sealed record PageEdit(long From, long To, string Original, Encoding Encoding, FileStamp Stamp);
+}

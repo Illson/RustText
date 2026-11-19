@@ -1,5 +1,6 @@
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:chrome="using:Avalonia.Controls.Chrome"
              xmlns:local="using:RustText.Demo"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
@@ -51,7 +52,7 @@
                     <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
                         <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,5,8,0">
                             <Grid ColumnDefinitions="*,Auto">
-                                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                                <ScrollViewer Name="TabHeaderScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                                     <ItemsPresenter Name="PART_ItemsPresenter" ItemsPanel="{TemplateBinding ItemsPanel}" />
                                 </ScrollViewer>
                                 <ContentPresenter Grid.Column="1" Content="{TemplateBinding HeaderActions}"
@@ -94,6 +95,12 @@
                                        ListMedium="{x:Static local:FocusTheme.SelectionColor}" />
             </FluentTheme.Palettes>
         </FluentTheme>
+        <Style Selector="chrome|WindowDrawnDecorations /template/ Button#PART_FullScreenButton,
+                         chrome|WindowDrawnDecorations /template/ Button#PART_PopoverFullScreenButton,
+                         chrome|WindowDrawnDecorations /template/ Panel#PART_TitleTextPanel,
+                         chrome|WindowDrawnDecorations /template/ TextBlock#PART_PopoverTitleText">
+            <Setter Property="IsVisible" Value="False" />
+        </Style>
         <Style Selector="Window">
             <Setter Property="Background" Value="{x:Static local:FocusTheme.Chrome}" />
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
@@ -101,6 +108,22 @@
         <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
         <Style Selector="TabItem.focus-tab">
             <Setter Property="Theme" Value="{StaticResource FocusDocumentTab}" />
+        </Style>
+        <Style Selector="Button.focus-caption">
+            <Setter Property="Width" Value="46" />
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Button.focus-caption:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+        </Style>
+        <Style Selector="Button.focus-caption-close:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.DangerSurface}" />
         </Style>
         <Style Selector="Window.focus-dialog">
             <Setter Property="Background" Value="{x:Static local:FocusTheme.Panel}" />
