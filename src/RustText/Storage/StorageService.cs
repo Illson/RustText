@@ -703,6 +703,9 @@ internal sealed class StorageService
 
         var name = $"session-{tab.Id}-{sha}.txt";
         var destination = Path.Combine(_drafts, name);
+        var saved = tab with { DraftRef = "standalone/" + name, DraftSha256 = sha };
+        if (string.Equals(source, destination, StringComparison.OrdinalIgnoreCase)) return saved;
+
         var temporary = destination + $".{Guid.NewGuid():N}.tmp";
         input.Position = 0;
         try
@@ -720,7 +723,7 @@ internal sealed class StorageService
             try { File.Delete(temporary); } catch { }
             throw;
         }
-        return tab with { DraftRef = "standalone/" + name, DraftSha256 = sha };
+        return saved;
     }
 
     private async Task<SessionState?> LoadLegacySessionAsync(CancellationToken token)

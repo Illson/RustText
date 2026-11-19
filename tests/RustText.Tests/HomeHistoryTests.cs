@@ -114,19 +114,19 @@ public sealed class HomeHistoryTests
             var current = (await File.ReadAllTextAsync(Path.Combine(checkpoints, "latest.json"))).Trim();
             Assert.Single((await storage.LoadSessionAsync())!.Tabs);
             var manifest = Path.Combine(checkpoints, current, "manifest.json");
-            var original = await File.ReadAllBytesAsync(manifest);
-            try
-            {
-                await File.WriteAllTextAsync(manifest, "corrupt checkpoint");
-                var backup = (await storage.LoadSessionAsync())!;
-                Assert.Empty(backup.Tabs);
-                var recovered = Assert.Single(backup.ClosedTabs!);
-                Assert.Equal(kept.Id, recovered.Id);
-                Assert.Equal("keep this draft", await storage.LoadDraftAsync(recovered));
-            }
-            finally { await File.WriteAllBytesAsync(manifest, original); }
+            await File.WriteAllTextAsync(manifest, "corrupt checkpoint");
+            var backup = (await storage.LoadSessionAsync())!;
+            Assert.Empty(backup.Tabs);
+            var recovered = Assert.Single(backup.ClosedTabs!);
+            Assert.Equal(kept.Id, recovered.Id);
+            Assert.Equal("keep this draft", await storage.LoadDraftAsync(recovered));
+
+            await CloseAsync(window);
+            var reopened = (await storage.LoadSessionAsync())!;
+            Assert.Equal("Несохранённый текст из последней сессии", await storage.LoadDraftAsync(Assert.Single(reopened.Tabs)));
+            Assert.Equal(kept.Id, Assert.Single(reopened.ClosedTabs!).Id);
         }
-        finally { await CloseAsync(window); }
+        finally { if (window.IsVisible) await CloseAsync(window); }
     });
 
     private static IEnumerable<Button> HomeButtons(MainWindow window) =>
