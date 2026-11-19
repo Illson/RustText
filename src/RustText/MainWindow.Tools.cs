@@ -148,7 +148,7 @@ public partial class MainWindow
             return;
         }
 
-        var editor = ActiveTab?.Editor;
+        var editor = ActiveTab?.EditorLogFilter?.VisibleEditor ?? ActiveTab?.Editor;
         var log = ActiveTab?.Log;
         var isInEditor = editor?.IsVisualAncestorOf(source) == true;
         var isInLog = log?.IsVisualAncestorOf(source) == true;
@@ -209,6 +209,11 @@ public partial class MainWindow
             {
                 editor.WordWrap = _wordWrap;
                 editor.FontSize = _fontSize;
+                if (tab.EditorLogFilter is { IsFiltering: true } filter)
+                {
+                    filter.VisibleEditor.WordWrap = _wordWrap;
+                    filter.VisibleEditor.FontSize = _fontSize;
+                }
             }
 
             tab.Log?.SetTextSize(_fontSize);
@@ -227,7 +232,7 @@ public partial class MainWindow
 
     private async Task FormatJsonAsync()
     {
-        if (ActiveTab is not { Editor: { } editor } tab)
+        if (ActiveTab is not { Editor: { IsReadOnly: false } editor } tab)
         {
             return;
         }
@@ -246,6 +251,7 @@ public partial class MainWindow
             throw new InvalidOperationException("Текст изменился во время форматирования.");
         }
 
+        if (editor.IsReadOnly || !ReferenceEquals(tab.Editor, editor)) return;
         editor.Document.Replace(start, length, formatted);
         SelectText(tab, start, 0);
     }

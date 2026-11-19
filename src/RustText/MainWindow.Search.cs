@@ -144,6 +144,7 @@ public partial class MainWindow
 
     private void OpenSearchPanel(bool replace = false)
     {
+        if (ActiveTab is { EditorLogFilter.IsFiltering: true } filteredTab) CloseEditorLevelFilter(filteredTab);
         if (!replace && ActiveTab?.Log is { } log)
         {
             if (PanelHost.IsVisible) CloseSearchPanel();
@@ -416,7 +417,7 @@ public partial class MainWindow
 
     private async Task ReplaceAsync(bool all)
     {
-        if (ActiveTab is not { Editor: { } editor } tab)
+        if (ActiveTab is not { Editor: { IsReadOnly: false } editor } tab)
         {
             return;
         }
@@ -448,6 +449,7 @@ public partial class MainWindow
             throw new InvalidOperationException("Текст изменился во время замены.");
         }
 
+        if (editor.IsReadOnly || !ReferenceEquals(tab.Editor, editor)) return;
         if (result.Count > 0)
         {
             MultiCaretEditing.CollapseToPrimary(editor.TextArea);

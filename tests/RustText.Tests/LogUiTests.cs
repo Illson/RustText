@@ -143,6 +143,96 @@ public sealed class LogUiTests
         finally { await CloseMainWindowAsync(window); }
     });
 
+    [Fact]
+    public Task InlineLevelFilterPreservesTheUnderlyingPageAndReturnsToItWhenReset() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels.log");
+        var original = string.Concat(Enumerable.Range(0, 240).Select(row => row % 2 == 0
+            ? $"Fatal fatal-row-{row:D3}\n" : $"Info info-row-{row:D3}\n"));
+        await File.WriteAllTextAsync(path, original);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "NavigateAsync", 0L, true);
+            await InvokeTask(log, "TogglePageEditAsync");
+            var source = (TextBox)Field(log, "_logText");
+            var originalPage = source.Text;
+            source.CaretIndex = Math.Min(12, source.Text!.Length);
+            source.SelectionStart = 0;
+            source.SelectionEnd = Math.Min(5, source.Text.Length);
+            var originalSelection = SelectedText(source);
+            var pageOffset = Page(log)!.StartOffset;
+
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            var filterPanel = (LogLevelFilterPanel)Field(log, "_levelFilter")!;
+            Assert.True(filterPanel.IsVisible);
+            Assert.Equal(pageOffset, Page(log)!.StartOffset);
+            Assert.True(source.IsVisible);
+            Assert.Equal(originalPage, source.Text);
+            Assert.Equal(originalSelection, SelectedText(source));
+            Assert.False(log.IsReadOnly);
+
+            filterPanel.SetLevels(LogLevel.Fatal);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Fatal fatal-row-000", StringComparison.Ordinal) == true);
+            Assert.DoesNotContain("Info info-row-", filtered.Text);
+            Assert.False(((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            Assert.Equal(originalPage, source.Text);
+
+            ((Button)Field(log, "_levelFilterButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => !filterPanel.IsVisible && ((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            Assert.Equal(pageOffset, Page(log)!.StartOffset);
+            Assert.Equal(originalPage, source.Text);
+            Assert.Equal(originalSelection, SelectedText(source));
+
+            Assert.False(filterPanel.IsVisible);
+            Assert.Equal(originalPage, source.Text);
+            Assert.False(log.IsReadOnly);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task InlineLevelFilterCannotOpenWhilePageHasPendingEdits() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels-pending.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(0, 100).Select(row => $"Info row-{row:D3}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "TogglePageEditAsync");
+            var source = (TextBox)Field(log, "_logText");
+            source.Text = "pending edit";
+            Assert.True(log.HasPendingEdit);
+            Assert.False(log.CanFilterLevels);
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            Assert.False(((LogLevelFilterPanel)Field(log, "_levelFilter")!).IsVisible);
+            Assert.Equal("pending edit", source.Text);
+            Assert.False(log.IsReadOnly);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task InlineLevelFilterRefreshesAfterAnErrorIsAppended() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels-refresh.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(0, 120).Select(row => $"Info row-{row:D3}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")!).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            await HeadlessTests.WaitForAsync(() => Field(log, "_filterReading") is null
+                && ((TextBlock)Field(log, "_filterStatus")).Text == "Совпадений нет");
+            await WriteAppend(path, Encoding.UTF8.GetBytes("Error appended while filtered\n"));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.Contains("Error appended while filtered", StringComparison.Ordinal) == true);
+            Assert.DoesNotContain("Info row-", filtered.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Theory]
     [InlineData("first\r\nlast", 11, "first", "last")]
     [InlineData("first\r\n\r\nlast", 7, "first\r\nlast", "\r\n")]

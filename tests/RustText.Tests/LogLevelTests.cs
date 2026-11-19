@@ -1,12 +1,12 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls.Presenters;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Controls;
-using Avalonia.Controls.Documents;
 using Avalonia.Controls.Primitives;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
@@ -78,30 +78,50 @@ public sealed class LogLevelTests
             await log.InitialPageLoad;
             await HeadlessTests.WaitForAsync(() => log.GetVisualDescendants().OfType<TextPresenter>()
                 .Any(presenter => presenter.Text?.StartsWith("INFO info-1", StringComparison.Ordinal) == true && presenter.Bounds.Height > 0));
-            var presenter = log.GetVisualDescendants().OfType<TextPresenter>().Single(p => p.Text?.StartsWith("INFO info-1") == true);
-            var origin = presenter.TranslatePoint(default, log)!.Value;
-            var lineHeight = presenter.TextLayout.TextLines[0].Height;
-            AssertSeverityBands(log, (int)origin.X + 220, (int)(origin.Y + lineHeight * .5), (int)(origin.Y + lineHeight * 1.5));
-            var open = log.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Уровни…"));
-            open.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
-            var dialog = Assert.Single(owner.OwnedWindows);
-            await HeadlessTests.WaitForAsync(() => Runs(dialog).Length == 100);
-            Assert.Equal("[ERR] error-1", Runs(dialog)[0].Text);
-            Assert.All(Runs(dialog), run => Assert.Same(FocusTheme.Danger, run.Foreground));
-            await File.AppendAllTextAsync(path, "\n[ERR] added after opening");
-            Button(dialog, "Дальше").RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
-            await HeadlessTests.WaitForAsync(() => Runs(dialog).Length == 10);
-            Assert.Equal("[ERR] error-110", Runs(dialog)[^1].Text);
-            Button(dialog, "Назад").RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
-            await HeadlessTests.WaitForAsync(() => Runs(dialog).Length == 100);
-            foreach (var option in dialog.GetVisualDescendants().OfType<ToggleButton>())
-                option.IsChecked = Equals(option.Content, "Info");
-            await HeadlessTests.WaitForAsync(() => Runs(dialog).FirstOrDefault()?.Text == "INFO info-1");
-            Assert.All(Runs(dialog), run => Assert.Same(FocusTheme.Success, run.Foreground));
-            dialog.Close();
-            Assert.Equal(original + "\n[ERR] added after opening", await File.ReadAllTextAsync(path));
+            void CheckFirstTwoLineColors()
+            {
+                var presenter = log.GetVisualDescendants().OfType<TextPresenter>().Single(p =>
+                    p.IsEffectivelyVisible && p.Text?.StartsWith("INFO info-1") == true);
+                var origin = presenter.TranslatePoint(default, log)!.Value;
+                var height = presenter.TextLayout.TextLines[0].Height;
+                AssertSeverityBands(log, (int)origin.X + 220, (int)(origin.Y + height * .5), (int)(origin.Y + height * 1.5));
+            }
+            CheckFirstTwoLineColors();
+            Click(log, "Уровни…");
+            Assert.Empty(owner.OwnedWindows);
+            var panel = Assert.Single(log.GetVisualDescendants().OfType<LogLevelFilterPanel>());
+            Assert.Equal(LogLevel.All, panel.SelectedLevels);
+            var fullText = log.GetVisualDescendants().OfType<TextBox>().Single(box => AutomationProperties.GetAutomationId(box) == "LogText");
+            Assert.Contains("INFO info-1", fullText.Text);
+            Assert.Contains("[ERR] error-1", fullText.Text);
+
+            await HeadlessTests.WaitForAsync(() => panel.GetVisualDescendants().OfType<Button>().Any(button => Equals(button.Content, "Снять все")));
+            Click(panel, "Снять все");
+            var error = panel.GetVisualDescendants().OfType<ToggleButton>().Single(button => Equals(button.Content, "Error"));
+            error.IsChecked = true;
+            await HeadlessTests.WaitForAsync(() => FilteredLines(log).Length == 100);
+            Assert.Equal(Enumerable.Range(1, 100).Select(n => $"[ERR] error-{n}"), FilteredLines(log));
+            Click(log, "Дальше");
+            await HeadlessTests.WaitForAsync(() => FilteredLines(log).Length == 10);
+            Assert.Equal(Enumerable.Range(101, 10).Select(n => $"[ERR] error-{n}"), FilteredLines(log));
+            Click(log, "Назад");
+            await HeadlessTests.WaitForAsync(() => FilteredLines(log).Length == 100);
+            Assert.Equal("[ERR] error-1", FilteredLines(log)[0]);
+
+            error.IsChecked = false;
+            Assert.Empty(FilteredLines(log));
+            panel.GetVisualDescendants().OfType<ToggleButton>().Single(button => Equals(button.Content, "Info")).IsChecked = true;
+            await HeadlessTests.WaitForAsync(() => FilteredLines(log).FirstOrDefault() == "INFO info-1");
+            error.IsChecked = true;
+            await HeadlessTests.WaitForAsync(() => FilteredLines(log).ElementAtOrDefault(1) == "[ERR] error-1");
+            CheckFirstTwoLineColors();
+            Click(panel, "Выбрать все");
+            Assert.True(fullText.IsEffectivelyVisible);
+            Assert.Contains("[ERR] error-1", fullText.Text);
+            Assert.Empty(owner.OwnedWindows);
+            Assert.Equal(original, await File.ReadAllTextAsync(path));
         }
-        finally { foreach (var dialog in owner.OwnedWindows.ToArray()) dialog.Close(); owner.Close(); }
+        finally { owner.Close(); }
     });
 
     [Fact]
@@ -145,8 +165,14 @@ public sealed class LogLevelTests
         }
     }
 
-    private static Button Button(Window dialog, string caption) => dialog.GetVisualDescendants()
-        .OfType<Button>().Single(button => Equals(button.Content, caption));
-    private static Run[] Runs(Window dialog) => dialog.GetVisualDescendants().OfType<SelectableTextBlock>()
-        .SingleOrDefault()?.Inlines?.OfType<Run>().ToArray() ?? [];
+    private static void Click(Control scope, string caption) => scope.GetVisualDescendants().OfType<Button>()
+        .Single(button => Equals(button.Content, caption)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+    private static string[] FilteredLines(LogView log)
+    {
+        var result = log.GetVisualDescendants().OfType<TextBox>().Single(box =>
+            AutomationProperties.GetAutomationId(box) == "LogLevelFilterResults");
+        return result.IsEffectivelyVisible
+            ? (result.Text ?? "").Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries) : [];
+    }
 }

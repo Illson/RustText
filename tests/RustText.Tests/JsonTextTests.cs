@@ -1,8 +1,13 @@
+using System.Collections;
+using System.Reflection;
+using Avalonia.Controls;
+using RustText.Demo;
 using RustText.Demo.Editor;
 using Xunit;
 
 namespace RustText.Tests;
 
+[Collection(HeadlessCollection.Name)]
 public sealed class JsonTextTests
 {
     [Theory]
@@ -13,6 +18,63 @@ public sealed class JsonTextTests
     [InlineData("{}\n{}", "document.json", 2)]
     public void ValidationRespectsRecordBoundaries(string text, string? path, int? errorLine) =>
         Assert.Equal(errorLine, TextOperations.ValidateJson(text, path)?.Line);
+
+    [Theory]
+    [InlineData("[INFO] request-42 failed: { \"detail\": \"bad\" }", "demo.log", false)]
+    [InlineData("[404] GET /health", "demo.log", false)]
+    [InlineData("{worker} request-42 failed", "demo.log", false)]
+    [InlineData("2026-11-19 12:30:00 [INFO] received {\"id\":42}", "demo.log", false)]
+    [InlineData("message contains {\"detail\": \"bad\"}", null, false)]
+    [InlineData("{ \"detail\": \"bad\" }", "events.log", false)]
+    [InlineData("{\"detail\": \"bad\"}", null, true)]
+    [InlineData("[{\"id\": 42}, null]", null, true)]
+    [InlineData("{broken", null, true)]
+    [InlineData("[1,]", null, true)]
+    [InlineData("[not valid JSON]", null, true)]
+    [InlineData("not JSON", "events.json", true)]
+    [InlineData("not JSON", "events.jsonl", true)]
+    public void AutomaticValidationOnlyRecognizesJsonDocumentsAndJsonPaths(string text, string? path, bool expected) =>
+        Assert.Equal(expected, TextOperations.LooksLikeJson(text, path));
+
+    [Fact]
+    public Task DemoLogDoesNotStartJsonValidationOrShowItsBanner() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "demo.log");
+        await File.WriteAllTextAsync(path, "[INFO] request-42 failed: { \"detail\": \"bad\" }\r\n[404] GET /health");
+        var window = new MainWindow([path]);
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => Read<bool>(window, "_restoreFinished")
+                && ((IDictionary)Read<object>(window, "_tabs")).Count == 1);
+            var tab = ((IDictionary)Read<object>(window, "_tabs")).Values.Cast<object>().Single();
+            await Task.Delay(400);
+            Assert.Null(Value(tab, "JsonCancellation"));
+            Assert.Null(Value(tab, "JsonError"));
+            Assert.NotNull(Read<Border>(tab, "JsonBanner"));
+            Assert.False(Read<Border>(tab, "JsonBanner").IsVisible);
+        }
+        finally
+        {
+            if (window.IsVisible)
+            {
+                window.Close();
+                await HeadlessTests.WaitForAsync(() => !window.IsVisible);
+            }
+        }
+    });
+
+    private static T Read<T>(object target, string name)
+    {
+        return (T)(Value(target, name) ?? throw new MissingMemberException(target.GetType().Name, name));
+    }
+
+    private static object? Value(object target, string name)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        return target.GetType().GetField(name, flags)?.GetValue(target)
+            ?? target.GetType().GetProperty(name, flags)?.GetValue(target);
+    }
 
     [Fact]
     public void JsonLinesFormattingKeepsDelimitersAndFormatsASelectedRecord()

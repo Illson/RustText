@@ -171,8 +171,15 @@ public partial class MainWindow : Window
         });
         ToolTip.SetTip(search, "Найти (Ctrl+F)");
         AutomationProperties.SetName(search, "Найти");
+        group.LevelFilterButton = Button("Уровни…", () =>
+        {
+            if (SelectedIn(group) is { } tab) ShowEditorLevelFilter(tab);
+        });
+        ToolTip.SetTip(group.LevelFilterButton, "Уровни…");
+        AutomationProperties.SetName(group.LevelFilterButton, "Уровни…");
+        group.LevelFilterButton.IsVisible = false;
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
-        foreach (var button in new[] { add, restore, across, below, group.CloseButton, search })
+        foreach (var button in new[] { add, restore, across, below, group.CloseButton, search, group.LevelFilterButton })
         {
             button.Classes.Add("focus-icon");
             tools.Children.Add(button);
@@ -189,6 +196,7 @@ public partial class MainWindow : Window
                 {
                     ActivateTab(selected);
                 }
+                group.LevelFilterButton.IsVisible = selected?.Editor is not null && LogLevels.IsLogPath(selected.Path);
             }
         };
         group.View.AddHandler(PointerPressedEvent, (_, _) =>
@@ -277,15 +285,11 @@ public partial class MainWindow : Window
         tab.HeaderMarks = marks;
         tab.Item.Classes.Add("focus-tab");
         tab.Item.Header = header;
-        var filter = Command("Фильтр по уровням лога…", () => Run(async () =>
+        var filter = Command("Уровни…", () =>
         {
-            if (tab.Log is { } log) { await log.ShowLevelFilterAsync(); return; }
-            if (tab.Editor is not { } editor) return;
-            var text = editor.Text;
-            var dialog = new LogLevelFilterWindow(tab.Label.Text ?? "Без имени", _fontSize, 0,
-                (offset, token) => LogLevelFilter.EditorRows(text, offset, token));
-            await dialog.ShowDialog(this);
-        }));
+            if (tab.Log is { } log) Run(() => log.ShowLevelFilterAsync());
+            else ShowEditorLevelFilter(tab);
+        });
         var saveCopy = Command("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab)));
         var autoRefresh = Command("Автообновление с диска", () => SetTabAutoRefresh(tab, !TabAutoRefresh(tab)));
         autoRefresh.ToggleType = MenuItemToggleType.CheckBox;
@@ -814,6 +818,7 @@ public partial class MainWindow : Window
         public Grid View { get; } = new();
         public WorkspaceTabs Tabs { get; } = new();
         public Button CloseButton { get; set; } = null!;
+        public Button LevelFilterButton { get; set; } = null!;
         public Orientation? Axis { get; init; }
         public Group? First { get; set; }
         public Group? Second { get; set; }

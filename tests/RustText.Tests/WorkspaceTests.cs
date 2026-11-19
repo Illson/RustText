@@ -2404,22 +2404,70 @@ public sealed class WorkspaceTests
     public Task LevelFilterInEditorUsesUnsavedContent() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "editing.log");
-        await File.WriteAllTextAsync(path, "INFO on disk");
+        await File.WriteAllTextAsync(path, "INFO on disk\nWARN disk warning\n");
         var window = await OpenWorkspaceAsync(path);
         try
         {
             var tab = ActiveTab(window);
             var editor = Read<TextEditor>(tab, "Editor");
             Assert.True(Assert.Single(editor.TextArea.TextView.LineTransformers.OfType<LogLevelColorizer>()).Enabled);
-            editor.Document.Insert(0, "ERR unsaved\n");
+            editor.Document.Insert(editor.Document.TextLength, "ERR unsaved");
+            editor.Select(0, 3);
+            var document = editor.Document;
             var command = Read<TabItem>(tab, "Item").ContextMenu!.Items.OfType<MenuItem>()
-                .Single(item => Equals(item.Header, "Фильтр по уровням лога…"));
+                .Single(item => Equals(item.Header, "Уровни…"));
             command.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            var filter = Assert.Single(window.OwnedWindows);
-            await HeadlessTests.WaitForAsync(() => filter.GetVisualDescendants().OfType<SelectableTextBlock>()
-                .SingleOrDefault()?.Inlines?.OfType<Avalonia.Controls.Documents.Run>().SingleOrDefault()?.Text == "ERR unsaved");
-            filter.Close();
-            Assert.Equal("INFO on disk", await File.ReadAllTextAsync(path));
+            var panel = Assert.Single(window.GetVisualDescendants().OfType<LogLevelFilterPanel>());
+            Assert.Empty(window.OwnedWindows);
+            Assert.True(editor.IsVisible);
+            Assert.False(editor.IsReadOnly);
+            Assert.Single(window.GetVisualDescendants().OfType<TextEditor>());
+            await HeadlessTests.WaitForAsync(() => panel.GetVisualDescendants().OfType<ToggleButton>().Count() == 7);
+            foreach (var level in new[] { "Fatal", "Warn", "Info", "Debug", "Trace", "Без уровня" })
+            {
+                var toggle = panel.GetVisualDescendants().OfType<ToggleButton>().Single(button =>
+                    AutomationProperties.GetName(button) == $"Показывать строки · {level}");
+                toggle.IsChecked = false;
+                Assert.False(toggle.IsChecked);
+            }
+            var projection = Assert.Single(window.GetVisualDescendants().OfType<TextEditor>(), view =>
+                view.IsReadOnly && !ReferenceEquals(view, editor));
+            await HeadlessTests.WaitForAsync(() => projection.Text.Contains("ERR unsaved", StringComparison.Ordinal)
+                && !projection.Text.Contains("INFO on disk", StringComparison.Ordinal));
+            Assert.Equal("ERR unsaved", projection.Text);
+            var lineNumberMargin = Assert.Single(projection.TextArea.LeftMargins.OfType<GroupedLineNumberMargin>());
+            Assert.Equal(new[] { 3 }, ((IReadOnlyList<int>)typeof(GroupedLineNumberMargin)
+                .GetField("_sourceLines", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(lineNumberMargin)!).ToArray());
+            Assert.False(editor.IsVisible);
+            Assert.True(editor.IsReadOnly);
+            Assert.Same(document, editor.Document);
+            Assert.Equal("INFO on disk\nWARN disk warning\nERR unsaved", editor.Text);
+            projection.Focus();
+            Press(window, Key.Z, RawInputModifiers.Control, PhysicalKey.Z);
+            Assert.Equal("INFO on disk\nWARN disk warning\nERR unsaved", editor.Text);
+
+            await CallAsync(window, "SaveAsync", false);
+            Assert.Equal("INFO on disk\nWARN disk warning\nERR unsaved", await File.ReadAllTextAsync(path));
+            foreach (var level in new[] { "Fatal", "Warn", "Info", "Debug", "Trace", "Без уровня" })
+            {
+                var toggle = panel.GetVisualDescendants().OfType<ToggleButton>().Single(button =>
+                    AutomationProperties.GetName(button) == $"Показывать строки · {level}");
+                toggle.IsChecked = true;
+            }
+            Assert.True(editor.IsVisible);
+            Assert.False(editor.IsReadOnly);
+            Assert.Single(window.GetVisualDescendants().OfType<TextEditor>());
+            Click(panel.GetVisualDescendants().OfType<Button>().Single(button =>
+                AutomationProperties.GetName(button) == "Сбросить и закрыть фильтр уровней"));
+            Assert.Same(editor, Read<TextEditor>(tab, "Editor"));
+            Assert.Same(document, editor.Document);
+            Assert.True(editor.IsVisible);
+            Assert.False(editor.IsReadOnly);
+            Assert.Equal(3, editor.CaretOffset);
+            Assert.Equal(0, editor.SelectionStart);
+            Assert.Equal(3, editor.SelectionLength);
+            document.UndoStack.Undo();
+            Assert.Equal("INFO on disk\nWARN disk warning\n", editor.Text);
         }
         finally { await CloseAsync(window); }
     });

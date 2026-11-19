@@ -1,3 +1,4 @@
+using System.Text;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Presenters;
@@ -32,6 +33,26 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
             offset += row.Text.Length;
         }
         InvalidateVisual();
+    }
+
+    internal string SetFilteredPage(FilterPage page)
+    {
+        _starts.Clear();
+        _levels.Clear();
+        _nextOffset = -1;
+        var text = new StringBuilder();
+        foreach (var row in page.Rows)
+        {
+            if (_starts.Count == 0 || !row.Continuation)
+            {
+                if (_starts.Count != 0) text.Append(Environment.NewLine);
+                _starts.Add(text.Length);
+                _levels.Add(row.Level);
+            }
+            text.Append(row.Text);
+        }
+        InvalidateVisual();
+        return text.ToString();
     }
 
     internal void SetEditedText(string text)

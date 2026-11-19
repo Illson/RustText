@@ -341,13 +341,13 @@ public partial class MainWindow
         tab.JsonBanner = banner;
         tab.JsonMessage = warning;
 
-        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), RowDefinitions = new RowDefinitions("Auto,*") };
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), RowDefinitions = new RowDefinitions("Auto,Auto,*") };
         Grid.SetColumnSpan(banner, 2);
         grid.Children.Add(banner);
-        Grid.SetRow(editor, 1);
+        Grid.SetRow(editor, 2);
         grid.Children.Add(editor);
         var minimap = new DocumentMinimap(editor);
-        Grid.SetRow(minimap, 1);
+        Grid.SetRow(minimap, 2);
         Grid.SetColumn(minimap, 1);
         grid.Children.Add(minimap);
         tab.Item.Content = grid;
@@ -554,6 +554,30 @@ public partial class MainWindow
 
         bool CanPaste() => !_closing && !tab.Closing && !tab.Loading && !editor.IsReadOnly
             && editor.IsEnabled && ReferenceEquals(tab.Editor, editor) && ReferenceEquals(tab, ActiveTab);
+    }
+
+    private void ShowEditorLevelFilter(WorkTab tab)
+    {
+        if (tab.Editor is not { Parent: Grid grid } editor || tab.EditorLogFilter is not null) return;
+        var filter = new EditorLogFilter(editor, tab.Minimap, () => CloseEditorLevelFilter(tab));
+        tab.EditorLogFilter = filter;
+        Grid.SetRow(filter.PanelControl, 1);
+        Grid.SetColumnSpan(filter.PanelControl, 2);
+        Grid.SetRow(filter.FilteredView, 2);
+        Grid.SetColumnSpan(filter.FilteredView, 2);
+        grid.Children.Add(filter.PanelControl);
+        grid.Children.Add(filter.FilteredView);
+        filter.PanelControl.Focus();
+    }
+
+    private void CloseEditorLevelFilter(WorkTab tab)
+    {
+        if (tab.EditorLogFilter is not { } filter) return;
+        tab.EditorLogFilter = null;
+        if (filter.PanelControl.Parent is Panel panelParent) panelParent.Children.Remove(filter.PanelControl);
+        if (filter.FilteredView.Parent is Panel viewParent) viewParent.Children.Remove(filter.FilteredView);
+        filter.Dispose();
+        if (!_closing && ReferenceEquals(tab, ActiveTab)) tab.Editor?.Focus();
     }
 
     private static string NormalizeBoundedPaste(TextEditor editor, string text)
@@ -827,6 +851,7 @@ public partial class MainWindow
     {
         tab.FileWatch?.Dispose();
         tab.FileWatch = null;
+        CloseEditorLevelFilter(tab);
         if (tab.Editor is not { } editor)
         {
             return null;
@@ -1173,6 +1198,7 @@ public partial class MainWindow
 
     private void SelectText(WorkTab tab, int offset, int count)
     {
+        if (tab.EditorLogFilter?.IsFiltering == true) CloseEditorLevelFilter(tab);
         Select(tab);
         if (tab.Editor is not { } editor)
         {
@@ -1201,6 +1227,8 @@ public partial class MainWindow
         UpdateDraftLineCount(tab);
         tab.Label.Text = title;
         tab.RefreshHeaderMark();
+        if (ReferenceEquals(SelectedIn(tab.Group), tab))
+            tab.Group.LevelFilterButton.IsVisible = tab.Editor is not null && LogLevels.IsLogPath(tab.Path);
         AutomationProperties.SetName(tab.Item, title + (tab.Dirty ? ", изменено" : ""));
         ToolTip.SetTip(tab.Label, tab.Path ?? title);
         if (ReferenceEquals(tab, ActiveTab))
@@ -1333,6 +1361,11 @@ public partial class MainWindow
             return;
         }
 
+        if (LogLevels.IsLogPath(tab.Path))
+        {
+            return;
+        }
+
         var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         tab.JsonCancellation = source;
         _ = ValidateJsonAsync(tab, editor, source);
@@ -1343,8 +1376,13 @@ public partial class MainWindow
         try
         {
             await Task.Delay(270, source.Token);
-            var text = editor.Text;
             var path = tab.Path;
+            if (LogLevels.IsLogPath(path))
+            {
+                return;
+            }
+
+            var text = editor.Text;
             if (!TextOperations.LooksLikeJson(text, path))
             {
                 return;
@@ -1392,6 +1430,7 @@ public partial class MainWindow
         public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }
         public TextEditor? Editor { get; set; }
+        public EditorLogFilter? EditorLogFilter { get; set; }
         public MultiCaretEditing? MultiCaret { get; set; }
         public LogView? Log { get; set; }
         public bool IsLog => PendingFileOpenMode is FileOpenMode.PagedEditor or FileOpenMode.Log

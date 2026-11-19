@@ -7,7 +7,11 @@ using AvaloniaEdit.Rendering;
 namespace RustText.Demo.Logs;
 
 [Flags]
-internal enum LogLevel { Other = 1, Trace = 2, Debug = 4, Info = 8, Warning = 16, Error = 32, Fatal = 64 }
+internal enum LogLevel
+{
+    Other = 1, Trace = 2, Debug = 4, Info = 8, Warning = 16, Error = 32, Fatal = 64,
+    All = Other | Trace | Debug | Info | Warning | Error | Fatal
+}
 
 internal static partial class LogLevels
 {

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using RustText.Demo.Logs;
 
 namespace RustText.Demo.Editor;
 
@@ -152,7 +153,8 @@ internal static class TextOperations
         string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase) || IsJsonLinesPath(path);
 
     public static bool LooksLikeJson(string text, string? path) =>
-        IsJsonPath(path) || text.AsSpan().TrimStart().TrimStart('\uFEFF').TrimStart() is ['{' or '[', ..];
+        IsJsonPath(path) || !LogLevels.IsLogPath(path)
+            && text.AsSpan().TrimStart().TrimStart('\uFEFF').TrimStart() is ['{' or '[', ..];
 
     public static JsonProblem? ValidateJson(string text, string? path, CancellationToken cancellationToken = default)
     {
