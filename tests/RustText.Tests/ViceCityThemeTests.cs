@@ -54,7 +54,7 @@ public sealed class ViceCityThemeTests
 
             Assert.False(palm.IsHitTestVisible);
             Assert.NotEqual(0, Assert.IsAssignableFrom<ISolidColorBrush>(palm.Fill).Color.A);
-            Assert.Same(FocusTheme.Accent, editor.TextArea.CaretBrush);
+            Assert.Same(FocusTheme.EditorCaret, editor.TextArea.CaretBrush);
             Assert.NotEqual(focusCaret, Assert.IsAssignableFrom<ISolidColorBrush>(editor.TextArea.CaretBrush).Color);
             var foreground = Assert.IsAssignableFrom<ISolidColorBrush>(editor.TextArea.SelectionForeground).Color;
             var background = Assert.IsAssignableFrom<ISolidColorBrush>(editor.TextArea.SelectionBrush).Color;
@@ -82,6 +82,80 @@ public sealed class ViceCityThemeTests
             await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_closed"));
         }
     });
+
+    [Fact]
+    public Task EditorDrawsAThickerCaretAndKeepsSelectionReadableWithAndWithoutFocus() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "caret.txt");
+            await File.WriteAllTextAsync(path, "Строка для проверки");
+            var window = new MainWindow([path]) { Width = 1080, Height = 700 };
+            window.Show();
+            await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_restoreFinished"));
+            try
+            {
+                var tab = typeof(MainWindow).GetProperty("ActiveTab", Private)!.GetValue(window)!;
+                var editor = (TextEditor)tab.GetType().GetProperty("Editor")!.GetValue(tab)!;
+                var area = editor.TextArea;
+                var view = area.TextView;
+                editor.CaretOffset = editor.Text.Length;
+                window.UpdateLayout();
+                await HeadlessTests.WaitForAsync(() => view.VisualLinesValid);
+                area.Focus();
+                Assert.True(area.IsKeyboardFocusWithin);
+
+                foreach (var theme in Enum.GetValues<AppTheme>())
+                {
+                    FocusTheme.Apply(theme);
+                    Assert.True(Contrast(FocusTheme.EditorCaret.Color, FocusTheme.Editor.Color) >= 3);
+                    AssertCaretPixels(window, editor);
+                    Assert.Same(FocusTheme.EditorSelection, area.SelectionBrush);
+                    Assert.True(Contrast(FocusTheme.Text.Color, FocusTheme.EditorSelection.Color) >= 4.5);
+                }
+
+                editor.Select(0, 6);
+                window.FindControl<Button>("CaptionMinimize")!.Focus();
+                Assert.False(area.IsKeyboardFocusWithin);
+                Assert.Same(FocusTheme.InactiveEditorSelection, area.SelectionBrush);
+                Assert.True(Contrast(FocusTheme.Text.Color, FocusTheme.InactiveEditorSelection.Color) >= 4.5);
+                Assert.Equal("Строка", editor.SelectedText);
+            }
+            finally
+            {
+                FocusTheme.Apply(AppTheme.Focus);
+                window.Close();
+                await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_closed"));
+            }
+        });
+
+    private static void AssertCaretPixels(MainWindow window, TextEditor editor)
+    {
+        window.UpdateLayout();
+        using var frame = window.CaptureRenderedFrame();
+        Assert.NotNull(frame);
+        var area = editor.TextArea;
+        var view = area.TextView;
+        var caret = area.Caret.CalculateCaretRectangle().Translate(-view.ScrollOffset);
+        var origin = view.TranslatePoint(default, window)!.Value;
+        var scale = window.RenderScaling;
+        var x = (int)Math.Round(origin.X * scale) + (int)Math.Round(caret.X * scale);
+        var y = (int)Math.Round((origin.Y + caret.Y + caret.Height / 2) * scale);
+        var buffer = Marshal.AllocHGlobal(8);
+        try
+        {
+            frame.CopyPixels(new PixelRect(x, y, 2, 1), buffer, 8, 8);
+            for (var offset = 0; offset < 8; offset += 4)
+            {
+                var color = FocusTheme.EditorCaret.Color;
+                var first = Marshal.ReadByte(buffer, offset);
+                var green = Marshal.ReadByte(buffer, offset + 1);
+                var third = Marshal.ReadByte(buffer, offset + 2);
+                Assert.Equal(color.G, green);
+                Assert.True((first == color.R && third == color.B) || (first == color.B && third == color.R));
+            }
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
 
     private static (Color Background, Color Foreground, Color Border) ButtonColors(Button button) =>
         (Assert.IsAssignableFrom<ISolidColorBrush>(button.Background).Color,

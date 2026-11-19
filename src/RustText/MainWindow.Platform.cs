@@ -1,11 +1,13 @@
 using System.Diagnostics;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using RustText.Demo.Platform;
 
 namespace RustText.Demo;
@@ -13,11 +15,63 @@ namespace RustText.Demo;
 public partial class MainWindow
 {
     private UpdateRelease? _availableUpdate;
-    private bool _checkingForUpdates;
-    private bool _handlingUpdate;
 
     private static string CurrentUpdateVersion => typeof(MainWindow).Assembly.GetName().Version!.ToString(3);
     private static string ExecutablePath => Environment.ProcessPath ?? throw new IOException("Путь программы недоступен.");
+    internal static TimeSpan AutomaticUpdateCheckInterval => TimeSpan.FromHours(1);
+
+    internal static bool ShouldRunAutomaticUpdateCheck(bool? setting, bool isWindows, string? profileOverride) =>
+        setting is not false && isWindows && string.IsNullOrWhiteSpace(profileOverride);
+
+    internal static bool ShouldPresentBackgroundUpdate(UpdateRelease? release, string? dismissedVersion) =>
+        release is not null && release.Version != dismissedVersion;
+
+    private bool AutomaticUpdateChecksEnabled => ShouldRunAutomaticUpdateCheck(
+        Settings.AutoCheckUpdates, OperatingSystem.IsWindows(), Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR"));
+
+    private void SynchronizeAutomaticUpdateTimer(bool runImmediately, bool forceImmediateCheck = false)
+    {
+        var timer = _workspace.AutomaticUpdateTimer;
+        if (!AutomaticUpdateChecksEnabled)
+        {
+            timer?.Stop();
+            _workspace.AutomaticUpdateTimer = null;
+            return;
+        }
+
+        if (timer is null)
+        {
+            var workspace = _workspace;
+            timer = new DispatcherTimer { Interval = AutomaticUpdateCheckInterval };
+            timer.Tick += (_, _) =>
+            {
+                var owner = workspace.Windows
+                    .Where(window => !window._closed && !window._closing && window._restoreFinished)
+                    .OrderBy(window => window._windowId == WorkspaceCatalogStore.PrimaryWindowId ? 0 : 1)
+                    .FirstOrDefault();
+                if (owner is null)
+                {
+                    return;
+                }
+
+                owner.Run(() => owner.CheckUpdatesAsync(manual: false));
+            };
+            _workspace.AutomaticUpdateTimer = timer;
+            timer.Start();
+        }
+
+        if (runImmediately && (forceImmediateCheck || !_workspace.AutomaticUpdateStartupCheckAttempted))
+        {
+            _workspace.AutomaticUpdateStartupCheckAttempted = true;
+            Run(() => CheckUpdatesAsync(manual: false));
+        }
+    }
+
+    private void ShowKnownUpdate()
+    {
+        var release = _workspace.KnownUpdate;
+        UpdateNoticePresent(ShouldPresentBackgroundUpdate(release, _workspace.DismissedUpdateVersion) ? release : null);
+    }
 
     private Task RegisterAssociationsAsync()
     {
@@ -262,13 +316,13 @@ public partial class MainWindow
 
     private async Task CheckUpdatesAsync(bool manual)
     {
-        if (_checkingForUpdates || _handlingUpdate)
+        if (_workspace.UpdateCheckInProgress || _workspace.UpdateHandling || !manual && !AutomaticUpdateChecksEnabled)
         {
             return;
         }
 
         const string checking = "Проверка обновлений…";
-        _checkingForUpdates = true;
+        _workspace.UpdateCheckInProgress = true;
         if (manual)
         {
             SetStatus(checking);
@@ -282,26 +336,57 @@ public partial class MainWindow
                 return;
             }
 
-            PresentUpdate(release);
+            if (!manual && !AutomaticUpdateChecksEnabled) return;
+            if (!manual && !ShouldPresentBackgroundUpdate(release, _workspace.DismissedUpdateVersion))
+            {
+                if (release is not null) _workspace.KnownUpdate = release;
+                else PresentUpdate(null);
+            }
+            else
+            {
+                if (manual) _workspace.DismissedUpdateVersion = null;
+                PresentUpdate(release);
+            }
             if (manual && StatusText.Text == checking)
             {
                 SetStatus(release is null ? "Обновление Avalonia-сборки не найдено." : null);
             }
         }
+        catch (Exception error) when (!manual && (error is OperationCanceledException || IsUserError(error)))
+        {
+            // Automatic checks are best-effort; keep the hourly timer alive and leave the UI quiet.
+        }
         finally
         {
-            _checkingForUpdates = false;
+            _workspace.UpdateCheckInProgress = false;
         }
     }
 
     private void PresentUpdate(UpdateRelease? release)
     {
+        _workspace.KnownUpdate = release;
+        if (release is null) _workspace.DismissedUpdateVersion = null;
+        foreach (var window in _workspace.Windows.Where(window => !window._closed))
+            window.UpdateNoticePresent(release);
+    }
+
+    private void UpdateNoticePresent(UpdateRelease? release)
+    {
         _availableUpdate = release;
-        UpdateNoticeText.Text = release is null ? null : $"Доступна версия {release.Version}";
+        UpdateNoticeText.Text = release is null ? null : $"Обновление {release.Version}";
+        AutomationProperties.SetName(UpdateNoticeDetails, UpdateNoticeText.Text ?? "Проверить обновления");
         UpdateNotice.IsVisible = release is not null;
     }
 
-    private void UpdateNoticeDismissClicked(object? sender, RoutedEventArgs e) => PresentUpdate(null);
+    private void DismissUpdateNotice()
+    {
+        if (_workspace.KnownUpdate is { } release)
+            _workspace.DismissedUpdateVersion = release.Version;
+        foreach (var window in _workspace.Windows.Where(window => !window._closed))
+            window.UpdateNoticePresent(null);
+    }
+
+    private void UpdateNoticeDismissClicked(object? sender, RoutedEventArgs e) => DismissUpdateNotice();
 
     private void UpdateNoticeDetailsClicked(object? sender, RoutedEventArgs e) => Run(OpenUpdateNoticeAsync);
 
@@ -309,17 +394,17 @@ public partial class MainWindow
 
     private async Task OpenUpdateNoticeAsync()
     {
-        if (_availableUpdate is not { } release || _handlingUpdate)
+        if (_availableUpdate is not { } release || _workspace.UpdateHandling)
         {
             return;
         }
 
-        _handlingUpdate = true;
+        _workspace.UpdateHandling = true;
         try
         {
             if (!await ShowUpdateDialogAsync(release))
             {
-                PresentUpdate(null);
+                DismissUpdateNotice();
                 return;
             }
 
@@ -330,7 +415,7 @@ public partial class MainWindow
         }
         finally
         {
-            _handlingUpdate = false;
+            _workspace.UpdateHandling = false;
             if (!_closed && !_closing)
             {
                 UpdateNotice.IsVisible = _availableUpdate is not null;

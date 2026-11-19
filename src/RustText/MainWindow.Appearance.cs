@@ -13,7 +13,17 @@ public partial class MainWindow
 
     private MenuItem _themeMenu = null!;
 
-    private AppTheme SelectedTheme => ThemeOptions.FirstOrDefault(option => option.Key == Settings.Theme).Theme;
+    private AppTheme SelectedTheme => ThemeOptions.FirstOrDefault(option => option.Key == WorkspaceThemeKey).Theme;
+    private string WorkspaceThemeKey => GetWorkspaceThemeKey(_workspaceId);
+
+    private string GetWorkspaceThemeKey(string workspaceId)
+    {
+        var saved = workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
+            ? null : _workspace.Catalog?.Workspaces.FirstOrDefault(item => item.Id == workspaceId)?.Theme;
+        return ThemeOptions.FirstOrDefault(option => option.Key == saved).Key
+            ?? ThemeOptions.FirstOrDefault(option => option.Key == Settings.Theme).Key
+            ?? ThemeOptions[0].Key;
+    }
 
     private MenuItem BuildThemeMenu()
     {
@@ -30,13 +40,30 @@ public partial class MainWindow
 
     private async Task SelectThemeAsync(string key)
     {
-        try { await SaveWorkspaceSettingsAsync(settings => settings with { Theme = key }); }
+        try
+        {
+            var workspaceId = _workspaceId;
+            if (workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId)
+            {
+                await SaveWorkspaceSettingsAsync(settings => settings with { Theme = key });
+                return;
+            }
+
+            await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
+            try
+            {
+                _workspace.Catalog = await _workspace.CatalogStore.SetThemeAsync(workspaceId, key, _lifetime.Token);
+                ApplyWorkspaceTheme();
+            }
+            finally { _workspace.WorkspaceSwitchGate.Release(); }
+        }
         finally { RefreshThemeMenu(); }
     }
 
     private void ApplyWorkspaceTheme()
     {
-        FocusTheme.Apply(SelectedTheme);
+        var active = _workspace.Windows.FirstOrDefault(window => window.IsActive && !window._closed) ?? this;
+        FocusTheme.Apply(active.SelectedTheme);
         foreach (var window in _workspace.Windows)
             window.RefreshThemeMenu();
     }

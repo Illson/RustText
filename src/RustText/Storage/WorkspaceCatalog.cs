@@ -3,7 +3,10 @@ using System.Text.Json.Serialization;
 
 namespace RustText.Demo;
 
-internal sealed record WorkspaceEntry(string Id, string Name, long LastUsedMs = 0);
+internal sealed record WorkspaceEntry(string Id, string Name, long LastUsedMs = 0)
+{
+    public string? Theme { get; init; }
+}
 internal sealed record DeletedWorkspaceEntry(WorkspaceEntry Workspace, long DeletedAtMs, string DirectoryName);
 public enum WorkspaceStartupMode { LastUsed, Specific, Empty }
 
@@ -53,7 +56,7 @@ internal sealed class WorkspaceCatalogStore
         }
     }
 
-    public async Task<WorkspaceEntry> CreateAsync(string name, CancellationToken cancellationToken = default)
+    public async Task<WorkspaceEntry> CreateAsync(string name, string? theme = null, CancellationToken cancellationToken = default)
     {
         name = ValidateName(name);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -64,7 +67,7 @@ internal sealed class WorkspaceCatalogStore
             if (catalog.Workspaces.Count >= MaximumWorkspaceCount)
                 throw new InvalidOperationException("Достигнут предел в 200 рабочих пространств.");
             EnsureNameAvailable(catalog, name);
-            var entry = new WorkspaceEntry(Guid.NewGuid().ToString("N"), name);
+            var entry = new WorkspaceEntry(Guid.NewGuid().ToString("N"), name) { Theme = theme };
             var updated = catalog with { Workspaces = [.. catalog.Workspaces, entry] };
             await SaveCoreAsync(updated, cancellationToken).ConfigureAwait(false);
             return entry;
@@ -73,6 +76,27 @@ internal sealed class WorkspaceCatalogStore
         {
             _gate.Release();
         }
+    }
+
+    public async Task<WorkspaceCatalog> SetThemeAsync(string id, string theme, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(theme);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var catalogLock = await LockCatalogAsync(cancellationToken).ConfigureAwait(false);
+            var catalog = await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
+            var selected = catalog.Workspaces.FirstOrDefault(item => item.Id == id)
+                ?? throw new KeyNotFoundException("Рабочее пространство не найдено.");
+            if (selected.Theme == theme) return catalog;
+            var updated = catalog with
+            {
+                Workspaces = catalog.Workspaces.Select(item => item.Id == id ? item with { Theme = theme } : item).ToList()
+            };
+            await SaveCoreAsync(updated, cancellationToken).ConfigureAwait(false);
+            return updated;
+        }
+        finally { _gate.Release(); }
     }
 
     public async Task RenameAsync(string id, string name, CancellationToken cancellationToken = default)

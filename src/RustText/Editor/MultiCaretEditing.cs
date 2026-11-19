@@ -457,6 +457,8 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
     {
         if (!_area.IsKeyboardFocusWithin || Current is not { } selection || !textView.VisualLinesValid) return;
         var scroll = textView.ScrollOffset;
+        var scale = TopLevel.GetTopLevel(textView)?.RenderScaling ?? 1;
+        var brush = FocusTheme.EditorCaret;
         for (var index = 0; index < selection.Ranges.Length; index++)
         {
             if (index == selection.PrimaryIndex) continue;
@@ -465,7 +467,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
             var position = new TextViewPosition(location);
             var top = textView.GetVisualPosition(position, VisualYPosition.LineTop) - scroll;
             var bottom = textView.GetVisualPosition(position, VisualYPosition.LineBottom) - scroll;
-            drawingContext.FillRectangle(_area.CaretBrush ?? FocusTheme.Text, new Rect(top.X, top.Y, 1, bottom.Y - top.Y));
+            EditorCaret.DrawLine(drawingContext, new Rect(top.X, top.Y, 0, bottom.Y - top.Y), brush, scale);
         }
     }
 

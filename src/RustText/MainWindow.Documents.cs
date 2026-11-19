@@ -291,9 +291,7 @@ public partial class MainWindow
             VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
         };
         GroupedLineNumberMargin.ReplaceExisting(editor);
-        editor.TextArea.CaretBrush = FocusTheme.Accent;
-        editor.TextArea.SelectionBrush = FocusTheme.Selection;
-        editor.TextArea.SelectionForeground = FocusTheme.Text;
+        EditorCaret.Attach(editor.TextArea);
         editor.Options.ShowBoxForControlCharacters = true;
         editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
         var logLevels = new LogLevelColorizer();

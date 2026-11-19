@@ -2,6 +2,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:chrome="using:Avalonia.Controls.Chrome"
              xmlns:aeRendering="using:AvaloniaEdit.Rendering"
+             xmlns:aeEditing="using:AvaloniaEdit.Editing"
              xmlns:local="using:RustText.Demo"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
@@ -104,6 +105,14 @@
         <Style Selector="aeRendering|TextView">
             <Setter Property="LinkTextForegroundBrush" Value="{x:Static local:FocusTheme.Link}" />
         </Style>
+        <Style Selector="aeEditing|TextArea">
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.InactiveEditorSelection}" />
+            <Setter Property="SelectionForeground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="SelectionCornerRadius" Value="2" />
+        </Style>
+        <Style Selector="aeEditing|TextArea:focus-within">
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.EditorSelection}" />
+        </Style>
         <Style Selector="TabItem.focus-tab">
             <Setter Property="Theme" Value="{StaticResource FocusDocumentTab}" />
         </Style>
@@ -131,6 +140,12 @@
         <Style Selector="TextBox.focus-log-editor">
             <Setter Property="CornerRadius" Value="0" />
             <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CaretBrush" Value="{x:Static local:FocusTheme.EditorCaret}" />
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.InactiveEditorSelection}" />
+            <Setter Property="SelectionForegroundBrush" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
+        <Style Selector="TextBox.focus-log-editor:focus-within">
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.EditorSelection}" />
         </Style>
         <Style Selector="TextBox.focus-log-editor:pointerover /template/ Border#PART_BorderElement,
                          TextBox.focus-log-editor:focus /template/ Border#PART_BorderElement">

@@ -20,9 +20,6 @@ internal sealed partial class LogView
         Padding = new Thickness(8, 6),
         Background = FocusTheme.Editor,
         Foreground = FocusTheme.Text,
-        CaretBrush = FocusTheme.Accent,
-        SelectionBrush = FocusTheme.Selection,
-        SelectionForegroundBrush = FocusTheme.Text,
         TextWrapping = TextWrapping.NoWrap,
     };
     private readonly TextBlock _filterStatus = SearchBar.Status();

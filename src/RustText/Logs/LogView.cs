@@ -78,9 +78,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         Padding = new Thickness(8, 6),
         Background = FocusTheme.Editor,
         Foreground = FocusTheme.Text,
-        CaretBrush = FocusTheme.Accent,
-        SelectionBrush = FocusTheme.Selection,
-        SelectionForegroundBrush = FocusTheme.Text,
         TextWrapping = TextWrapping.NoWrap,
     };
     private readonly LogLevelBands _levelBands;

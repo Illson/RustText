@@ -42,7 +42,6 @@ public partial class MainWindow
                 finally
                 {
                     _workspace.SettingsReady = true;
-                    ApplyWorkspaceTheme();
                 }
             }
             _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
@@ -69,6 +68,7 @@ public partial class MainWindow
         {
             _workspaceId = WorkspaceCatalogStore.DefaultWorkspaceId;
         }
+        ApplyWorkspaceTheme();
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
 
         var restore = _startEmpty
@@ -195,9 +195,7 @@ public partial class MainWindow
             var liveTabs = TabsInVisualOrder().ToArray();
             foreach (var tab in liveTabs) tab.Group.Tabs.Items.Remove(tab.Item);
 
-            Width = Math.Clamp(state.WindowWidth, MinWidth, 4000);
-            Height = Math.Clamp(state.WindowHeight, MinHeight, 2400);
-            WindowState = state.Maximized ? WindowState.Maximized : WindowState.Normal;
+            RestoreWorkspaceWindowSize(state.WindowWidth, state.WindowHeight, state.Maximized);
 
             _wordWrap = Settings.WordWrap ?? state.Wrap;
             _fontSize = Settings.FontSize ?? Math.Clamp(state.FontSize, 8, 48);
@@ -477,7 +475,7 @@ public partial class MainWindow
         foreach (var window in windows.OrderByDescending(window => window._windowId == WorkspaceCatalogStore.PrimaryWindowId))
         {
             if (ReferenceEquals(window.SessionStorage, storage))
-                yield return (window, window.CaptureWorkspaceView());
+                yield return (window, window.CaptureWorkspaceViewForPersistence());
         }
         foreach (var window in windows)
         {
