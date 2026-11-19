@@ -176,7 +176,7 @@ public partial class MainWindow
         _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         var currentContent = WorkspaceHost.Content;
         _workspaceViews[_workspaceId] = new WorkspaceViewState(_tabs, _root, _active, _home,
-            _home ? currentContent as Control : null, Width, Height, WindowState == WindowState.Maximized);
+            _home ? currentContent as Control : null, Width, Height, WindowState == WindowState.Maximized, SessionStorage, _closedTabs);
         CloseSearchPanel();
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids) grid.Children.Clear();

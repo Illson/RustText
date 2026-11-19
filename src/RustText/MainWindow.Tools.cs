@@ -504,7 +504,6 @@ public partial class MainWindow
 
     private async Task SaveWorkspaceSettingsAsync(UserSettings settings)
     {
-        await _storage.SaveSettingsAsync(settings, _lifetime.Token);
         foreach (var window in _workspace.Windows)
         {
             window._settings = settings;
@@ -513,6 +512,7 @@ public partial class MainWindow
             window.RefreshHistoryMenusLocal();
             if (window._home) window._refreshHome?.Invoke();
         }
+        await _storage.SaveSettingsAsync(settings, _lifetime.Token);
     }
 
     private async Task<string?> PromptAsync(string title, string description, string initial = "")

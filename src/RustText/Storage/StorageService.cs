@@ -15,6 +15,7 @@ internal sealed class StorageService
     private readonly string _drafts;
     private readonly string _versions;
     private readonly bool _hasProfileOverride;
+    private readonly SemaphoreSlim _settingsGate = new(1, 1);
     private readonly SemaphoreSlim _recentGate = new(1, 1);
     private readonly Dictionary<string, (long Length, long LastWriteTicks)> _verifiedBackupFiles = new(StringComparer.OrdinalIgnoreCase);
     private SessionState? _cachedSession;
@@ -364,8 +365,16 @@ internal sealed class StorageService
         catch (JsonException ex) { throw new InvalidDataException("Файл настроек повреждён.", ex); }
     }
 
-    public Task SaveSettingsAsync(UserSettings settings, CancellationToken cancellationToken = default) =>
-        WriteJsonAsync(Path.Combine(_root, "settings.json"), settings.Normalize(), StorageJsonContext.Default.UserSettings, cancellationToken);
+    public async Task SaveSettingsAsync(UserSettings settings, CancellationToken cancellationToken = default)
+    {
+        await _settingsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteJsonAsync(Path.Combine(_root, "settings.json"), settings.Normalize(),
+                StorageJsonContext.Default.UserSettings, cancellationToken).ConfigureAwait(false);
+        }
+        finally { _settingsGate.Release(); }
+    }
 
     public async Task<IReadOnlyList<RecentFileEntry>> GetRecentFilesAsync(CancellationToken cancellationToken = default)
     {

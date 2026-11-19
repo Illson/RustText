@@ -60,7 +60,7 @@ public partial class MainWindow
     }
 
     private sealed record WorkspaceViewState(Dictionary<long, WorkTab> Tabs, Group Root, Group Active, bool Home,
-        Control? HomeContent, double Width, double Height, bool Maximized);
+        Control? HomeContent, double Width, double Height, bool Maximized, StorageService Storage, List<SessionTab> ClosedTabs);
 
     private StorageService SessionStorage => _workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
         && (_windowId == WorkspaceCatalogStore.PrimaryWindowId || _shareDefaultSession)

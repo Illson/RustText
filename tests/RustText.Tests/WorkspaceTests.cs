@@ -1536,6 +1536,57 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task ClosedDraftArchiveFollowsItsWorkspaceAcrossSwitchAndRestore() => HeadlessTests.RunAsync(async profile =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "a live draft");
+            Invoke(window, "NewTab", "copy of a closed draft");
+            var tab = ActiveTab(window);
+            Read<TextEditor>(tab, "Editor").Select(2, 4);
+            await CallAsync(window, "CloseTabAsync", tab);
+            var closed = (List<SessionTab>)Field(window, "_closedTabs");
+            closed[0] = Assert.Single(closed) with
+            {
+                ClosedAtMs = DateTimeOffset.UtcNow.AddHours(-2).ToUnixTimeMilliseconds(),
+                CustomTitle = "Review notes"
+            };
+            await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Project");
+            var defaultStore = StorageService.OpenForTesting(profile);
+            var namedStore = StorageService.OpenWorkspace(profile, (string)Field(window, "_workspaceId"), WorkspaceCatalogStore.PrimaryWindowId);
+            var settings = ((UserSettings)Field(window, "_settings")) with { ArchiveClosedDraftAfterMinutes = 1 };
+            await CallAsync(window, "SaveWorkspaceSettingsAsync", settings);
+            await CallAsync(window, "HandleIdleUnloadTimerTickAsync");
+
+            Assert.Single(await defaultStore.DraftArchive.GetEntriesAsync());
+            Assert.Single(await namedStore.DraftArchive.GetEntriesAsync());
+            Assert.Empty((await defaultStore.LoadSessionAsync())!.ClosedTabs!);
+            Assert.Empty((await namedStore.LoadSessionAsync())!.ClosedTabs!);
+            var show = CallAsync(window, "ShowDraftArchiveAsync");
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
+            var dialog = Assert.Single(window.OwnedWindows);
+            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<TextBlock>().Any(b => b.Text == "Review notes"));
+            Click(dialog.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Восстановить")));
+            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<TextBlock>().Any(b => b.Text == "Архив пуст."));
+            dialog.Close();
+            await show;
+
+            var restored = Read<TextEditor>(ActiveTab(window), "Editor");
+            Assert.Equal("copy of a closed draft", restored.Text);
+            Assert.Equal(2, restored.SelectionStart);
+            Assert.Equal(4, restored.SelectionLength);
+            Assert.Empty(await namedStore.DraftArchive.GetEntriesAsync());
+            Assert.Single(await defaultStore.DraftArchive.GetEntriesAsync());
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
     public Task ClosingLogReleasesItsPageAndSearchReferencesAndCanRestoreIt() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "close-log.log");
