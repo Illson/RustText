@@ -49,7 +49,7 @@ public partial class MainWindow : Window
     }
 
     private MainWindow(string[] startupPaths, WorkspaceSession? workspace, string? workspaceId = null, string? windowId = null,
-        bool shareDefaultSession = false)
+        bool shareDefaultSession = false, bool restoreWorkspace = true)
     {
         _workspace = workspace ?? new WorkspaceSession();
         _storage = _workspace.Storage;
@@ -57,7 +57,7 @@ public partial class MainWindow : Window
         _windowId = windowId ?? WorkspaceCatalogStore.PrimaryWindowId;
         _shareDefaultSession = shareDefaultSession;
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
-        _restoreWorkspace = workspace is null;
+        _restoreWorkspace = restoreWorkspace;
         _workspace.Windows.Add(this);
         Closed += async (_, _) =>
         {
@@ -139,7 +139,8 @@ public partial class MainWindow : Window
         if (_closed || _closing) return;
         _restoreFinished = true;
         _checkpoint.Start();
-        if (_settings.AutoCheckUpdates && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
+        if (_windowId == WorkspaceCatalogStore.PrimaryWindowId && _settings.AutoCheckUpdates
+            && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
         {
             Run(() => CheckUpdatesAsync(manual: false));
         }

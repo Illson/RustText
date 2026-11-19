@@ -115,7 +115,7 @@ public partial class MainWindow
 
         var windowId = "window:" + Guid.NewGuid().ToString("N");
         var window = new MainWindow([], _workspace, _workspaceId, windowId,
-            shareDefaultSession: _workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId)
+            shareDefaultSession: _workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId, restoreWorkspace: false)
         {
             _fontSize = _fontSize,
             _wordWrap = _wordWrap,

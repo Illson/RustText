@@ -1767,6 +1767,38 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task DeleteConfirmationRechecksWhetherAnotherWindowOpenedTheWorkspace() => HeadlessTests.RunAsync(async profile =>
+    {
+        var window = await OpenWorkspaceAsync();
+        MainWindow? second = null;
+        try
+        {
+            Invoke(window, "NewTab", "keep this workspace");
+            await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Shared");
+            var catalog = new WorkspaceCatalogStore(profile);
+            var entry = (await catalog.LoadAsync()).Workspaces.Single(item => item.Name == "Shared");
+            await CallAsync(window, "SwitchWorkspaceAsync", WorkspaceCatalogStore.DefaultWorkspaceId);
+            var deleting = CallAsync(window, "DeleteWorkspaceAsync", entry, window);
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any());
+            var confirmation = Assert.Single(window.OwnedWindows);
+            await CallAsync(window, "OpenWorkspaceWindowAsync", entry.Id);
+            second = Read<List<MainWindow>>(Field(window, "_workspace"), "Windows").Single(other => other != window);
+            await HeadlessTests.WaitForAsync(() => (bool)Field(second, "_restoreFinished"));
+            Click(confirmation.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "Удалить")));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => deleting);
+
+            Assert.Contains((await catalog.LoadAsync()).Workspaces, item => item.Id == entry.Id);
+            Assert.Equal("keep this workspace", Read<TextEditor>(ActiveTab(second), "Editor").Text);
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            if (second is { IsVisible: true }) await CloseAsync(second);
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
     public Task SettingsOpensTheSelectedNamedWorkspaceOnRestart() => HeadlessTests.RunAsync(async profile =>
     {
         var window = await OpenWorkspaceAsync();

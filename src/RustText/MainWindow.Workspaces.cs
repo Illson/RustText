@@ -236,34 +236,39 @@ public partial class MainWindow
 
     private async Task OpenWorkspaceWindowAsync(string workspaceId)
     {
-        _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-        if (!_workspace.Catalog.Workspaces.Any(item => item.Id == workspaceId))
-            throw new KeyNotFoundException("Рабочее пространство не найдено.");
-        StorageService sourceStorage;
-        if (_workspaceId == workspaceId)
+        await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
+        try
         {
-            await SaveWorkspaceSessionAsync(excludeWindow: null);
-            sourceStorage = SessionStorage;
+            _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+            if (!_workspace.Catalog.Workspaces.Any(item => item.Id == workspaceId))
+                throw new KeyNotFoundException("Рабочее пространство не найдено.");
+            StorageService sourceStorage;
+            if (_workspaceId == workspaceId)
+            {
+                await SaveWorkspaceSessionAsync(excludeWindow: null);
+                sourceStorage = SessionStorage;
+            }
+            else
+            {
+                sourceStorage = _workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+            }
+            var windowId = "window:" + Guid.NewGuid().ToString("N");
+            var targetStorage = _workspace.GetStorage(workspaceId, windowId);
+            if (sourceStorage != targetStorage)
+                await CopyWorkspaceSessionAsync(sourceStorage, targetStorage);
+            await _workspace.CatalogStore.SetWindowWorkspaceAsync(windowId, workspaceId, _lifetime.Token);
+            _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+            var window = new MainWindow([], _workspace, workspaceId, windowId)
+            {
+                _settings = _settings,
+                _titleLimit = _titleLimit,
+                _recent = _recent
+            };
+            App.TrackWindow(window);
+            window.Show();
+            window.Activate();
         }
-        else
-        {
-            sourceStorage = _workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
-        }
-        var windowId = "window:" + Guid.NewGuid().ToString("N");
-        var targetStorage = _workspace.GetStorage(workspaceId, windowId);
-        if (sourceStorage != targetStorage)
-            await CopyWorkspaceSessionAsync(sourceStorage, targetStorage);
-        await _workspace.CatalogStore.SetWindowWorkspaceAsync(windowId, workspaceId, _lifetime.Token);
-        _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-        var window = new MainWindow([], _workspace, workspaceId, windowId)
-        {
-            _settings = _settings,
-            _titleLimit = _titleLimit,
-            _recent = _recent
-        };
-        App.TrackWindow(window);
-        window.Show();
-        window.Activate();
+        finally { _workspace.WorkspaceSwitchGate.Release(); }
     }
 
     private async Task DuplicateWorkspaceAsync(WorkspaceEntry source, Window dialog)
@@ -340,8 +345,7 @@ public partial class MainWindow
 
     private async Task DeleteWorkspaceAsync(WorkspaceEntry workspace, Window dialog)
     {
-        if (_workspace.Windows.Any(window => !window._closed && window._workspaceId == workspace.Id))
-            throw new InvalidOperationException("Закройте окна с этим пространством перед удалением.");
+        EnsureInactive();
         var body = DialogPanel(new TextBlock
         {
             Text = $"Удалить «{workspace.Name}»? Сохранённые вкладки и черновики можно будет восстановить из истории удалённых пространств до истечения срока хранения.",
@@ -352,12 +356,31 @@ public partial class MainWindow
             FocusButton(Button("Отмена", () => confirm.Close(false))),
             FocusButton(Button("Удалить", () => confirm.Close(true)))));
         if (!await confirm.ShowDialog<bool>(this)) return;
-        var deletedCatalog = await _workspace.CatalogStore.DeleteAsync(workspace.Id,
-            _settings.WorkspaceHistoryLimit, _lifetime.Token);
-        ForgetCachedWorkspaceViews(workspace.Id);
-        _workspace.Catalog = deletedCatalog;
+        await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
+        try
+        {
+            EnsureInactive();
+            foreach (var window in _workspace.Windows.Where(window => !window._closed && window._workspaceViews.ContainsKey(workspace.Id)).ToArray())
+                await window.SaveSessionAsync();
+            await _workspace.SaveGate.WaitAsync(_lifetime.Token);
+            try
+            {
+                var deletedCatalog = await _workspace.CatalogStore.DeleteAsync(workspace.Id,
+                    _settings.WorkspaceHistoryLimit, _lifetime.Token);
+                ForgetCachedWorkspaceViews(workspace.Id);
+                _workspace.Catalog = deletedCatalog;
+            }
+            finally { _workspace.SaveGate.Release(); }
+        }
+        finally { _workspace.WorkspaceSwitchGate.Release(); }
         dialog.Close();
         await ShowWorkspacesAsync();
+
+        void EnsureInactive()
+        {
+            if (_workspace.Windows.Any(window => !window._closed && window._workspaceId == workspace.Id))
+                throw new InvalidOperationException("Закройте окна с этим пространством перед удалением.");
+        }
     }
 
     private void ForgetCachedWorkspaceViews(string workspaceId)
