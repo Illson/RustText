@@ -253,6 +253,68 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task SavingFromNamedWorkspaceKeepsSharedDefaultWindowsAndCachedViewsInOneCheckpoint() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "shared-default.txt");
+            await File.WriteAllTextAsync(path, "shared base");
+            var primary = await OpenWorkspaceAsync(path);
+            MainWindow? detached = null;
+            try
+            {
+                var constructor = typeof(MainWindow).GetConstructors(Private)
+                    .Single(candidate => candidate.GetParameters().Length == 5);
+                var windowId = "window:" + Guid.NewGuid().ToString("N");
+                detached = (MainWindow)constructor.Invoke([
+                    Array.Empty<string>(), Field(primary, "_workspace"), WorkspaceCatalogStore.DefaultWorkspaceId,
+                    windowId, true
+                ]);
+                detached.Show();
+                await CallAsync(detached, "OpenPathsAsync", new[] { path }, false, null);
+                var primaryTab = Tabs(primary).Single(tab => Equals(Property(tab, "Path"), path));
+                var detachedTab = Tabs(detached).Single(tab => Equals(Property(tab, "Path"), path));
+                var document = Read<TextEditor>(primaryTab, "Editor").Document;
+                Assert.Same(document, Read<TextEditor>(detachedTab, "Editor").Document);
+                Invoke(primary, "SetTabAutoRefresh", primaryTab, false);
+                Invoke(detached, "SetTabAutoRefresh", detachedTab, false);
+
+                await CallAsync(detached, "CreateWorkspaceFromCurrentAsync", "Named workspace");
+                var namedWorkspace = (string)Field(detached, "_workspaceId");
+                foreach (var tab in Tabs(detached).Where(tab => Property(tab, "Deferred") is not null).ToArray())
+                    await CallAsync(detached, "ActivateDeferredAsync", tab);
+                Assert.All(Tabs(detached).Where(tab => Equals(Property(tab, "Path"), path)),
+                    tab => Assert.Same(document, Read<TextEditor>(tab, "Editor").Document));
+                document.Insert(document.TextLength, " + latest");
+                Assert.Contains(Tabs(detached), tab => Equals(Property(tab, "Path"), path) && Read<bool>(tab, "Dirty"));
+                await CallAsync(detached, "SaveSessionAsync");
+
+                var defaultStorage = StorageService.OpenForTesting(profile);
+                var sharedDefault = await defaultStorage.LoadSessionAsync();
+                Assert.Equal(2, sharedDefault!.Tabs.Count(tab => tab.Path == path));
+                foreach (var saved in sharedDefault.Tabs.Where(tab => tab.Path == path))
+                {
+                    Assert.NotNull(saved.DraftRef);
+                    Assert.Equal("shared base + latest", await File.ReadAllTextAsync(defaultStorage.GetDraftPath(saved)!));
+                }
+
+                var namedStorage = StorageService.OpenWorkspace(profile, namedWorkspace, windowId);
+                var namedSession = await namedStorage.LoadSessionAsync();
+                Assert.Equal(2, namedSession!.Tabs.Count(tab => tab.Path == path));
+                var namedDrafts = namedSession.Tabs.Where(tab => tab.Path == path && tab.DraftRef is not null).ToArray();
+                Assert.NotEmpty(namedDrafts);
+                foreach (var saved in namedDrafts)
+                {
+                    Assert.Equal("shared base + latest", await File.ReadAllTextAsync(namedStorage.GetDraftPath(saved)!));
+                }
+            }
+            finally
+            {
+                if (detached is { IsVisible: true }) await CloseAsync(detached);
+                if (primary.IsVisible) await CloseAsync(primary);
+            }
+        });
+
+    [Fact]
     public Task EmptyStartupLeavesTheLastSavedWorkspaceAvailable() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "kept-session.txt");
