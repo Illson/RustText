@@ -64,6 +64,9 @@ public sealed class WorkspaceTests
             await CallAsync(window, "OpenPathAsync", path, true, null);
             var recent = Assert.Single(await StorageService.OpenForTesting(profile).GetRecentFilesAsync());
             await CallAsync(window, "CloseTabAsync", ActiveTab(window));
+            await CallAsync(window, "RestoreLastClosedAsync");
+            await AssertPageTextAsync();
+            await CallAsync(window, "CloseTabAsync", ActiveTab(window));
             await CallAsync(window, "OpenRecentAsync", recent);
             await AssertPageTextAsync();
             await CloseAsync(window);

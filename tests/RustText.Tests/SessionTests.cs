@@ -38,7 +38,7 @@ public sealed class SessionTests
             if (save == 1)
             {
                 var legacy = Path.Combine(directory.Path, "session", "checkpoint-00000000000000000001");
-                File.Move(Path.Combine(legacy, "draft-1.txt"), Path.Combine(legacy, "rotated.txt"));
+                Directory.Move(legacy, Path.Combine(directory.Path, "retired-rust-checkpoint"));
                 storage = StorageService.OpenForTesting(directory.Path);
             }
             var restored = await storage.LoadSessionAsync();
