@@ -15,6 +15,18 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
 
     private long _nextOffset = -1;
 
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        FocusTheme.ThemeChanged += InvalidateVisual;
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        FocusTheme.ThemeChanged -= InvalidateVisual;
+        base.OnDetachedFromVisualTree(e);
+    }
+
     internal void SetPage(LogPage page)
     {
         var carried = page.StartOffset == _nextOffset && _levels.Count > 0 ? _levels[^1] : LogLevel.Other;

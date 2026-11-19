@@ -277,8 +277,6 @@ public partial class MainWindow
             _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
             var window = new MainWindow([], _workspace, workspaceId, windowId)
             {
-                _settings = _settings,
-                _titleLimit = _titleLimit,
                 _recent = _recent
             };
             App.TrackWindow(window);
@@ -383,7 +381,7 @@ public partial class MainWindow
             try
             {
                 var deletedCatalog = await _workspace.CatalogStore.DeleteAsync(workspace.Id,
-                    _settings.WorkspaceHistoryLimit, _lifetime.Token);
+                    Settings.WorkspaceHistoryLimit, _lifetime.Token);
                 ForgetCachedWorkspaceViews(workspace.Id);
                 _workspace.Catalog = deletedCatalog;
             }

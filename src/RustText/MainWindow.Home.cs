@@ -118,7 +118,7 @@ public partial class MainWindow
         }
 
         Control ClosedRow(SessionTab item, string name, Task<long?> size) => HistoryRow(name, item.Path,
-            DescribeWork(item.Path is not null || _settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs), size, () => Run(() => RestoreClosedAsync(item)),
+            DescribeWork(item.Path is not null || Settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs), size, () => Run(() => RestoreClosedAsync(item)),
             item.DraftRef is null ? "Удалить из истории" : "Удалить сохранённый черновик",
             () => Run(() => ForgetClosedTabAsync(item)));
 

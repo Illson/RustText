@@ -158,6 +158,7 @@ internal sealed class EditorLogFilter : IDisposable
         var logLevels = new LogLevelColorizer { Enabled = true };
         projection.TextArea.TextView.LineTransformers.Add(logLevels);
         projection.TextArea.TextView.BackgroundRenderers.Add(logLevels);
+        FocusTheme.ThemeChanged += projection.TextArea.TextView.Redraw;
         Grid.SetRow(status, 0);
         Grid.SetRow(projection, 1);
         _filteredView.Children.Add(status);
@@ -168,7 +169,11 @@ internal sealed class EditorLogFilter : IDisposable
 
     private void ReleaseProjection()
     {
-        if (_projection is { } projection) projection.Document = new TextDocument();
+        if (_projection is { } projection)
+        {
+            FocusTheme.ThemeChanged -= projection.TextArea.TextView.Redraw;
+            projection.Document = new TextDocument();
+        }
         _filteredView.Children.Clear();
         _projection = null;
         _status = null;

@@ -121,7 +121,7 @@ public partial class MainWindow
 
             if (file.Length > LargeFilePromptBytes)
             {
-                var useLog = _settings.OpenLargeFilesAsLog ?? await ChooseLargeFileModeAsync(file);
+                var useLog = Settings.OpenLargeFilesAsLog ?? await ChooseLargeFileModeAsync(file);
                 if (useLog is null || _closed || _closing) return null;
                 mode = useLog == true ? FileOpenMode.Log : FileOpenMode.PagedEditor;
             }
@@ -168,7 +168,7 @@ public partial class MainWindow
 
         var useLog = await dialog.ShowDialog<bool?>(this);
         if (useLog is not null && remember.IsChecked == true)
-            await SaveWorkspaceSettingsAsync(_settings with { OpenLargeFilesAsLog = useLog });
+            await SaveWorkspaceSettingsAsync(settings => settings with { OpenLargeFilesAsLog = useLog });
         return useLog;
     }
 
@@ -289,7 +289,9 @@ public partial class MainWindow
             VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
         };
         GroupedLineNumberMargin.ReplaceExisting(editor);
+        editor.TextArea.CaretBrush = FocusTheme.Accent;
         editor.TextArea.SelectionBrush = FocusTheme.Selection;
+        editor.TextArea.SelectionForeground = FocusTheme.Text;
         editor.Options.ShowBoxForControlCharacters = true;
         editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
         var logLevels = new LogLevelColorizer();
@@ -327,6 +329,7 @@ public partial class MainWindow
             tab.JsonDisabled = true;
             ScheduleJsonValidation(tab);
         });
+        jump.Classes.Add("focus-outline");
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         actions.Children.Add(warning);
         actions.Children.Add(jump);
@@ -442,8 +445,13 @@ public partial class MainWindow
             Run(() => CutCurrentLineAsync(tab, editor));
         }
         editor.TextArea.AddHandler(KeyDownEvent, CutLineKeyDown, RoutingStrategies.Tunnel);
+
+        // AvaloniaEdit caches the formatted colors of the visible text.
+        Action redrawForTheme = editor.TextArea.TextView.Redraw;
+        FocusTheme.ThemeChanged += redrawForTheme;
         tab.EditorSubscriptions =
         [
+            () => FocusTheme.ThemeChanged -= redrawForTheme,
             () => undoStack.PropertyChanged -= undoHandler,
             () => editor.TextChanged -= textChangedHandler,
             () => editor.TextArea.Caret.PositionChanged -= caretHandler,
@@ -1240,7 +1248,7 @@ public partial class MainWindow
     private void UpdateDraftLineCount(WorkTab tab)
     {
         var count = tab.Editor?.Document.LineCount ?? tab.Log?.KnownLineCount ?? tab.Deferred?.LineCount;
-        tab.LineCountLabel.IsVisible = _settings.ShowDraftLineCount && tab.Path is null && count.HasValue;
+        tab.LineCountLabel.IsVisible = Settings.ShowDraftLineCount && tab.Path is null && count.HasValue;
         if (tab.LineCountLabel.IsVisible)
             tab.LineCountLabel.Text = $"{LineNumbers.Format(count!.Value)} стр.";
     }
@@ -1272,7 +1280,7 @@ public partial class MainWindow
         }
 
         var builder = new StringBuilder();
-        foreach (var rune in raw.EnumerateRunes().Take(_titleLimit))
+        foreach (var rune in raw.EnumerateRunes().Take(Settings.UntitledTabLimit))
         {
             builder.Append(rune);
         }

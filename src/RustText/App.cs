@@ -14,7 +14,25 @@ internal sealed class App : Application
     private static MainWindow? _window;
     private static bool _drainingRequests;
 
-    public override void Initialize() => AvaloniaXamlLoader.Load(this);
+    public override void Initialize()
+    {
+        AvaloniaXamlLoader.Load(this);
+        Resources["TextControlBackground"] = FocusTheme.Field;
+        Resources["TextControlBackgroundPointerOver"] = FocusTheme.Field;
+        Resources["TextControlBackgroundFocused"] = FocusTheme.Field;
+        Resources["TextControlBorderBrush"] = FocusTheme.Border;
+        Resources["TextControlPlaceholderForeground"] = FocusTheme.Muted;
+        // Fluent's standard button brushes capture palette colors through StaticResource.
+        // Share our mutable brushes so already open buttons follow a theme change too.
+        Resources["ButtonBackground"] = FocusTheme.Border;
+        Resources["ButtonBackgroundPointerOver"] = FocusTheme.Hover;
+        Resources["ButtonBackgroundPressed"] = FocusTheme.Selection;
+        Resources["ButtonBackgroundDisabled"] = FocusTheme.Panel;
+        Resources["ButtonForeground"] = FocusTheme.Text;
+        Resources["ButtonForegroundPointerOver"] = FocusTheme.Text;
+        Resources["ButtonForegroundPressed"] = FocusTheme.Text;
+        Resources["ButtonForegroundDisabled"] = FocusTheme.Muted;
+    }
 
     public override void OnFrameworkInitializationCompleted()
     {

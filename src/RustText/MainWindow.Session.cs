@@ -17,7 +17,6 @@ public partial class MainWindow
     private readonly StorageService _storage;
     private List<SessionTab> _closedTabs = [];
     private IReadOnlyList<RecentFileEntry> _recent = [];
-    private UserSettings _settings = new();
     private MenuItem? _recentMenu;
     private MenuItem? _closedFilesMenu;
     private MenuItem? _closedDraftsMenu;
@@ -34,8 +33,18 @@ public partial class MainWindow
         _validatingStartupSession = true;
         try
         {
-            _settings = await _storage.LoadSettingsAsync(_lifetime.Token);
-            _titleLimit = _settings.UntitledTabLimit;
+            if (!_workspace.SettingsReady)
+            {
+                try
+                {
+                    _workspace.Settings = await _storage.LoadSettingsAsync(_lifetime.Token);
+                }
+                finally
+                {
+                    _workspace.SettingsReady = true;
+                    ApplyWorkspaceTheme();
+                }
+            }
             _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
         }
         catch (Exception error) when (IsUserError(error))
@@ -44,8 +53,8 @@ public partial class MainWindow
         }
 
         if (_windowId == WorkspaceCatalogStore.PrimaryWindowId
-            && _settings.WorkspaceStartupMode == WorkspaceStartupMode.Specific
-            && _settings.StartupWorkspaceId is { } preferred
+            && Settings.WorkspaceStartupMode == WorkspaceStartupMode.Specific
+            && Settings.StartupWorkspaceId is { } preferred
             && _workspace.Catalog.Workspaces.Any(item => item.Id == preferred))
         {
             _workspaceId = preferred;
@@ -55,7 +64,7 @@ public partial class MainWindow
             _workspaceId = assignedWorkspace;
         }
         _startEmpty = _windowId == WorkspaceCatalogStore.PrimaryWindowId
-            && _settings.WorkspaceStartupMode == WorkspaceStartupMode.Empty;
+            && Settings.WorkspaceStartupMode == WorkspaceStartupMode.Empty;
         if (_startEmpty)
         {
             _workspaceId = WorkspaceCatalogStore.DefaultWorkspaceId;
@@ -79,19 +88,17 @@ public partial class MainWindow
         if (_closed) return;
 
         var restoredState = state ?? _pendingSession;
-        var migratedSettings = _settings with
+        if (Settings.WordWrap is null || Settings.FontSize is null)
         {
-            WordWrap = _settings.WordWrap ?? restoredState?.Wrap ?? true,
-            FontSize = _settings.FontSize ?? restoredState?.FontSize ?? FocusTheme.EditorFontSize
-        };
-        _wordWrap = migratedSettings.WordWrap == true;
-        _fontSize = migratedSettings.FontSize ?? FocusTheme.EditorFontSize;
-        ApplyTextAppearance();
-        if (_settings.WordWrap is null || _settings.FontSize is null)
-        {
-            _settings = migratedSettings;
-            await _storage.SaveSettingsAsync(_settings, _lifetime.Token);
+            await SaveWorkspaceSettingsAsync(settings => settings with
+            {
+                WordWrap = settings.WordWrap ?? restoredState?.Wrap ?? true,
+                FontSize = settings.FontSize ?? restoredState?.FontSize ?? FocusTheme.EditorFontSize
+            });
         }
+        _wordWrap = Settings.WordWrap ?? true;
+        _fontSize = Settings.FontSize ?? FocusTheme.EditorFontSize;
+        ApplyTextAppearance();
 
         if (_startEmpty)
         {
@@ -191,8 +198,8 @@ public partial class MainWindow
             Height = Math.Clamp(state.WindowHeight, MinHeight, 2400);
             WindowState = state.Maximized ? WindowState.Maximized : WindowState.Normal;
 
-            _wordWrap = state.Wrap;
-            _fontSize = Math.Clamp(state.FontSize, 8, 48);
+            _wordWrap = Settings.WordWrap ?? state.Wrap;
+            _fontSize = Settings.FontSize ?? Math.Clamp(state.FontSize, 8, 48);
             _workspace.NextId = Math.Max(_workspace.NextId, state.Tabs.Concat(state.ClosedTabs ?? []).Select(tab => tab.Id).DefaultIfEmpty().Max());
             _root = state.Layout is { } layout ? RestoreLayout(layout) : MakeGroup();
             var groups = Groups().ToArray();
@@ -989,7 +996,7 @@ public partial class MainWindow
             foreach (var item in _closedTabs.Where(item => item.Path is null))
             {
                 var name = ClosedTabDisplayName(item);
-                closedDrafts.Items.Add(Command(name + DescribeWork(_settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs),
+                closedDrafts.Items.Add(Command(name + DescribeWork(Settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs),
                     () => Run(() => RestoreClosedAsync(item))));
             }
         }
@@ -1024,7 +1031,7 @@ public partial class MainWindow
         }
 
         var builder = new StringBuilder();
-        foreach (var rune in line.EnumerateRunes().Take(_titleLimit))
+        foreach (var rune in line.EnumerateRunes().Take(Settings.UntitledTabLimit))
         {
             builder.Append(rune);
         }

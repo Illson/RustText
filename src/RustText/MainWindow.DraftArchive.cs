@@ -38,7 +38,7 @@ public partial class MainWindow
 
     private async Task ArchiveWorkspaceDraftsAsync(StorageService storage, List<SessionTab> history, bool active)
     {
-        var settings = _settings.Normalize();
+        var settings = Settings.Normalize();
         var token = _lifetime.Token;
         await storage.DraftArchive.PruneExpiredAsync(settings.ArchivedDraftRetentionDays, token);
         var now = DateTimeOffset.UtcNow;
@@ -116,8 +116,8 @@ public partial class MainWindow
         var retentionCount = new TextBox { Text = "30", Width = 78 };
         var retentionUnit = new ComboBox { ItemsSource = new[] { "дней", "недель", "месяцев", "лет" }, SelectedIndex = 0, Width = 100 };
 
-        ApplyArchivePreset(_settings.ArchiveClosedDraftAfterMinutes);
-        ApplyRetentionPreset(_settings.ArchivedDraftRetentionDays);
+        ApplyArchivePreset(Settings.ArchiveClosedDraftAfterMinutes);
+        ApplyRetentionPreset(Settings.ArchivedDraftRetentionDays);
         archivePreset.SelectionChanged += (_, _) =>
         {
             switch (archivePreset.SelectedIndex)
@@ -159,17 +159,16 @@ public partial class MainWindow
                 warning.Text = "Введите целое значение в допустимом диапазоне.";
                 return;
             }
-            _settings = _settings with
-            {
-                ArchiveClosedDraftAfterMinutes = archiveMinutes,
-                ArchivedDraftRetentionDays = retentionDays
-            };
-            dialog.Close(true);
+            dialog.Close((archiveMinutes, retentionDays));
         }), primary: true));
 
-        if (await dialog.ShowDialog<bool>(this))
+        if (await dialog.ShowDialog<(int ArchiveMinutes, int RetentionDays)?>(this) is { } limits)
         {
-            await SaveWorkspaceSettingsAsync(_settings);
+            await SaveWorkspaceSettingsAsync(settings => settings with
+            {
+                ArchiveClosedDraftAfterMinutes = limits.ArchiveMinutes,
+                ArchivedDraftRetentionDays = limits.RetentionDays
+            });
             await ArchiveClosedDraftsAsync();
         }
 

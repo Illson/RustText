@@ -19,6 +19,9 @@ public partial class MainWindow
         public SemaphoreSlim SaveGate { get; } = new(1, 1);
         public SemaphoreSlim WorkspaceSwitchGate { get; } = new(1, 1);
         public SemaphoreSlim CloseGate { get; } = new(1, 1);
+        public SemaphoreSlim SettingsGate { get; } = new(1, 1);
+        public UserSettings Settings { get; set; } = new();
+        public bool SettingsReady { get; set; }
         public List<MainWindow> Windows { get; } = [];
         public Dictionary<string, List<SessionTab>> ClosedTabs { get; } = new(StringComparer.Ordinal);
         public Dictionary<(string WorkspaceId, string WindowId), StorageService> SessionStores { get; } = [];
@@ -99,8 +102,6 @@ public partial class MainWindow
             if (_workspace.Windows.Any(window => !window._closed && window._windowId == assignment.Key)) continue;
             var window = new MainWindow([], _workspace, assignment.Value, assignment.Key)
             {
-                _settings = _settings,
-                _titleLimit = _titleLimit,
                 _recent = _recent
             };
             App.TrackWindow(window);
@@ -124,8 +125,6 @@ public partial class MainWindow
         {
             _fontSize = _fontSize,
             _wordWrap = _wordWrap,
-            _settings = _settings,
-            _titleLimit = _titleLimit,
             _recent = _recent
         };
         if (dropPoint is { } point)

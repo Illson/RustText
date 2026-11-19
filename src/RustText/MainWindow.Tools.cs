@@ -69,6 +69,7 @@ public partial class MainWindow
             Command("Заменить   Ctrl+H", () => OpenSearchPanel(true)),
             Command("Следующее совпадение   F3", () => Run(() => NavigateSearchAsync(false))),
             Command("Предыдущее совпадение   Shift+F3", () => Run(() => NavigateSearchAsync(true)))));
+        TopMenu.Items.Add(BuildThemeMenu());
     }
 
     private void OnWorkspaceKey(object? sender, KeyEventArgs e)
@@ -184,9 +185,8 @@ public partial class MainWindow
         {
             window._wordWrap = enabled;
             window.ApplyTextAppearance();
-            window._settings = window._settings with { WordWrap = enabled };
         }
-        Run(() => SaveWorkspaceSettingsAsync(_settings with { WordWrap = enabled }));
+        Run(() => SaveWorkspaceSettingsAsync(settings => settings with { WordWrap = enabled }));
     }
 
     private void ResizeText(double delta)
@@ -196,9 +196,8 @@ public partial class MainWindow
         {
             window._fontSize = size;
             window.ApplyTextAppearance();
-            window._settings = window._settings with { FontSize = size };
         }
-        Run(() => SaveWorkspaceSettingsAsync(_settings with { FontSize = size }));
+        Run(() => SaveWorkspaceSettingsAsync(settings => settings with { FontSize = size }));
     }
 
     private void ApplyTextAppearance()
@@ -404,17 +403,17 @@ public partial class MainWindow
     {
         _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         var catalog = _workspace.Catalog;
-        var limit = new TextBox { Text = _titleLimit.ToString(CultureInfo.CurrentCulture) };
-        var perFile = new TextBox { Text = (_settings.VersionFileLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
-        var total = new TextBox { Text = (_settings.VersionTotalLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
-        var draftLines = new CheckBox { Content = "Число строк у вкладок без имени", IsChecked = _settings.ShowDraftLineCount };
-        var autoUpdate = new CheckBox { Content = "Проверять обновления при запуске", IsChecked = _settings.AutoCheckUpdates };
+        var limit = new TextBox { Text = Settings.UntitledTabLimit.ToString(CultureInfo.CurrentCulture) };
+        var perFile = new TextBox { Text = (Settings.VersionFileLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
+        var total = new TextBox { Text = (Settings.VersionTotalLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
+        var draftLines = new CheckBox { Content = "Число строк у вкладок без имени", IsChecked = Settings.ShowDraftLineCount };
+        var autoUpdate = new CheckBox { Content = "Проверять обновления при запуске", IsChecked = Settings.AutoCheckUpdates };
         var wordWrap = new CheckBox { Content = "Переносить длинные строки", IsChecked = _wordWrap };
         var fontSize = new TextBox { Text = _fontSize.ToString(CultureInfo.CurrentCulture) };
         var startupMode = new ComboBox
         {
             ItemsSource = new[] { "Последнее пространство", "Выбранное пространство", "Пустое окно" },
-            SelectedIndex = _settings.WorkspaceStartupMode switch
+            SelectedIndex = Settings.WorkspaceStartupMode switch
             {
                 WorkspaceStartupMode.Specific => 1,
                 WorkspaceStartupMode.Empty => 2,
@@ -425,19 +424,19 @@ public partial class MainWindow
         {
             ItemsSource = catalog.Workspaces,
             ItemTemplate = new FuncDataTemplate<WorkspaceEntry>((entry, _) => new TextBlock { Text = entry?.Name }),
-            SelectedItem = catalog.Workspaces.FirstOrDefault(item => item.Id == _settings.StartupWorkspaceId)
+            SelectedItem = catalog.Workspaces.FirstOrDefault(item => item.Id == Settings.StartupWorkspaceId)
                 ?? catalog.Workspaces.FirstOrDefault(item => item.Id == _workspaceId)
         };
         var workspaceHistory = new TextBox
         {
-            Text = _settings.WorkspaceHistoryLimit < 0 ? "Безлимит" : _settings.WorkspaceHistoryLimit.ToString(CultureInfo.CurrentCulture)
+            Text = Settings.WorkspaceHistoryLimit < 0 ? "Безлимит" : Settings.WorkspaceHistoryLimit.ToString(CultureInfo.CurrentCulture)
         };
         startupWorkspace.IsEnabled = startupMode.SelectedIndex == 1;
         startupMode.SelectionChanged += (_, _) => startupWorkspace.IsEnabled = startupMode.SelectedIndex == 1;
         var largeFiles = new ComboBox
         {
             ItemsSource = new[] { "Спрашивать", "Открывать как лог", "Открывать в редакторе" },
-            SelectedIndex = _settings.OpenLargeFilesAsLog switch { true => 1, false => 2, null => 0 }
+            SelectedIndex = Settings.OpenLargeFilesAsLog switch { true => 1, false => 2, null => 0 }
         };
         var body = DialogPanel(new TextBlock { Text = "Символов в заголовке пустой вкладки (1–200)" }, limit,
             new TextBlock { Text = "Лимит снимка файла, МиБ" }, perFile,
@@ -449,7 +448,7 @@ public partial class MainWindow
         var dialog = Dialog("Настройки", body);
         body.Children.Add(FocusButton(Button("Черновики и архив…", () =>
         {
-            dialog.Close(false);
+            dialog.Close();
             Dispatcher.UIThread.Post(() => Run(ShowDraftArchiveSettingsAsync));
         })));
         var warning = new TextBlock { Foreground = FocusTheme.Danger };
@@ -472,7 +471,7 @@ public partial class MainWindow
                 };
                 var retention = string.Equals(workspaceHistory.Text?.Trim(), "Безлимит", StringComparison.OrdinalIgnoreCase)
                     ? -1 : int.Parse(workspaceHistory.Text!, CultureInfo.CurrentCulture);
-                _settings = _settings with
+                Func<UserSettings, UserSettings> update = settings => settings with
                 {
                     UntitledTabLimit = length,
                     VersionFileLimitBytes = fileLimit * 1024 * 1024,
@@ -486,16 +485,7 @@ public partial class MainWindow
                     StartupWorkspaceId = startupWorkspace.SelectedItem is WorkspaceEntry selectedWorkspace ? selectedWorkspace.Id : null,
                     WorkspaceHistoryLimit = retention
                 };
-                _titleLimit = length;
-                foreach (var window in _workspace.Windows)
-                {
-                    window._wordWrap = wrapEnabled;
-                    window._fontSize = parsedFontSize;
-                    window._settings = _settings;
-                    window._titleLimit = length;
-                    window.ApplyTextAppearance();
-                }
-                dialog.Close(true);
+                dialog.Close(update);
             }
             else
             {
@@ -503,23 +493,43 @@ public partial class MainWindow
             }
         }), primary: true));
 
-        if (await dialog.ShowDialog<bool>(this))
+        if (await dialog.ShowDialog<Func<UserSettings, UserSettings>?>(this) is { } update)
         {
-            await SaveWorkspaceSettingsAsync(_settings);
+            await SaveWorkspaceSettingsAsync(update);
+            foreach (var window in _workspace.Windows)
+            {
+                window._wordWrap = Settings.WordWrap ?? window._wordWrap;
+                window._fontSize = Settings.FontSize ?? window._fontSize;
+                window.ApplyTextAppearance();
+            }
         }
     }
 
-    private async Task SaveWorkspaceSettingsAsync(UserSettings settings)
+    private async Task SaveWorkspaceSettingsAsync(Func<UserSettings, UserSettings> update)
     {
-        foreach (var window in _workspace.Windows)
+        await _workspace.SettingsGate.WaitAsync(_lifetime.Token);
+        try
         {
-            window._settings = settings;
-            window._titleLimit = settings.UntitledTabLimit;
-            foreach (var tab in window.LoadedWorkspaceTabs()) window.UpdateTab(tab);
-            window.RefreshHistoryMenusLocal();
-            if (window._home) window._refreshHome?.Invoke();
+            var previous = Settings;
+            var settings = update(previous);
+            if (settings == previous) return;
+
+            await _storage.SaveSettingsAsync(settings, _lifetime.Token);
+            _workspace.Settings = settings;
+            if (settings.UntitledTabLimit != previous.UntitledTabLimit
+                || settings.ShowDraftLineCount != previous.ShowDraftLineCount)
+            {
+                foreach (var window in _workspace.Windows)
+                {
+                    foreach (var tab in window.LoadedWorkspaceTabs()) window.UpdateTab(tab);
+                    window.RefreshHistoryMenusLocal();
+                    if (window._home) window._refreshHome?.Invoke();
+                }
+            }
+            if (settings.Theme != previous.Theme)
+                ApplyWorkspaceTheme();
         }
-        await _storage.SaveSettingsAsync(settings, _lifetime.Token);
+        finally { _workspace.SettingsGate.Release(); }
     }
 
     private async Task<string?> PromptAsync(string title, string description, string initial = "")

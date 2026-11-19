@@ -75,7 +75,7 @@ public partial class MainWindow
         await dialog.ShowDialog(this);
     }
 
-    private VersionHistory VersionStore() => VersionHistory.OpenDefault(_settings.VersionFileLimitBytes, _settings.VersionTotalLimitBytes);
+    private VersionHistory VersionStore() => VersionHistory.OpenDefault(Settings.VersionFileLimitBytes, Settings.VersionTotalLimitBytes);
 
     private async Task<string?> CaptureVersionAsync(string path, TextEncodingKind encoding, FileStamp? expectedStamp = null)
     {

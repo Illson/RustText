@@ -26,6 +26,32 @@ namespace RustText.Tests;
 [Collection(HeadlessCollection.Name)]
 public sealed class WorkspaceTests
 {
+    [Theory]
+    [InlineData(false, 21d, false, 21d)]
+    [InlineData(null, null, true, 15d)]
+    public Task WorkspaceRestoreUsesAppTextSettingsOrMigratesTheOldSession(
+        bool? wordWrap, double? fontSize, bool expectedWrap, double expectedSize) => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenForTesting(profile);
+        await storage.SaveSettingsAsync(new UserSettings { WordWrap = wordWrap, FontSize = fontSize, Theme = "neon" });
+        await storage.SaveSessionAsync(new SessionState([], Wrap: true, FontSize: 15));
+        var path = Path.Combine(profile, "appearance.txt");
+        await File.WriteAllTextAsync(path, "workspace text");
+
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(Assert.Single(Tabs(window)), "Editor");
+            Assert.Equal(expectedWrap, editor.WordWrap);
+            Assert.Equal(expectedSize, editor.FontSize);
+            var saved = await storage.LoadSettingsAsync();
+            Assert.Equal(expectedWrap, saved.WordWrap);
+            Assert.Equal(expectedSize, saved.FontSize);
+            Assert.Equal("neon", saved.Theme);
+        }
+        finally { await CloseAsync(window); }
+    });
+
     [Fact]
     public Task SavedWorkspaceCopiesTabsAndLayoutAndReusesTheLiveViewAfterSwitching() => HeadlessTests.RunAsync(async profile =>
     {
@@ -1923,14 +1949,12 @@ public sealed class WorkspaceTests
             ((List<SessionTab>)Field(window, "_closedTabs")!)[0] = old;
 
             Invoke(window, "NewTab", "leave this tab open");
-            var settings = (UserSettings)Field(window, "_settings")!;
-            var updated = settings with
+            Func<UserSettings, UserSettings> update = settings => settings with
             {
                 ArchiveClosedDraftAfterMinutes = 1,
                 ArchivedDraftRetentionDays = 0
             };
-            typeof(MainWindow).GetField("_settings", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, updated);
-            await CallAsync(window, "SaveWorkspaceSettingsAsync", updated);
+            await CallAsync(window, "SaveWorkspaceSettingsAsync", update);
             await CallAsync(window, "HandleIdleUnloadTimerTickAsync");
 
             Assert.Empty((List<SessionTab>)Field(window, "_closedTabs")!);
@@ -2064,8 +2088,8 @@ public sealed class WorkspaceTests
             await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Project");
             var defaultStore = StorageService.OpenForTesting(profile);
             var namedStore = StorageService.OpenWorkspace(profile, (string)Field(window, "_workspaceId"), WorkspaceCatalogStore.PrimaryWindowId);
-            var settings = ((UserSettings)Field(window, "_settings")) with { ArchiveClosedDraftAfterMinutes = 1 };
-            await CallAsync(window, "SaveWorkspaceSettingsAsync", settings);
+            Func<UserSettings, UserSettings> update = settings => settings with { ArchiveClosedDraftAfterMinutes = 1 };
+            await CallAsync(window, "SaveWorkspaceSettingsAsync", update);
             await CallAsync(window, "HandleIdleUnloadTimerTickAsync");
 
             Assert.Single(await defaultStore.DraftArchive.GetEntriesAsync());
