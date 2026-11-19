@@ -32,13 +32,17 @@ public sealed class HyperlinkStyleTests
             Assert.Same(FocusTheme.Link, textView.LinkTextForegroundBrush);
             Assert.Equal(Color.Parse("#72C7E6"), ((SolidColorBrush)textView.LinkTextForegroundBrush).Color);
 
-            var before = textView.VisualLines[0];
-            FocusTheme.Apply(AppTheme.Neon);
-            await HeadlessTests.WaitForAsync(() => textView.VisualLinesValid && textView.VisualLines.Count >= 2
-                && !ReferenceEquals(before, textView.VisualLines[0]));
+            foreach (var theme in new[] { AppTheme.Neon, AppTheme.ViceCity, AppTheme.Focus })
+            {
+                var before = textView.VisualLines[0];
+                var previousColor = ((SolidColorBrush)textView.LinkTextForegroundBrush).Color;
+                FocusTheme.Apply(theme);
+                await HeadlessTests.WaitForAsync(() => textView.VisualLinesValid && textView.VisualLines.Count >= 2
+                    && !ReferenceEquals(before, textView.VisualLines[0]));
 
-            Assert.Same(FocusTheme.Link, textView.LinkTextForegroundBrush);
-            Assert.Equal(Color.Parse("#76CFFF"), ((SolidColorBrush)textView.LinkTextForegroundBrush).Color);
+                Assert.Same(FocusTheme.Link, textView.LinkTextForegroundBrush);
+                Assert.NotEqual(previousColor, ((SolidColorBrush)textView.LinkTextForegroundBrush).Color);
+            }
         }
         finally
         {

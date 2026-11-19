@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Avalonia;
 using Avalonia.Media;
 using Avalonia.Themes.Fluent;
 using Avalonia.Threading;
@@ -42,7 +43,21 @@ internal static class FocusTheme
         string JsonKey,
         string JsonString,
         string JsonNumber,
-        string JsonLiteral);
+        string JsonLiteral)
+    {
+        public string Toolbar { get; init; } = Muted;
+        public string AppIconForeground { get; init; } = Warning;
+        public string AppIconBackground { get; init; } = UpdateIconSurface;
+        public string AppIconBorder { get; init; } = UpdateBorder;
+        public string StatusBorder { get; init; } = Border;
+        public string ActionBorder { get; init; } = Border;
+        public string MinimapBackground { get; init; } = Hover;
+        public string MinimapViewport { get; init; } = Selection;
+        public string DocumentMinimapInk { get; init; } = Border;
+        public string LogMinimapInk { get; init; } = Muted;
+        public string TitleMotif { get; init; } = "#00000000";
+        public string TitleGlow { get; init; } = Chrome;
+    }
 
     private sealed class ThemeState
     {
@@ -76,6 +91,29 @@ internal static class FocusTheme
         public SolidColorBrush JsonString { get; } = Brush(Focus.JsonString);
         public SolidColorBrush JsonNumber { get; } = Brush(Focus.JsonNumber);
         public SolidColorBrush JsonLiteral { get; } = Brush(Focus.JsonLiteral);
+        public SolidColorBrush Toolbar { get; } = Brush(Focus.Toolbar);
+        public SolidColorBrush AppIconForeground { get; } = Brush(Focus.AppIconForeground);
+        public SolidColorBrush AppIconBackground { get; } = Brush(Focus.AppIconBackground);
+        public SolidColorBrush AppIconBorder { get; } = Brush(Focus.AppIconBorder);
+        public SolidColorBrush StatusBorder { get; } = Brush(Focus.StatusBorder);
+        public SolidColorBrush ActionBorder { get; } = Brush(Focus.ActionBorder);
+        public SolidColorBrush MinimapBackground { get; } = Brush(Focus.MinimapBackground);
+        public SolidColorBrush MinimapViewport { get; } = Brush(Focus.MinimapViewport);
+        public SolidColorBrush DocumentMinimapInk { get; } = Brush(Focus.DocumentMinimapInk);
+        public SolidColorBrush LogMinimapInk { get; } = Brush(Focus.LogMinimapInk);
+        public SolidColorBrush TitleMotif { get; } = Brush(Focus.TitleMotif);
+        public LinearGradientBrush TitleBar { get; } = new()
+        {
+            StartPoint = new RelativePoint(0, .5, RelativeUnit.Relative),
+            EndPoint = new RelativePoint(1, .5, RelativeUnit.Relative),
+            GradientStops = new GradientStops
+            {
+                new(Color.Parse(Focus.Chrome), 0),
+                new(Color.Parse(Focus.Chrome), .42),
+                new(Color.Parse(Focus.TitleGlow), .80),
+                new(Color.Parse(Focus.Chrome), 1)
+            }
+        };
 
         public void RaiseChanged() => Changed?.Invoke();
 
@@ -109,6 +147,23 @@ internal static class FocusTheme
             Set(JsonString, palette.JsonString);
             Set(JsonNumber, palette.JsonNumber);
             Set(JsonLiteral, palette.JsonLiteral);
+            Set(Toolbar, palette.Toolbar);
+            Set(AppIconForeground, palette.AppIconForeground);
+            Set(AppIconBackground, palette.AppIconBackground);
+            Set(AppIconBorder, palette.AppIconBorder);
+            Set(StatusBorder, palette.StatusBorder);
+            Set(ActionBorder, palette.ActionBorder);
+            Set(MinimapBackground, palette.MinimapBackground);
+            Set(MinimapViewport, palette.MinimapViewport);
+            Set(DocumentMinimapInk, palette.DocumentMinimapInk);
+            Set(LogMinimapInk, palette.LogMinimapInk);
+            Set(TitleMotif, palette.TitleMotif);
+            // Keep the brush and stops bound by XAML when switching themes.
+            var chrome = Color.Parse(palette.Chrome);
+            TitleBar.GradientStops[0].Color = chrome;
+            TitleBar.GradientStops[1].Color = chrome;
+            TitleBar.GradientStops[2].Color = Color.Parse(palette.TitleGlow);
+            TitleBar.GradientStops[3].Color = chrome;
         }
     }
 
@@ -127,11 +182,25 @@ internal static class FocusTheme
             "#66F5C8", "#76CFFF", "#262047", "#5E4F91", "#37275D", "#F0E9FF",
             "#8CDFFF", "#82F2D2", "#FFD166", "#FF7DB8"),
         [AppTheme.ViceCity] = new(
-            "#201724", "#17121D", "#2B1D2D", "#352239", "#211A29", "#69485F",
-            "#F8E9E2", "#C7A9B8", "#A98EAA", "#FF7898", "#FF9BAE", "#4C2B48",
-            "#573451", "#785044", "#A35F4B", "#FFC38A", "#FF6E79", "#56303B",
-            "#72D6C4", "#78D9E8", "#4A263A", "#A64B6A", "#66324E", "#FFE6DD",
-            "#88DDE8", "#A4E2C5", "#FFC38A", "#FFA1B8")
+            "#15121E", "#120F1A", "#191524", "#221B30", "#201A2D", "#4A3659",
+            "#E8DEF3", "#B9AACA", "#9886AE", "#FF62AD", "#FF91C5", "#2D233D",
+            "#493052", "#554334", "#76503C", "#FFD08F", "#FF829C", "#3B1E32",
+            "#89E0CD", "#69E0D6", "#2F213C", "#825478", "#382541", "#F5DFEC",
+            "#FF83BC", "#89E0CD", "#FFD08F", "#B6A4F4")
+        {
+            Toolbar = "#69E0D6",
+            AppIconForeground = "#69E0D6",
+            AppIconBackground = "#221B30",
+            AppIconBorder = "#FF62AD",
+            StatusBorder = "#69E0D6",
+            ActionBorder = "#69E0D6",
+            MinimapBackground = "#171321",
+            MinimapViewport = "#70493052",
+            DocumentMinimapInk = "#927AA8",
+            LogMinimapInk = "#927AA8",
+            TitleMotif = "#191321",
+            TitleGlow = "#4F2349"
+        }
     };
 
     // Mutable Avalonia brushes belong to the dispatcher that created them.
@@ -175,6 +244,18 @@ internal static class FocusTheme
     public static SolidColorBrush JsonString => State.JsonString;
     public static SolidColorBrush JsonNumber => State.JsonNumber;
     public static SolidColorBrush JsonLiteral => State.JsonLiteral;
+    public static SolidColorBrush Toolbar => State.Toolbar;
+    public static SolidColorBrush AppIconForeground => State.AppIconForeground;
+    public static SolidColorBrush AppIconBackground => State.AppIconBackground;
+    public static SolidColorBrush AppIconBorder => State.AppIconBorder;
+    public static SolidColorBrush StatusBorder => State.StatusBorder;
+    public static SolidColorBrush ActionBorder => State.ActionBorder;
+    public static SolidColorBrush MinimapBackground => State.MinimapBackground;
+    public static SolidColorBrush MinimapViewport => State.MinimapViewport;
+    public static SolidColorBrush DocumentMinimapInk => State.DocumentMinimapInk;
+    public static SolidColorBrush LogMinimapInk => State.LogMinimapInk;
+    public static SolidColorBrush TitleMotif => State.TitleMotif;
+    public static LinearGradientBrush TitleBar => State.TitleBar;
 
     public static Color AccentColor => Accent.Color;
     public static Color ChromeColor => Chrome.Color;

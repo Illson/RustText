@@ -56,7 +56,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
             return;
         }
 
-        context.FillRectangle(FocusTheme.Hover, new Rect(Bounds.Size));
+        context.FillRectangle(FocusTheme.MinimapBackground, new Rect(Bounds.Size));
         context.FillRectangle(FocusTheme.Border, new Rect(0, 0, 1, Bounds.Height));
         var count = document.LineCount;
         var rows = Math.Clamp((int)(Bounds.Height / 3), 1, 160);
@@ -66,7 +66,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
                 Math.Min(10, Bounds.Height), Bounds.Height);
             var maximum = scroll.Extent.Height - scroll.Viewport.Height;
             var fraction = maximum > 0 ? Math.Clamp(scroll.Offset.Y / maximum, 0, 1) : 0;
-            context.FillRectangle(FocusTheme.Selection, new Rect(1, fraction * (Bounds.Height - height), Bounds.Width - 1, height));
+            context.FillRectangle(FocusTheme.MinimapViewport, new Rect(1, fraction * (Bounds.Height - height), Bounds.Width - 1, height));
         }
         for (var row = 0; row < rows; row++)
         {
@@ -74,7 +74,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
             var width = Math.Min(Bounds.Width - 12, line.Length * .6);
             if (width > 0)
             {
-                context.FillRectangle(FocusTheme.Border, new Rect(7, row * Bounds.Height / rows, width, 1));
+                context.FillRectangle(FocusTheme.DocumentMinimapInk, new Rect(7, row * Bounds.Height / rows, width, 1));
             }
         }
     }

@@ -7,22 +7,38 @@
         WindowDecorations="BorderOnly"
         Background="{x:Static local:FocusTheme.Editor}" Foreground="{x:Static local:FocusTheme.Text}" FontSize="13">
     <Grid RowDefinitions="Auto,Auto,*,Auto,Auto">
-        <Border Background="{x:Static local:FocusTheme.Chrome}" BorderBrush="{x:Static local:FocusTheme.Border}"
+        <Border x:Name="TitleBar" Background="{x:Static local:FocusTheme.TitleBar}" BorderBrush="{x:Static local:FocusTheme.Border}"
                 BorderThickness="0,0,0,1" MinHeight="36">
             <Grid ColumnDefinitions="Auto,Auto,*,Auto" Margin="8,0,0,0">
                 <Button Classes="focus-quiet" Foreground="{x:Static local:FocusTheme.Text}" Padding="5,3"
                         AutomationProperties.Name="Главный экран RustText" Click="HomeClicked">
                     <StackPanel Orientation="Horizontal" Spacing="7">
-                        <Border Width="22" Height="21" CornerRadius="5" Background="{x:Static local:FocusTheme.UpdateIconSurface}" BorderBrush="{x:Static local:FocusTheme.UpdateBorder}" BorderThickness="1">
-                            <TextBlock Text="›_" FontFamily="Consolas" FontWeight="Bold"
-                                       Foreground="{x:Static local:FocusTheme.Warning}"
+                        <Border x:Name="AppIcon" Width="22" Height="21" CornerRadius="5" Background="{x:Static local:FocusTheme.AppIconBackground}" BorderBrush="{x:Static local:FocusTheme.AppIconBorder}" BorderThickness="1">
+                            <TextBlock x:Name="AppIconGlyph" Text="›_" FontFamily="Consolas" FontWeight="Bold"
+                                       Foreground="{x:Static local:FocusTheme.AppIconForeground}"
                                        HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <TextBlock Text="RustText" FontWeight="SemiBold" VerticalAlignment="Center" />
                     </StackPanel>
                 </Button>
                 <Menu Grid.Column="1" x:Name="TopMenu" Classes="focus-menu" Margin="6,0,0,0" VerticalAlignment="Center" />
-                <Border Grid.Column="2" Background="Transparent" PointerPressed="WindowDragPressed" />
+                <Border Grid.Column="2" x:Name="TitleDragArea" Background="Transparent" ClipToBounds="True" PointerPressed="WindowDragPressed">
+                    <Path x:Name="TitlePalm" Width="58" Height="36" Margin="0,0,64,0" HorizontalAlignment="Right"
+                          IsHitTestVisible="False" Fill="{x:Static local:FocusTheme.TitleMotif}"
+                          Data="M 14,36 C 17,29 18,20 22,10 L 25,10 C 23,18 21,28 20,36 Z
+                                M 23,10 C 26,1 35,0 40,5 C 33,3 28,5 23,10 Z
+                                M 24,10 C 34,6 41,12 42,20 C 37,14 31,12 24,12 Z
+                                M 23,10 C 18,0 9,1 5,7 C 11,4 18,5 23,10 Z
+                                M 22,10 C 12,6 5,13 4,20 C 10,14 16,12 22,12 Z
+                                M 23,11 C 21,3 24,0 28,0 L 27,4 C 25,6 25,8 25,11 Z
+                                M 24,11 C 28,14 30,20 28,24 C 27,18 25,15 23,12 Z
+                                M 34,36 C 37,31 39,25 41,19 L 43,19 C 42,25 40,31 39,36 Z
+                                M 42,19 C 43,11 50,10 54,13 C 48,13 45,16 42,19 Z
+                                M 42,19 C 50,15 56,19 57,25 C 51,21 46,20 42,20 Z
+                                M 42,19 C 38,12 31,13 28,17 C 34,15 38,17 42,19 Z
+                                M 42,19 C 35,17 30,22 30,27 C 34,23 38,21 42,20 Z
+                                M 42,19 C 45,21 47,26 45,30 C 44,25 43,22 41,20 Z" />
+                </Border>
                 <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Stretch">
                     <Button x:Name="CaptionMinimize" Classes="focus-caption" AutomationProperties.Name="Свернуть" Click="MinimizeWindowClicked">
                         <Path Width="12" Height="12" Data="M 1,8 L 11,8" Stroke="{x:Static local:FocusTheme.Text}" StrokeThickness="1.4" />
@@ -65,7 +81,7 @@
                         HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
         <ContentControl Grid.Row="3" x:Name="PanelHost" IsVisible="False"
                         HorizontalContentAlignment="Stretch" />
-        <Border Grid.Row="4" Padding="12,3" MinHeight="26" BorderBrush="{x:Static local:FocusTheme.Border}"
+        <Border Grid.Row="4" x:Name="StatusBar" Padding="12,3" MinHeight="26" BorderBrush="{x:Static local:FocusTheme.StatusBorder}"
                 BorderThickness="0,1,0,0" Background="{x:Static local:FocusTheme.Deep}">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                 <TextBlock x:Name="StatusText" TextTrimming="CharacterEllipsis" FontSize="12"

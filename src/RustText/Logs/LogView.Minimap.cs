@@ -69,16 +69,16 @@ internal sealed partial class LogView
 
         public override void Render(DrawingContext context)
         {
-            context.FillRectangle(FocusTheme.Hover, new Rect(Bounds.Size));
+            context.FillRectangle(FocusTheme.MinimapBackground, new Rect(Bounds.Size));
             context.FillRectangle(FocusTheme.Border, new Rect(0, 0, 1, Bounds.Height));
             var marker = ViewportMarker;
-            if (marker.Height > 0) context.FillRectangle(FocusTheme.Selection, marker);
+            if (marker.Height > 0) context.FillRectangle(FocusTheme.MinimapViewport, marker);
 
             var rowHeight = Bounds.Height / Math.Max(1, Samples.Count);
             for (var index = 0; index < Samples.Count; index++)
             {
                 var width = Math.Clamp(Samples[index].Length, 3, 32) / 32d * Math.Max(0, Bounds.Width - 12);
-                context.FillRectangle(FocusTheme.Muted, new Rect(6, (index + .5) * rowHeight, width, 1));
+                context.FillRectangle(FocusTheme.LogMinimapInk, new Rect(6, (index + .5) * rowHeight, width, 1));
             }
             if (marker.Height > 0) context.DrawRectangle(null, _viewportBorder, marker);
         }

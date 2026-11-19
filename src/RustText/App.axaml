@@ -152,6 +152,7 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
         </Style>
         <Style Selector="Button.focus-icon">
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Toolbar}" />
             <Setter Property="MinWidth" Value="26" />
             <Setter Property="MinHeight" Value="25" />
             <Setter Property="Padding" Value="3,0" />
@@ -200,6 +201,19 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Deep}" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="Button.focus-outline">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Panel}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ActionBorder}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
+        </Style>
+        <Style Selector="Button.focus-outline:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                         Button.focus-outline:pressed /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ActionBorder}" />
         </Style>
         <Style Selector="Button.focus-primary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
             <Setter Property="Background" Value="{x:Static local:FocusTheme.AccentHover}" />

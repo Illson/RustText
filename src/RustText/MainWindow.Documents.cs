@@ -280,7 +280,9 @@ public partial class MainWindow
             VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
         };
         GroupedLineNumberMargin.ReplaceExisting(editor);
+        editor.TextArea.CaretBrush = FocusTheme.Accent;
         editor.TextArea.SelectionBrush = FocusTheme.Selection;
+        editor.TextArea.SelectionForeground = FocusTheme.Text;
         editor.Options.ShowBoxForControlCharacters = true;
         editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
         tab.Editor = editor;
@@ -315,6 +317,7 @@ public partial class MainWindow
             tab.JsonDisabled = true;
             ScheduleJsonValidation(tab);
         });
+        jump.Classes.Add("focus-outline");
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         actions.Children.Add(warning);
         actions.Children.Add(jump);
