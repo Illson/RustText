@@ -1179,6 +1179,42 @@ public sealed class WorkspaceTests
         Assert.Contains(JsonColorizer.Tokenize(""" {"value": "unterminated"""), token => token.Kind == JsonTokenKind.String);
     }
 
+    [Theory]
+    [InlineData("events.jsonl", true)]
+    [InlineData("events.NDJSON", true)]
+    [InlineData("events.log", false)]
+    public Task JsonLinesValidatesAndFormatsEachRecord(string name, bool highlight) => HeadlessTests.RunAsync(async profile =>
+    {
+        const string first = """{ "kind": "start" }""";
+        const string valid = """{ "kind": "имя", "value": true }""";
+        const string invalid = """{"kind":"имя🚀","value": }""";
+        var path = Path.Combine(profile, name);
+        await File.WriteAllTextAsync(path, first + "\r\n" + valid + "\r\n");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            await HeadlessTests.WaitForAsync(() => Property(tab, "JsonCancellation") is null);
+            Assert.Null(Property(tab, "JsonError"));
+            Assert.Equal(highlight, Assert.Single(editor.TextArea.TextView.LineTransformers.OfType<JsonColorizer>()).Enabled);
+
+            editor.Document.Replace(first.Length + 1, valid.Length, invalid);
+            await HeadlessTests.WaitForAsync(() => Property(tab, "JsonError") is not null);
+            var error = Read<JsonProblem>(tab, "JsonError");
+            Assert.Equal(2, error.Line);
+            Assert.Equal(invalid.Length, error.Column);
+            Assert.Equal(first.Length + 1 + invalid.Length - 1, error.Offset);
+
+            editor.Document.Replace(first.Length + 1, invalid.Length, valid);
+            await CallAsync(window, "FormatJsonAsync");
+            Assert.Equal("{\"kind\":\"start\"}\n{\"kind\":\"имя\",\"value\":true}\n", editor.Text);
+            await HeadlessTests.WaitForAsync(() => Property(tab, "JsonCancellation") is null);
+            Assert.Null(Property(tab, "JsonError"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
     [Fact]
     public Task AnonymousJsonKeepsHighlightingWithValidationSelectionAndSearch() => HeadlessTests.RunAsync(async _ =>
     {
