@@ -59,6 +59,7 @@ public partial class MainWindow
             LastCheckpoints[workspaceId] = fingerprint;
     }
 
+<<<<<<< HEAD
     private sealed record WorkspaceViewState(Dictionary<long, WorkTab> Tabs, Group Root, Group Active, bool Home,
         Control? HomeContent, double Width, double Height, bool Maximized);
 
@@ -69,6 +70,9 @@ public partial class MainWindow
 
     private IEnumerable<WorkTab> LoadedWorkspaceTabs() =>
         _tabs.Values.Concat(_workspaceViews.Values.SelectMany(view => view.Tabs.Values)).Distinct();
+=======
+    private IEnumerable<WorkTab> LoadedWorkspaceTabs() => _tabs.Values;
+>>>>>>> 8c2e17d (Совместно редактировать файл из разных рабочих пространств (#24))
 
     private sealed record SavedLiveDraft(WeakReference<TextDocument> Document, long Revision, SessionTab Saved);
 
