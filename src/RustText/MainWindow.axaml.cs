@@ -623,8 +623,21 @@ public partial class MainWindow : Window
             SetStatus("Завершите сохранение или отмените правки страницы перед закрытием окна.");
             return;
         }
+        if (_workspaceSwitchPending)
+        {
+            SetStatus("Дождитесь завершения переключения пространства перед закрытием окна.");
+            return;
+        }
 
         _closing = true;
+        var closingEditors = _workspace.Windows
+            .Where(window => !window._closed && window._workspaceId == _workspaceId && window.SharesSessionWith(this))
+            .SelectMany(window => window._tabs.Values)
+            .Select(tab => tab.Editor)
+            .Where(editor => editor is not null)
+            .Select(editor => (Editor: editor!, WasEnabled: editor!.IsEnabled))
+            .ToArray();
+        foreach (var (editor, _) in closingEditors) editor.IsEnabled = false;
         CancelTabDrag();
         _checkpoint.Stop();
         var closeGateHeld = false;
@@ -689,6 +702,8 @@ public partial class MainWindow : Window
             {
                 _workspace.CloseGate.Release();
             }
+            if (!_closed)
+                foreach (var (editor, wasEnabled) in closingEditors) editor.IsEnabled = wasEnabled;
         }
     }
 
