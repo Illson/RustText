@@ -18,7 +18,7 @@ public partial class MainWindow : Window
 {
     private readonly string[] _startupPaths;
     private readonly List<Grid> _splitGrids = [];
-    private readonly Dictionary<long, WorkTab> _tabs = [];
+    private Dictionary<long, WorkTab> _tabs = [];
     private readonly CancellationTokenSource _lifetime = new();
     private readonly DispatcherTimer _checkpoint;
     private Group _root;
@@ -27,10 +27,16 @@ public partial class MainWindow : Window
     private bool _closing;
     private bool _closed;
     private bool _restoreFinished;
+    private bool _startEmpty;
     private bool _closeAfterStartupValidation;
     private bool _wordWrap = true;
     private double _fontSize = FocusTheme.EditorFontSize;
     private int _titleLimit = 10;
+    private string _workspaceId = WorkspaceCatalogStore.DefaultWorkspaceId;
+    private string _windowId = WorkspaceCatalogStore.PrimaryWindowId;
+    private bool _shareDefaultSession;
+    private string? _workspaceLoadWarning;
+    private readonly Dictionary<string, WorkspaceViewState> _workspaceViews = new(StringComparer.Ordinal);
 
 
 
@@ -42,14 +48,30 @@ public partial class MainWindow : Window
     {
     }
 
-    private MainWindow(string[] startupPaths, WorkspaceSession? workspace)
+    private MainWindow(string[] startupPaths, WorkspaceSession? workspace, string? workspaceId = null, string? windowId = null,
+        bool shareDefaultSession = false)
     {
         _workspace = workspace ?? new WorkspaceSession();
         _storage = _workspace.Storage;
-        _closedTabs = _workspace.ClosedTabs;
+        _workspaceId = workspaceId ?? WorkspaceCatalogStore.DefaultWorkspaceId;
+        _windowId = windowId ?? WorkspaceCatalogStore.PrimaryWindowId;
+        _shareDefaultSession = shareDefaultSession;
+        _closedTabs = _workspace.GetClosedTabs(_workspaceId, _windowId);
         _restoreWorkspace = workspace is null;
         _workspace.Windows.Add(this);
-        Closed += (_, _) => _workspace.Windows.Remove(this);
+        Closed += async (_, _) =>
+        {
+            _workspace.Windows.Remove(this);
+            if (_windowId == WorkspaceCatalogStore.PrimaryWindowId) return;
+            try
+            {
+                _workspace.Catalog = await _workspace.CatalogStore.RemoveWindowAsync(_windowId);
+            }
+            catch (Exception error) when (IsUserError(error))
+            {
+                SetStatus($"Не удалось обновить список окон. {error.Message}");
+            }
+        };
         _startupPaths = startupPaths;
         InitializeComponent();
         PropertyChanged += CaptionStateChanged;
@@ -100,6 +122,7 @@ public partial class MainWindow : Window
         {
             await RestoreSessionAsync();
             if (_closed) return;
+            await RestoreAssignedWorkspaceWindowsAsync();
             if (_closeAfterStartupValidation)
             {
                 Close();
@@ -110,6 +133,8 @@ public partial class MainWindow : Window
             {
                 await ShowHomeAsync();
             }
+            if (!_closed && _workspaceLoadWarning is not null)
+                SetStatus(_workspaceLoadWarning);
         });
         if (_closed || _closing) return;
         _restoreFinished = true;
@@ -610,7 +635,7 @@ public partial class MainWindow : Window
         {
             await _workspace.CloseGate.WaitAsync();
             closeGateHeld = true;
-            if (FindOtherWindow() is not null)
+            if (FindOtherSessionWindow() is not null)
             {
                 archivedTabs = TabsInVisualOrder().ToArray();
                 var closingIds = archivedTabs.Select(tab => tab.Id).ToHashSet();

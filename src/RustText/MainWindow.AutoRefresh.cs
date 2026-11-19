@@ -42,7 +42,7 @@ public partial class MainWindow
     private async Task<bool> RefreshEditorFileAsync(WorkTab tab, EditorFileWatch watch, int attempt)
     {
         if (!IsCurrent() || tab.Editor is not { } editor || tab.Stamp is not { } stamp) return false;
-        if (tab.Saving || tab.Loading) return true;
+        if (tab.Loading || DocumentViews(tab).Any(view => view.Tab.Saving)) return true;
         try
         {
             var file = new FileInfo(watch.Path);
@@ -53,7 +53,7 @@ public partial class MainWindow
                 // Keep accepting edits until the disk snapshot is ready.
                 loaded = await DocumentFiles.ReadAsync(watch.Path, tab.Encoding, watch.Token);
                 if (!IsCurrent() || tab.Stamp != stamp || !ReferenceEquals(tab.Editor, editor)) return false;
-                if (tab.Saving || tab.Loading) return true;
+                if (tab.Loading || DocumentViews(tab).Any(view => view.Tab.Saving)) return true;
                 if (loaded.Stamp.Sha256 == stamp.Sha256)
                 {
                     tab.Stamp = loaded.Stamp;
@@ -66,9 +66,18 @@ public partial class MainWindow
             if (loaded is null || IsOversizedEditorText(loaded.Text))
             {
                 // Open the paged editor before moving the draft: opening the replacement can fail.
+                var views = DocumentViews(tab);
                 AttachLog(tab, watch.Path, tab.Encoding, new LogTabState(tab.Encoding, WordWrap: _wordWrap,
                     AutoRefresh: tab.AutoRefresh, EditPages: true), preserveEditorChanges: dirty);
                 if (dirty) tab.Log?.ReportPreservedExternalEdit();
+                foreach (var (owner, peer) in views)
+                {
+                    if (ReferenceEquals(peer, tab)) continue;
+                    owner.AttachLog(peer, watch.Path, peer.Encoding, new LogTabState(peer.Encoding, WordWrap: owner._wordWrap,
+                        AutoRefresh: peer.AutoRefresh, EditPages: true));
+                    peer.RestoredDirty = peer.Dirty = false;
+                    owner.UpdateTab(peer);
+                }
             }
             else
             {
@@ -116,7 +125,7 @@ public partial class MainWindow
     {
         if (IsOversizedEditorText(text))
         {
-            var draft = AddTab(group: source.Group, select: false);
+            var draft = AddTab(group: RecoveryGroup(source), select: false);
             StartLargeDraftPersistence(draft, () => new StringReader(text), null, text);
         }
         else
@@ -126,9 +135,13 @@ public partial class MainWindow
         }
     }
 
+    // Watchers continue to run in cached workspaces. Make their recovery drafts visible.
+    private Group RecoveryGroup(WorkTab source) =>
+        _tabs.TryGetValue(source.Id, out var visible) && ReferenceEquals(source, visible) ? source.Group : _active;
+
     private WorkTab AddExternalDraft(WorkTab source, TextDocument document)
     {
-        var draft = AddTab(group: source.Group, select: false);
+        var draft = AddTab(group: RecoveryGroup(source), select: false);
         draft.Encoding = source.Encoding;
         draft.Ending = source.Ending;
         draft.OriginalEndings = source.OriginalEndings;

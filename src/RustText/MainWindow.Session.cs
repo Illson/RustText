@@ -14,7 +14,7 @@ namespace RustText.Demo;
 public partial class MainWindow
 {
     private readonly StorageService _storage;
-    private readonly List<SessionTab> _closedTabs;
+    private List<SessionTab> _closedTabs = [];
     private IReadOnlyList<RecentFileEntry> _recent = [];
     private UserSettings _settings = new();
     private MenuItem? _recentMenu;
@@ -28,8 +28,8 @@ public partial class MainWindow
 
     private async Task RestoreSessionAsync()
     {
+        _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         _validatingStartupSession = true;
-        var restore = _storage.LoadSessionAsync(_lifetime.Token, ShowPendingSessionAsync);
         try
         {
             _settings = await _storage.LoadSettingsAsync(_lifetime.Token);
@@ -41,13 +41,53 @@ public partial class MainWindow
             SetStatus(error.Message);
         }
 
+        if (_windowId == WorkspaceCatalogStore.PrimaryWindowId
+            && _settings.WorkspaceStartupMode == WorkspaceStartupMode.Specific
+            && _settings.StartupWorkspaceId is { } preferred
+            && _workspace.Catalog.Workspaces.Any(item => item.Id == preferred))
+        {
+            _workspaceId = preferred;
+        }
+        else if (_workspace.Catalog.WindowAssignments.TryGetValue(_windowId, out var assignedWorkspace))
+        {
+            _workspaceId = assignedWorkspace;
+        }
+        _closedTabs = _workspace.GetClosedTabs(_workspaceId, _windowId);
+        _startEmpty = _windowId == WorkspaceCatalogStore.PrimaryWindowId
+            && _settings.WorkspaceStartupMode == WorkspaceStartupMode.Empty;
+
+        var restore = _startEmpty
+            ? Task.FromResult<SessionState?>(null)
+            : SessionStorage.LoadSessionAsync(_lifetime.Token, ShowPendingSessionAsync);
+
         SessionState? state;
         try { state = await restore; }
         finally { _validatingStartupSession = false; }
         if (_closed) return;
 
+        var restoredState = state ?? _pendingSession;
+        var migratedSettings = _settings with
+        {
+            WordWrap = _settings.WordWrap ?? restoredState?.Wrap ?? true,
+            FontSize = _settings.FontSize ?? restoredState?.FontSize ?? FocusTheme.EditorFontSize
+        };
+        _wordWrap = migratedSettings.WordWrap == true;
+        _fontSize = migratedSettings.FontSize ?? FocusTheme.EditorFontSize;
+        ApplyTextAppearance();
+        if (_settings.WordWrap is null || _settings.FontSize is null)
+        {
+            _settings = migratedSettings;
+            await _storage.SaveSettingsAsync(_settings, _lifetime.Token);
+        }
+
         if (state is null && _pendingSession is null)
         {
+            if (SessionStorage.HasSessionCheckpoint)
+            {
+                _workspace.UnavailableSessions.Add(WorkspaceCacheKey);
+                _workspaceLoadWarning = "Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.";
+                SetStatus(_workspaceLoadWarning);
+            }
             RefreshHistoryMenus();
             return;
         }
@@ -227,6 +267,15 @@ public partial class MainWindow
     private async Task SaveWorkspaceSessionAsync(MainWindow? excludeWindow, SessionTab? forgetClosedTab = null)
     {
         var forgetClosedId = forgetClosedTab?.Id;
+        var cacheKey = WorkspaceCacheKey;
+        var workspaceId = _workspaceId;
+        var windowId = _windowId;
+        var storage = SessionStorage;
+        var closedTabs = _closedTabs;
+        if (_workspace.UnavailableSessions.Contains(cacheKey))
+            return;
+        if (_startEmpty && _tabs.Count == 0 && forgetClosedId is null)
+            return;
         if (!_restoreFinished && !_closing && forgetClosedId is null)
         {
             return;
@@ -235,21 +284,34 @@ public partial class MainWindow
         await _workspace.SaveGate.WaitAsync();
         try
         {
-            var windows = _workspace.Windows.Where(window => !window._closed && !ReferenceEquals(window, excludeWindow)).ToArray();
+            if (_workspaceId != workspaceId || _windowId != windowId
+                || !string.Equals(WorkspaceCacheKey, cacheKey, StringComparison.Ordinal)
+                || !ReferenceEquals(SessionStorage, storage))
+                return;
+
+            var windows = workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
+                && (windowId == WorkspaceCatalogStore.PrimaryWindowId || _shareDefaultSession)
+                ? _workspace.Windows.Where(window => !window._closed
+                    && !ReferenceEquals(window, excludeWindow) && window._workspaceId == workspaceId
+                    && (window._windowId == WorkspaceCatalogStore.PrimaryWindowId || window._shareDefaultSession)).ToArray()
+                : _workspace.Windows.Where(window => ReferenceEquals(window, this) && window._workspaceId == workspaceId && window._windowId == windowId && !window._closed
+                    && !ReferenceEquals(window, excludeWindow)).ToArray();
             if (windows.Length == 0) return;
             var homeWindow = windows[0];
-            var entries = windows.SelectMany(window => window.TabsInVisualOrder().Select(tab => (Window: window, Tab: tab))).ToArray();
+            var windowKeys = windows.ToDictionary(window => window, window => window.WorkspaceCacheKey);
+            var entries = windows.SelectMany(window => window.TabsInVisualOrder().Select(tab => (Window: window, CacheKey: windowKeys[window], Tab: tab))).ToArray();
             var tabs = entries.Select(entry => entry.Tab).ToArray();
             var recoveries = tabs.Select(tab => tab.Recovery).ToArray();
             var state = entries.Select(entry => entry.Window.CaptureTab(entry.Tab)).ToList();
             var index = homeWindow.ActiveTab is { } active ? Array.IndexOf(tabs, active) : 0;
             var width = double.IsFinite(homeWindow.Width) ? homeWindow.Width : 1080;
             var height = double.IsFinite(homeWindow.Height) ? homeWindow.Height : 700;
-            var session = new SessionState(state, _closedTabs.Where(tab => tab.Id != forgetClosedId).Take(100).ToList(),
+            var capturedClosedTabs = closedTabs.ToArray();
+            var session = new SessionState(state, capturedClosedTabs.Where(tab => tab.Id != forgetClosedId).Take(100).ToList(),
                 Math.Max(0, index), width, height, homeWindow.WindowState == WindowState.Maximized,
                 homeWindow._wordWrap, homeWindow._fontSize, homeWindow.CaptureLayout(homeWindow._root), homeWindow._active.Id);
             var fingerprint = CheckpointFingerprint(session, tabs);
-            if (forgetClosedId is null && !_closing && _workspace.LastCheckpoint == fingerprint) return;
+            if (forgetClosedId is null && !_closing && _workspace.GetLastCheckpoint(WorkspaceCacheKey) == fingerprint) return;
 
             var drafts = new Dictionary<long, Func<TextReader>>();
             var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
@@ -260,7 +322,7 @@ public partial class MainWindow
 
                 var document = editor.Document;
                 liveDrafts.Add(tab.Id, (document, tab.Revision));
-                if (FindSavedLiveDraft(tab) is { } previous)
+                if (entries[i].Window.FindSavedLiveDraft(tab) is { } previous)
                 {
                     session.Tabs[i] = session.Tabs[i] with { DraftRef = previous.DraftRef, DraftSha256 = previous.DraftSha256 };
                 }
@@ -271,8 +333,9 @@ public partial class MainWindow
                 }
             }
 
-            var committed = await _storage.SaveSessionWithDraftReadersAsync(session, drafts);
-            _workspace.LiveDrafts.Clear();
+            var committed = await storage.SaveSessionWithDraftReadersAsync(session, drafts);
+            foreach (var window in windows)
+                window._workspace.GetLiveDrafts(windowKeys[window]).Clear();
             for (var i = 0; i < tabs.Length; i++)
             {
                 var captured = session.Tabs[i];
@@ -281,24 +344,27 @@ public partial class MainWindow
                 if (recoveries[i] is { } recovery && ReferenceEquals(tabs[i].Recovery, recovery)) tabs[i].Recovery = saved;
                 if (saved.DraftRef is not null && liveDrafts.TryGetValue(saved.Id, out var live))
                 {
-                    _workspace.LiveDrafts.Add(saved.Id, new(new(live.Document), live.Revision, saved));
+                    entries[i].Window._workspace.GetLiveDrafts(entries[i].CacheKey)
+                        .Add(saved.Id, new(new(live.Document), live.Revision, saved));
                 }
             }
 
             var capturedClosed = session.ClosedTabs ?? [];
             for (var i = 0; i < Math.Min(capturedClosed.Count, committed.ClosedTabs?.Count ?? 0); i++)
             {
-                var closedIndex = _closedTabs.FindIndex(item => ReferenceEquals(item, capturedClosed[i]));
-                if (closedIndex >= 0) _closedTabs[closedIndex] = committed.ClosedTabs![i];
+                var closedIndex = Array.FindIndex(capturedClosedTabs, item => ReferenceEquals(item, capturedClosed[i]));
+                if (closedIndex >= 0 && closedIndex < closedTabs.Count
+                    && ReferenceEquals(closedTabs[closedIndex], capturedClosedTabs[closedIndex]))
+                    closedTabs[closedIndex] = committed.ClosedTabs![i];
             }
-            _workspace.LastCheckpoint = fingerprint;
+            _workspace.SetLastCheckpoint(cacheKey, fingerprint);
             if (forgetClosedTab is { } removed)
             {
-                _closedTabs.RemoveAll(tab => tab.Id == removed.Id);
-                _workspace.LastCheckpoint = null;
+                closedTabs.RemoveAll(tab => tab.Id == removed.Id);
+                _workspace.SetLastCheckpoint(cacheKey, null);
                 var removeBackupDraft = removed.DraftRef is not null && committed.Tabs.All(tab => tab.Id != removed.Id);
-                await _storage.RemoveHistoryFromPreviousCheckpointAsync(removed.Id, removeBackupDraft);
-                _workspace.LastCheckpoint = fingerprint;
+                await storage.RemoveHistoryFromPreviousCheckpointAsync(removed.Id, removeBackupDraft);
+                _workspace.SetLastCheckpoint(cacheKey, fingerprint);
             }
         }
         finally
@@ -308,7 +374,7 @@ public partial class MainWindow
     }
 
     private SessionTab? FindSavedLiveDraft(WorkTab tab) =>
-        _workspace.LiveDrafts.TryGetValue(tab.Id, out var saved)
+        _workspace.GetLiveDrafts(WorkspaceCacheKey).TryGetValue(tab.Id, out var saved)
         && saved.Revision == tab.Revision
         && saved.Document.TryGetTarget(out var document)
         && ReferenceEquals(document, tab.Editor?.Document) ? saved.Saved : null;
@@ -395,7 +461,7 @@ public partial class MainWindow
         {
             var token = source.Token;
             var previousDeferred = saved;
-            saved = await _storage.ResolveCurrentDraftAsync(saved, token);
+            saved = await SessionStorage.ResolveCurrentDraftAsync(saved, token);
             token.ThrowIfCancellationRequested();
             if (ReferenceEquals(tab.Deferred, previousDeferred))
             {
@@ -407,23 +473,26 @@ public partial class MainWindow
             }
             else if (saved.DraftRef is not null)
             {
-                var draftPath = _storage.GetDraftPath(saved);
+                var draftPath = SessionStorage.GetDraftPath(saved);
                 if (draftPath is not null && new FileInfo(draftPath).Length > LineGeneratorThreshold)
                 {
                     AttachPagedDraftEditor(tab, saved, draftPath);
                 }
                 else
                 {
-                    var draft = await _storage.LoadDraftAsync(saved, token) ?? "";
+                    var draft = await SessionStorage.LoadDraftAsync(saved, token) ?? "";
                     if (draftPath is not null && IsOversizedEditorText(draft))
                     {
                         AttachPagedDraftEditor(tab, saved, draftPath);
                     }
                     else
                     {
-                        AttachEditor(tab, draft);
-                        tab.Dirty = draft.Length != 0 || tab.Path is not null;
-                        tab.RestoredDirty = tab.Dirty;
+                        if (!TryShareFileEditor(tab, saved.Encoding, draft))
+                        {
+                            AttachEditor(tab, draft);
+                            tab.Dirty = draft.Length != 0 || tab.Path is not null;
+                            tab.RestoredDirty = tab.Dirty;
+                        }
                         if (tab.Stamp is null && tab.Path is { } original && File.Exists(original))
                         {
                             try
@@ -453,11 +522,14 @@ public partial class MainWindow
             }
             else if (saved.Path is { } path)
             {
-                if (new FileInfo(path).Length > DocumentFiles.MaximumDocumentBytes)
-                    AttachLog(tab, path, saved.Encoding,
-                        new LogTabState(saved.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh, EditPages: true));
-                else
-                    AttachLoadedEditor(tab, await DocumentFiles.ReadAsync(path, saved.Encoding, token));
+                if (!TryShareFileEditor(tab, saved.Encoding))
+                {
+                    if (new FileInfo(path).Length > DocumentFiles.MaximumDocumentBytes)
+                        AttachLog(tab, path, saved.Encoding,
+                            new LogTabState(saved.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh, EditPages: true));
+                    else
+                        AttachLoadedEditor(tab, await DocumentFiles.ReadAsync(path, saved.Encoding, token));
+                }
             }
             else
             {
@@ -556,8 +628,8 @@ public partial class MainWindow
             try
             {
                 var current = tab.Recovery ?? throw new IOException("Черновик недоступен.");
-                var edited = _storage.AdoptEditedDraft(current, temporary, hash) with { DraftOffset = offset, LineCount = null };
-                AttachPagedDraftEditor(tab, edited, _storage.GetDraftPath(edited)!, caret, focusEditor);
+                var edited = SessionStorage.AdoptEditedDraft(current, temporary, hash) with { DraftOffset = offset, LineCount = null };
+                AttachPagedDraftEditor(tab, edited, SessionStorage.GetDraftPath(edited)!, caret, focusEditor);
             }
             finally { _workspace.SaveGate.Release(); }
             await GuardAsync(async () =>
@@ -583,9 +655,9 @@ public partial class MainWindow
     {
         if (tab.Log?.HasPendingEdit == true) throw new IOException("Сохраните страницу перед созданием копии.");
         if (tab.Recovery is not { } recovery) return;
-        var current = await _storage.ResolveCurrentDraftAsync(recovery, _lifetime.Token);
+        var current = await SessionStorage.ResolveCurrentDraftAsync(recovery, _lifetime.Token);
         if (ReferenceEquals(tab.Recovery, recovery)) tab.Recovery = current;
-        if (_storage.GetDraftPath(current) is { } path) await SaveDraftCopyAsync(path);
+        if (SessionStorage.GetDraftPath(current) is { } path) await SaveDraftCopyAsync(path);
     }
 
     private async Task RememberClosedAsync(
@@ -606,7 +678,7 @@ public partial class MainWindow
                 else
                 {
                     var snapshot = editor.Document.CreateSnapshot();
-                    saved = await _storage.SaveClosedDraftAsync(saved, snapshot.CreateReader, _lifetime.Token);
+                    saved = await SessionStorage.SaveClosedDraftAsync(saved, snapshot.CreateReader, _lifetime.Token);
                 }
             }
 
@@ -843,7 +915,7 @@ public partial class MainWindow
         }
 
         var line = tab.UntitledName;
-        if (string.IsNullOrWhiteSpace(line) && tab.DraftRef is not null && _storage.GetDraftPath(tab) is { } draftPath)
+        if (string.IsNullOrWhiteSpace(line) && tab.DraftRef is not null && SessionStorage.GetDraftPath(tab) is { } draftPath)
         {
             try
             {

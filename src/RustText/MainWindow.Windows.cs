@@ -12,21 +12,94 @@ public partial class MainWindow
     private sealed class WorkspaceSession
     {
         public StorageService Storage { get; } = StorageService.OpenDefault();
+        public WorkspaceCatalogStore CatalogStore { get; } = new(StorageService.GetProfileBaseDirectory());
+        public WorkspaceCatalog? Catalog;
         public SemaphoreSlim SaveGate { get; } = new(1, 1);
+        public SemaphoreSlim WorkspaceSwitchGate { get; } = new(1, 1);
         public SemaphoreSlim CloseGate { get; } = new(1, 1);
         public List<MainWindow> Windows { get; } = [];
-        public List<SessionTab> ClosedTabs { get; } = [];
+        public Dictionary<string, List<SessionTab>> ClosedTabs { get; } = new(StringComparer.Ordinal);
+        public Dictionary<(string WorkspaceId, string WindowId), StorageService> SessionStores { get; } = [];
         public HashSet<long> ClosedTabOperations { get; } = [];
-        public Dictionary<long, SavedLiveDraft> LiveDrafts { get; } = [];
+        public Dictionary<string, Dictionary<long, SavedLiveDraft>> LiveDrafts { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, int?> LastCheckpoints { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> UnavailableSessions { get; } = new(StringComparer.Ordinal);
         public long NextId;
-        public int? LastCheckpoint;
         public TabDrag? Drag;
+
+        public StorageService GetStorage(string workspaceId, string windowId)
+        {
+            if (workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId && windowId == WorkspaceCatalogStore.PrimaryWindowId)
+                return Storage;
+            var key = (workspaceId, windowId);
+            if (SessionStores.TryGetValue(key, out var storage)) return storage;
+            storage = StorageService.OpenWorkspace(Storage.ProfileBaseDirectory, workspaceId, windowId);
+            SessionStores.Add(key, storage);
+            return storage;
+        }
+
+        public List<SessionTab> GetClosedTabs(string workspaceId, string windowId)
+        {
+            var key = workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
+                ? workspaceId : workspaceId + ":" + windowId;
+            if (!ClosedTabs.TryGetValue(key, out var tabs)) ClosedTabs.Add(key, tabs = []);
+            return tabs;
+        }
+
+        public Dictionary<long, SavedLiveDraft> GetLiveDrafts(string workspaceId)
+        {
+            if (!LiveDrafts.TryGetValue(workspaceId, out var drafts)) LiveDrafts.Add(workspaceId, drafts = []);
+            return drafts;
+        }
+
+        public int? GetLastCheckpoint(string workspaceId) =>
+            LastCheckpoints.GetValueOrDefault(workspaceId);
+
+        public void SetLastCheckpoint(string workspaceId, int? fingerprint) =>
+            LastCheckpoints[workspaceId] = fingerprint;
     }
+
+    private sealed record WorkspaceViewState(Dictionary<long, WorkTab> Tabs, Group Root, Group Active, bool Home,
+        Control? HomeContent, double Width, double Height, bool Maximized);
+
+    private StorageService SessionStorage => _workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
+        && (_windowId == WorkspaceCatalogStore.PrimaryWindowId || _shareDefaultSession)
+        ? _workspace.Storage : _workspace.GetStorage(_workspaceId, _windowId);
+    private string WorkspaceCacheKey => _workspaceId + ":" + _windowId;
+
+    private IEnumerable<WorkTab> LoadedWorkspaceTabs() =>
+        _tabs.Values.Concat(_workspaceViews.Values.SelectMany(view => view.Tabs.Values)).Distinct();
 
     private sealed record SavedLiveDraft(WeakReference<TextDocument> Document, long Revision, SessionTab Saved);
 
     internal MainWindow? FindOtherWindow() =>
         _workspace.Windows.LastOrDefault(window => !ReferenceEquals(window, this) && !window._closed && window.IsVisible);
+
+    private MainWindow? FindOtherSessionWindow() =>
+        _workspace.Windows.LastOrDefault(window => !ReferenceEquals(window, this) && !window._closed
+            && window.IsVisible && SharesSessionWith(window));
+
+    private bool SharesSessionWith(MainWindow window) =>
+        ReferenceEquals(SessionStorage, window.SessionStorage)
+        || string.Equals(SessionStorage.RootDirectory, window.SessionStorage.RootDirectory, StringComparison.OrdinalIgnoreCase);
+
+    private async Task RestoreAssignedWorkspaceWindowsAsync()
+    {
+        if (_windowId != WorkspaceCatalogStore.PrimaryWindowId) return;
+        _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        foreach (var assignment in _workspace.Catalog.WindowAssignments.Where(item => item.Key != WorkspaceCatalogStore.PrimaryWindowId).ToArray())
+        {
+            if (_workspace.Windows.Any(window => !window._closed && window._windowId == assignment.Key)) continue;
+            var window = new MainWindow([], _workspace, assignment.Value, assignment.Key)
+            {
+                _settings = _settings,
+                _titleLimit = _titleLimit,
+                _recent = _recent
+            };
+            App.TrackWindow(window);
+            window.Show();
+        }
+    }
 
     private IEnumerable<WorkTab> TabsInVisualOrder()
     {
@@ -38,7 +111,9 @@ public partial class MainWindow
     {
         if (!CanDragTab(tab)) return;
 
-        var window = new MainWindow([], _workspace)
+        var windowId = "window:" + Guid.NewGuid().ToString("N");
+        var window = new MainWindow([], _workspace, _workspaceId, windowId,
+            shareDefaultSession: _workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId)
         {
             _fontSize = _fontSize,
             _wordWrap = _wordWrap,

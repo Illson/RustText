@@ -217,6 +217,7 @@ public partial class MainWindow
     private async Task LoadFileAsync(WorkTab tab, TextEncodingKind? encoding = null)
     {
         var path = tab.Path ?? throw new InvalidOperationException("У вкладки нет пути.");
+        if (encoding.HasValue && TryShareFileEditor(tab, encoding.Value)) return;
         using var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         tab.Loading = true;
         tab.LoadCancellation = source;
@@ -237,12 +238,19 @@ public partial class MainWindow
 
     private void AttachLoadedEditor(WorkTab tab, LoadedDocument loaded)
     {
+        if (TryShareFileEditor(tab, loaded.Encoding)) return;
+        AttachDiskSnapshot(tab, loaded, new TextDocument(loaded.Text));
+    }
+
+    private void AttachDiskSnapshot(WorkTab tab, LoadedDocument loaded, TextDocument document)
+    {
         tab.Stamp = loaded.Stamp;
         tab.DiskStatus = null;
         tab.Encoding = loaded.Encoding;
         tab.Ending = loaded.LineEnding;
         tab.OriginalEndings = loaded.OriginalLineEndings;
-        AttachEditor(tab, loaded.Text);
+        document.UndoStack.MarkAsOriginalFile();
+        AttachEditor(tab, document, resetDirtyState: true);
     }
 
     private void AttachEditor(WorkTab tab, string text)
@@ -601,7 +609,7 @@ public partial class MainWindow
                     DraftOffset = 0,
                     UntitledName = title
                 };
-                saved = await _storage.SaveClosedDraftAsync(saved, openReader, source.Token);
+                saved = await SessionStorage.SaveClosedDraftAsync(saved, openReader, source.Token);
                 long? byteCaret = editor is null
                     ? null
                     : await Task.Run(() => (long)Encoding.UTF8.GetByteCount(prefix) + Encoding.UTF8.GetByteCount(insertedText), source.Token);
@@ -620,7 +628,7 @@ public partial class MainWindow
                 {
                     _ = DetachEditor(tab);
                 }
-                AttachPagedDraftEditor(tab, saved, _storage.GetDraftPath(saved)!, focus: hadFocus, byteCaret: byteCaret);
+                AttachPagedDraftEditor(tab, saved, SessionStorage.GetDraftPath(saved)!, focus: hadFocus, byteCaret: byteCaret);
                 UpdateTab(tab);
             }
             finally
@@ -952,21 +960,26 @@ public partial class MainWindow
     private void ReplaceEditorFromDisk(WorkTab tab, TextEditor editor, LoadedDocument loaded, string? diskStatus = null,
         bool preserveEditorChanges = false)
     {
-        var view = CaptureTab(tab);
-        var hadFocus = editor.IsKeyboardFocusWithin;
-        if (preserveEditorChanges) PreserveEditorDraft(tab, view);
-        tab.Revision++;
-        AttachLoadedEditor(tab, loaded);
-        tab.DiskStatus = diskStatus;
-        RestoreEditorView(tab, view);
-        if (ReferenceEquals(tab, ActiveTab))
+        if (loaded.Encoding != tab.Encoding && TryShareFileEditor(tab, loaded.Encoding)) return;
+        var views = loaded.Encoding == tab.Encoding ? DocumentViews(tab) : [(this, tab)];
+        var snapshot = new TextDocument(loaded.Text);
+        if (preserveEditorChanges)
         {
-            if (hadFocus)
-            {
-                tab.Editor?.Focus();
-            }
-            if (diskStatus is null) SetStatus("Файл перечитан.");
-            else UpdateStatus(tab);
+            var draft = AddExternalDraft(tab, editor.Document);
+            RestoreEditorView(draft, CaptureTab(tab));
+        }
+        foreach (var (owner, viewTab) in views)
+        {
+            var view = owner.CaptureTab(viewTab);
+            var hadFocus = viewTab.Editor?.IsKeyboardFocusWithin == true;
+            viewTab.Revision++;
+            owner.AttachDiskSnapshot(viewTab, loaded, snapshot);
+            viewTab.DiskStatus = diskStatus;
+            RestoreEditorView(viewTab, view);
+            if (!ReferenceEquals(viewTab, owner.ActiveTab)) continue;
+            if (hadFocus) viewTab.Editor?.Focus();
+            if (diskStatus is null) owner.SetStatus("Файл перечитан.");
+            else owner.UpdateStatus(viewTab);
         }
     }
 
@@ -981,7 +994,7 @@ public partial class MainWindow
             await log.SavePageEditAsync();
             return;
         }
-        if (tab.Editor is not { } editor) return;
+        if (tab.Editor is not { } editor || DocumentViews(tab).Any(view => view.Tab.Saving)) return;
         tab.Saving = true;
         try { await SaveEditorAsync(tab, editor, saveAs); }
         finally { tab.Saving = false; }
@@ -1012,8 +1025,8 @@ public partial class MainWindow
             path = target;
         }
 
-        var duplicate = _tabs.Values.FirstOrDefault(other => other != tab && !other.IsLog && SamePath(other.Path, path));
-        if (duplicate is not null)
+        var changedPath = !SamePath(tab.Path, path);
+        if (changedPath && FileViews(path).Any(view => !ReferenceEquals(view.Tab, tab)))
         {
             throw new IOException("Этот файл уже открыт в другой вкладке.");
         }
@@ -1023,6 +1036,17 @@ public partial class MainWindow
         var iconPosition = expected is null ? null : await DesktopIconPosition.CaptureAsync(path, _lifetime.Token);
         var preSaveVersionWarning = expected is null ? null : await CaptureVersionAsync(path, tab.Encoding, expected);
         var stamp = await DocumentFiles.SaveAsync(path, text, tab.Encoding, tab.Ending, expected, tab.OriginalEndings, _lifetime.Token);
+        var views = DocumentViews(tab);
+        if (changedPath && views.Length > 1)
+        {
+            // Save As gives this view a distinct file identity. Keep the old views and their undo state.
+            var previous = CaptureTab(tab);
+            var copy = new TextDocument(editor.Text);
+            tab.Path = path;
+            AttachEditor(tab, copy);
+            RestoreEditorView(tab, previous);
+            editor = tab.Editor!;
+        }
         tab.Path = path;
         SetSyntax(editor, path);
         tab.Stamp = stamp;
@@ -1031,16 +1055,16 @@ public partial class MainWindow
         {
             _ = iconPosition.RestoreAsync(path, stamp);
         }
-        tab.DiskStatus = null;
         tab.LastWorked = DateTimeOffset.Now;
-        if (tab.Revision == revision)
+        var savedViews = changedPath ? [(this, tab)] : views;
+        foreach (var (owner, savedTab) in savedViews)
         {
-            tab.RestoredDirty = false;
-            tab.Dirty = false;
-            editor.Document.UndoStack.MarkAsOriginalFile();
+            savedTab.Stamp = stamp;
+            savedTab.DiskStatus = null;
+            if (tab.Revision == revision) savedTab.RestoredDirty = savedTab.Dirty = false;
+            owner.UpdateTab(savedTab);
         }
-
-        UpdateTab(tab);
+        if (tab.Revision == revision) editor.Document.UndoStack.MarkAsOriginalFile();
         await RecordRecentAsync(tab);
         var postSaveVersionWarning = await CaptureVersionAsync(path, tab.Encoding, stamp);
         var versionWarning = preSaveVersionWarning ?? postSaveVersionWarning;

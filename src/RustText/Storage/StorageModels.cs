@@ -26,6 +26,11 @@ public sealed record UserSettings(int UntitledTabLimit = 10, int RecentFileLimit
     public bool? OpenLargeFilesAsLog { get; init; }
     public int ArchiveClosedDraftAfterMinutes { get; init; } = 300;
     public int ArchivedDraftRetentionDays { get; init; } = 30;
+    public bool? WordWrap { get; init; }
+    public double? FontSize { get; init; }
+    public WorkspaceStartupMode WorkspaceStartupMode { get; init; } = WorkspaceStartupMode.LastUsed;
+    public string? StartupWorkspaceId { get; init; }
+    public int WorkspaceHistoryLimit { get; init; } = 10;
 }
 internal sealed record RecentFileEntry(
     string Path,
