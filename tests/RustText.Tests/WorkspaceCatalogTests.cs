@@ -88,6 +88,31 @@ public sealed class WorkspaceCatalogTests
         }
     }
 
+    [Fact]
+    public async Task FailedCopyKeepsExistingDeletedWorkspaceAndMissingArchiveStaysRecoverable()
+    {
+        using var folder = new TempDirectory();
+        var store = new WorkspaceCatalogStore(folder.Path);
+        var saved = await store.CreateAsync("Existing workspace");
+        var source = store.GetWorkspaceDirectory(saved.Id);
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(Path.Combine(source, "data.txt"), "saved content");
+        var history = await store.DeleteAsync(saved.Id);
+        var original = Assert.Single(history.DeletedWorkspaces!);
+
+        var incomplete = await store.CreateAsync("Incomplete copy");
+        var discarded = await store.DiscardIncompleteCopyAsync(incomplete.Id);
+        Assert.Equal(original, Assert.Single(discarded.DeletedWorkspaces!));
+        var archive = Path.Combine(store.DirectoryPath, "deleted", original.DirectoryName);
+        var moved = Path.Combine(folder.Path, "temporarily-unavailable");
+        Directory.Move(archive, moved);
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.RestoreDeletedAsync(saved.Id));
+        Assert.Equal(original, Assert.Single((await store.LoadAsync()).DeletedWorkspaces!));
+        Directory.Move(moved, archive);
+        await store.RestoreDeletedAsync(saved.Id);
+        Assert.Equal("saved content", await File.ReadAllTextAsync(Path.Combine(source, "data.txt")));
+    }
+
     private static string CreateProfile()
     {
         var directory = Path.Combine(Path.GetTempPath(), "RustText-workspaces-" + Guid.NewGuid().ToString("N"));

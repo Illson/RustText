@@ -246,6 +246,11 @@ public partial class MainWindow
                         if (!_closedTabs.Any(tab => tab.Id == restoredTab.Id))
                         {
                             await SaveSessionAsync();
+                            if (!storage.HasCommittedDraft(restoredTab.Id, entry.Sha256))
+                            {
+                                SetStatus("Черновик открыт. Архивная копия сохранена до подтверждения записи сессии.");
+                                return;
+                            }
                             await archive.RemoveAsync(entry, _lifetime.Token);
                             await RefreshAsync();
                         }

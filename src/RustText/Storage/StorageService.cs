@@ -116,6 +116,10 @@ internal sealed class StorageService
         _cachedFiles = files.ToDictionary(path => path, GetFileSignature, StringComparer.OrdinalIgnoreCase);
     }
 
+    internal bool HasCommittedDraft(long id, string sha256) =>
+        _cachedSessionWasLatest && _cachedSession?.Tabs.Any(tab => tab.Id == id && tab.DraftRef is not null
+            && string.Equals(tab.DraftSha256, sha256, StringComparison.OrdinalIgnoreCase)) == true && CachedFilesAreUnchanged();
+
     private bool CachedFilesAreUnchanged()
     {
         var latestPath = Path.Combine(_checkpoints, "latest.json");

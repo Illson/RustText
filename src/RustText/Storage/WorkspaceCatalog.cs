@@ -158,7 +158,13 @@ internal sealed class WorkspaceCatalogStore
         }
     }
 
-    public async Task<WorkspaceCatalog> DeleteAsync(string id, int retentionLimit = 10, CancellationToken cancellationToken = default)
+    public Task<WorkspaceCatalog> DeleteAsync(string id, int retentionLimit = 10, CancellationToken cancellationToken = default) =>
+        DeleteCoreAsync(id, retentionLimit, cancellationToken);
+
+    public Task<WorkspaceCatalog> DiscardIncompleteCopyAsync(string id) =>
+        DeleteCoreAsync(id, null, CancellationToken.None);
+
+    private async Task<WorkspaceCatalog> DeleteCoreAsync(string id, int? retentionLimit, CancellationToken cancellationToken)
     {
         if (id == DefaultWorkspaceId) throw new InvalidOperationException("Пространство «По умолчанию» удалить нельзя.");
         if (retentionLimit is < -1 or > MaximumWorkspaceCount) throw new ArgumentOutOfRangeException(nameof(retentionLimit));
@@ -174,6 +180,7 @@ internal sealed class WorkspaceCatalogStore
             var tombstone = Path.Combine(archiveRoot, directoryName);
             var workspacePath = GetWorkspaceDirectory(id);
             var moved = false;
+            var committed = false;
             try
             {
                 if (System.IO.Directory.Exists(workspacePath))
@@ -188,7 +195,12 @@ internal sealed class WorkspaceCatalogStore
                     .Append(new DeletedWorkspaceEntry(catalog.Workspaces.Single(item => item.Id == id), deletedAt, moved ? directoryName : ""))
                     .OrderByDescending(item => item.DeletedAtMs)
                     .ToList();
-                var retained = retentionLimit < 0 ? deleted : deleted.Take(retentionLimit).ToList();
+                var retained = retentionLimit switch
+                {
+                    null => deleted.Where(item => item.Workspace.Id != id).ToList(),
+                    -1 => deleted,
+                    int limit => deleted.Take(limit).ToList()
+                };
                 var updated = catalog with
                 {
                     Workspaces = catalog.Workspaces.Where(item => item.Id != id).ToList(),
@@ -198,6 +210,7 @@ internal sealed class WorkspaceCatalogStore
                     DeletedWorkspaces = retained
                 };
                 await SaveCoreAsync(updated, cancellationToken).ConfigureAwait(false);
+                committed = true;
                 foreach (var expired in deleted.Except(retained))
                 {
                     if (string.IsNullOrEmpty(expired.DirectoryName)) continue;
@@ -207,14 +220,14 @@ internal sealed class WorkspaceCatalogStore
                         EnsureNoReparsePoints(expiredPath);
                         System.IO.Directory.Delete(expiredPath, recursive: true);
                     }
-                    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                    catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException)
                     {
                         // A failed cleanup leaves the expired data isolated in the archive directory.
                     }
                 }
                 return updated;
             }
-            catch
+            catch when (!committed)
             {
                 if (moved && System.IO.Directory.Exists(tombstone) && !System.IO.Directory.Exists(workspacePath))
                     System.IO.Directory.Move(tombstone, workspacePath);
@@ -241,7 +254,9 @@ internal sealed class WorkspaceCatalogStore
             var archivedPath = string.IsNullOrEmpty(deleted.DirectoryName)
                 ? null : Path.Combine(archiveRoot, deleted.DirectoryName);
             var workspacePath = GetWorkspaceDirectory(id);
-            var moved = archivedPath is not null && System.IO.Directory.Exists(archivedPath);
+            var moved = archivedPath is not null;
+            if (moved && !Directory.Exists(archivedPath))
+                throw new InvalidDataException("Файлы удалённого пространства отсутствуют. Запись оставлена в истории.");
             if (moved)
             {
                 EnsureNoReparsePoints(archivedPath!);

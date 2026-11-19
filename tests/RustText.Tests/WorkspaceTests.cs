@@ -1572,8 +1572,10 @@ public sealed class WorkspaceTests
         }
     });
 
-    [Fact]
-    public Task ClosedDraftArchiveFollowsItsWorkspaceAcrossSwitchAndRestore() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task ClosedDraftArchiveFollowsItsWorkspaceAcrossSwitchAndRestore(bool preventCheckpoint) => HeadlessTests.RunAsync(async profile =>
     {
         var window = await OpenWorkspaceAsync();
         try
@@ -1604,8 +1606,14 @@ public sealed class WorkspaceTests
             await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
             var dialog = Assert.Single(window.OwnedWindows);
             await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<TextBlock>().Any(b => b.Text == "Review notes"));
+            var unavailable = Read<HashSet<string>>(Field(window, "_workspace"), "UnavailableSessions");
+            var key = (string)Property(window, "WorkspaceCacheKey", Private)!;
+            if (preventCheckpoint) unavailable.Add(key);
             Click(dialog.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Восстановить")));
-            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<TextBlock>().Any(b => b.Text == "Архив пуст."));
+            await HeadlessTests.WaitForAsync(() => preventCheckpoint
+                ? window.FindControl<TextBlock>("StatusText")?.Text?.Contains("Архивная копия сохранена") == true
+                : dialog.GetVisualDescendants().OfType<TextBlock>().Any(b => b.Text == "Архив пуст."));
+            unavailable.Remove(key);
             dialog.Close();
             await show;
 
@@ -1613,7 +1621,7 @@ public sealed class WorkspaceTests
             Assert.Equal("copy of a closed draft", restored.Text);
             Assert.Equal(2, restored.SelectionStart);
             Assert.Equal(4, restored.SelectionLength);
-            Assert.Empty(await namedStore.DraftArchive.GetEntriesAsync());
+            Assert.Equal(preventCheckpoint ? 1 : 0, (await namedStore.DraftArchive.GetEntriesAsync()).Count);
             Assert.Single(await defaultStore.DraftArchive.GetEntriesAsync());
         }
         finally

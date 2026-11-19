@@ -272,16 +272,15 @@ public partial class MainWindow
                 if (_windowId != WorkspaceCatalogStore.PrimaryWindowId)
                     await CopyWorkspaceSessionAsync(sourceStorage, _workspace.GetStorage(copy.Id, WorkspaceCatalogStore.PrimaryWindowId));
             }
-            _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-            dialog.Close();
-            await SwitchWorkspaceAsync(copy.Id);
         }
         catch
         {
-            await _workspace.CatalogStore.DeleteAsync(copy.Id, 0, CancellationToken.None);
-            _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(CancellationToken.None);
+            _workspace.Catalog = await _workspace.CatalogStore.DiscardIncompleteCopyAsync(copy.Id);
             throw;
         }
+        _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        dialog.Close();
+        await SwitchWorkspaceAsync(copy.Id);
     }
 
     private async Task CreateWorkspaceFromCurrentAsync(string name)
@@ -293,15 +292,14 @@ public partial class MainWindow
             await CopyWorkspaceSessionAsync(SessionStorage, _workspace.GetStorage(created.Id, _windowId));
             if (_windowId != WorkspaceCatalogStore.PrimaryWindowId)
                 await CopyWorkspaceSessionAsync(SessionStorage, _workspace.GetStorage(created.Id, WorkspaceCatalogStore.PrimaryWindowId));
-            _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-            await SwitchWorkspaceAsync(created.Id);
         }
         catch
         {
-            await _workspace.CatalogStore.DeleteAsync(created.Id, 0, CancellationToken.None);
-            _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(CancellationToken.None);
+            _workspace.Catalog = await _workspace.CatalogStore.DiscardIncompleteCopyAsync(created.Id);
             throw;
         }
+        _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        await SwitchWorkspaceAsync(created.Id);
     }
 
     private async Task CopyWorkspaceSessionAsync(StorageService source, StorageService destination)
