@@ -207,8 +207,14 @@ internal sealed class DraftArchiveService
         try
         {
             await using var stream = File.OpenRead(_indexPath);
-            var entries = (await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.DraftArchiveIndex, token)
-                .ConfigureAwait(false))?.Entries ?? [];
+            var index = await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.DraftArchiveIndex, token)
+                .ConfigureAwait(false);
+            var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (index?.Entries is not { } entries || entries.Any(entry => entry is null || entry.Tab is not { Path: null }
+                || !Guid.TryParseExact(entry.Id, "N", out _) || !ids.Add(entry.Id) || entry.Bytes < 0
+                || entry.Sha256 is not { Length: 64 } || !entry.Sha256.All(char.IsAsciiHexDigit)
+                || !ValidTimestamp(entry.ClosedAtMs) || !ValidTimestamp(entry.ArchivedAtMs)))
+                throw new InvalidDataException("Индекс архива черновиков повреждён. Файлы архива не удалены.");
             RecoverDeleteTransactions(entries);
             return entries;
         }
@@ -217,6 +223,9 @@ internal sealed class DraftArchiveService
             throw new InvalidDataException("Индекс архива черновиков повреждён. Файлы архива не удалены.", error);
         }
     }
+
+    private static bool ValidTimestamp(long value) =>
+        value >= DateTimeOffset.MinValue.ToUnixTimeMilliseconds() && value <= DateTimeOffset.MaxValue.ToUnixTimeMilliseconds();
 
     private void RecoverDeleteTransactions(IReadOnlyList<DraftArchiveEntry> entries)
     {

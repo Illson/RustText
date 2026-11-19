@@ -91,6 +91,31 @@ public sealed class DraftArchiveTests
         Assert.Single(await archive.GetEntriesAsync());
     }
 
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"entries\":[null]}")]
+    public async Task InvalidArchiveIndexKeepsPendingRecoveryFiles(string invalid)
+    {
+        using var folder = new TempDirectory();
+        var storage = StorageService.OpenForTesting(folder.Path);
+        var archive = storage.DraftArchive;
+        var draft = await storage.SaveClosedDraftAsync(new SessionTab(1, null, TextEncodingKind.Utf8), "saved");
+        var entry = await archive.ArchiveAsync(draft, storage.GetDraftPath(draft)!);
+        var directory = Path.Combine(storage.RootDirectory, "drafts-archive");
+        var index = Path.Combine(directory, "index.json");
+        var valid = await File.ReadAllTextAsync(index);
+        var zip = Path.Combine(directory, entry.Id + ".zip");
+        File.Move(zip, zip + ".delete");
+        await File.WriteAllTextAsync(index, invalid);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => archive.GetEntriesAsync());
+        Assert.True(File.Exists(zip + ".delete"));
+        Assert.Equal(invalid, await File.ReadAllTextAsync(index));
+        await File.WriteAllTextAsync(index, valid);
+        Assert.Equal(entry.Id, Assert.Single(await archive.GetEntriesAsync()).Id);
+        Assert.True(File.Exists(zip));
+    }
+
     [Fact]
     public async Task PruneExpiredRemovesOnlyExpiredArchiveFiles()
     {
