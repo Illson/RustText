@@ -52,6 +52,24 @@ public sealed class LogTests
         Assert.False(page.HasMore);
     }
 
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8, false, 16)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, true, 32)]
+    [InlineData(TextEncodingKind.Utf16BigEndian, true, 32)]
+    public void BareCrKeepsNextCharacterWhenFrameIsFollowedByLf(TextEncodingKind encoding, bool bom, int frameBytes)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "bare-cr.log");
+        var middle = "B" + new string('x', 13);
+        File.WriteAllBytes(path, Encode("A\r" + middle + "\nTAIL", encoding, bom));
+
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        var page = reader.ReadPage(0, maxFrameBytes: frameBytes);
+        Assert.Equal(new[] { "A", middle, "TAIL" }, page.Rows.Select(row => row.Text));
+        Assert.Equal(reader.PreambleLength + (bom ? 4 : 2), page.Rows[1].StartOffset);
+    }
+
     [Fact]
     public void ReadPage_StopsAtEndAfterConsumingCrLfAcrossPageBoundary()
     {

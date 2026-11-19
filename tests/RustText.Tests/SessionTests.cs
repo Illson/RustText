@@ -11,7 +11,7 @@ namespace RustText.Tests;
 public sealed class SessionTests
 {
     [Fact]
-    public async Task LegacyDrafts_LowercaseShaAndClosedTabs_SurviveFourSaves()
+    public async Task ImportedOpenAndClosedDraftsSurviveRustJournalRotation()
     {
         using var directory = new TempDirectory();
         const string activeText = "Активный черновик 💡";
@@ -35,6 +35,12 @@ public sealed class SessionTests
             var edited = activeText + $" сохранение {save}";
             await storage.SaveSessionAsync(session, new Dictionary<long, string> { [10] = edited });
 
+            if (save == 1)
+            {
+                var legacy = Path.Combine(directory.Path, "session", "checkpoint-00000000000000000001");
+                File.Move(Path.Combine(legacy, "draft-1.txt"), Path.Combine(legacy, "rotated.txt"));
+                storage = StorageService.OpenForTesting(directory.Path);
+            }
             var restored = await storage.LoadSessionAsync();
             Assert.NotNull(restored);
             Assert.Equal(edited, await storage.LoadDraftAsync(restored.Tabs.Single(tab => tab.Id == 10)));
@@ -43,6 +49,25 @@ public sealed class SessionTests
         }
 
         Assert.Equal(2, Directory.GetDirectories(Path.Combine(storage.RootDirectory, "session"), "checkpoint-*").Length);
+    }
+
+    [Fact]
+    public async Task SharedDraftDamageRestoresBothTabsFromPreviousCheckpoint()
+    {
+        using var directory = new TempDirectory();
+        var storage = StorageService.OpenForTesting(directory.Path);
+        var state = new SessionState([new(1, null, TextEncodingKind.Utf8), new(2, null, TextEncodingKind.Utf8)]);
+        var first = await storage.SaveSessionAsync(state, new Dictionary<long, string> { [1] = "unchanged", [2] = "first" });
+        var second = await storage.SaveSessionAsync(first, new Dictionary<long, string> { [2] = "second" });
+        await File.WriteAllTextAsync(storage.GetDraftPath(second.Tabs[0])!, "damaged");
+
+        storage = StorageService.OpenForTesting(directory.Path);
+        var recovered = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
+        Assert.Equal("unchanged", await storage.LoadDraftAsync(recovered.Tabs[0]));
+        Assert.Equal("first", await storage.LoadDraftAsync(recovered.Tabs[1]));
+        var next = await storage.SaveSessionAsync(recovered, new Dictionary<long, string> { [2] = "third" });
+        Assert.Equal("unchanged", await storage.LoadDraftAsync(next.Tabs[0]));
+        Assert.Equal("third", await storage.LoadDraftAsync(next.Tabs[1]));
     }
 
     [Fact]

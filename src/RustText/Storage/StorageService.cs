@@ -16,6 +16,7 @@ internal sealed class StorageService
     private readonly string _versions;
     private readonly bool _hasProfileOverride;
     private readonly SemaphoreSlim _recentGate = new(1, 1);
+    private readonly Dictionary<string, (long Length, long LastWriteTicks)> _verifiedBackupFiles = new(StringComparer.OrdinalIgnoreCase);
     private SessionState? _cachedSession;
     private bool _hasCachedSession;
     private bool _cachedSessionWasLatest;
@@ -122,9 +123,10 @@ internal sealed class StorageService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (showPendingTabs is not null) await showPendingTabs(state).ConfigureAwait(false);
-                if (!await ValidateSessionDraftsAsync(state, cancellationToken).ConfigureAwait(false)) continue;
-                CacheSession(state, isLatest);
-                return state;
+                var verified = await ValidateSessionDraftsAsync(state, allowBackup: !isLatest, cancellationToken).ConfigureAwait(false);
+                if (verified is null) continue;
+                CacheSession(verified, isLatest);
+                return verified;
             }
         }
         var legacy = await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
@@ -190,11 +192,11 @@ internal sealed class StorageService
             var tabs = new List<SessionTab>(state.Tabs.Count);
             foreach (var tab in state.Tabs)
                 tabs.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
-                    : await PreserveDraftReferenceAsync(checkpoint, tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
+                    : await PreserveDraftReferenceAsync(tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var closed = new List<SessionTab>();
             foreach (var tab in (state.ClosedTabs ?? []).Take(MaxClosedTabs))
                 closed.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
-                    : await PreserveDraftReferenceAsync(checkpoint, tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
+                    : await PreserveDraftReferenceAsync(tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var snapshot = state with { Tabs = tabs, ClosedTabs = closed };
             await using (var stream = new FileStream(Path.Combine(checkpoint, "manifest.json"), FileMode.CreateNew, FileAccess.Write, FileShare.None, 16 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
@@ -205,6 +207,13 @@ internal sealed class StorageService
             var previous = Path.Combine(_checkpoints, "previous.json");
             if (_cachedSessionWasLatest && File.Exists(latest))
             {
+                // The previous manifest can share immutable primary files with the next snapshot.
+                // Give those references an independent, verified copy before rotating the pointers.
+                foreach (var tab in tabs.Concat(closed))
+                {
+                    if (HasPrimaryDraft(tab) && fallbackDrafts.GetValueOrDefault(tab.Id)?.DraftRef == tab.DraftRef)
+                        await EnsureBackupDraftAsync(tab, cancellationToken).ConfigureAwait(false);
+                }
                 var currentPointer = await File.ReadAllTextAsync(latest, cancellationToken).ConfigureAwait(false);
                 await AtomicWriteAsync(previous, System.Text.Encoding.UTF8.GetBytes(currentPointer.Trim()), cancellationToken).ConfigureAwait(false);
             }
@@ -427,45 +436,74 @@ internal sealed class StorageService
         return ResolveCheckpointReference(reference);
     }
 
-    private async Task<bool> ValidateSessionDraftsAsync(SessionState state, CancellationToken token)
+    private async Task<SessionState?> ValidateSessionDraftsAsync(SessionState state, bool allowBackup, CancellationToken token)
     {
-        foreach (var tab in (state.Tabs ?? []).Concat(state.ClosedTabs ?? []))
+        Dictionary<SessionTab, SessionTab>? repairs = null;
+        foreach (var tab in state.Tabs.Concat(state.ClosedTabs ?? []))
         {
             token.ThrowIfCancellationRequested();
-            if (string.IsNullOrWhiteSpace(tab.DraftRef))
-            {
-                continue;
-            }
-
-            try
-            {
-                var path = ResolveAnyDraftReference(tab.DraftRef);
-                var attributes = File.GetAttributes(path);
-                if ((attributes & FileAttributes.Directory) != 0 || (attributes & FileAttributes.ReparsePoint) != 0)
-                {
-                    return false;
-                }
-
-                if (tab.DraftSha256 is null)
-                {
-                    continue;
-                }
-
-                await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
-                    64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-                var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream, token).ConfigureAwait(false));
-                if (!actual.Equals(tab.DraftSha256, StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
-            }
-            catch (Exception error) when (IsInvalidCheckpointException(error))
-            {
-                return false;
-            }
+            if (string.IsNullOrWhiteSpace(tab.DraftRef) || await IsValidDraftAsync(tab, token).ConfigureAwait(false)) continue;
+            if (!allowBackup || !HasPrimaryDraft(tab)) return null;
+            var backup = tab with { DraftRef = tab.DraftRef + ".bak" };
+            if (!await IsValidDraftAsync(backup, token).ConfigureAwait(false)) return null;
+            (repairs ??= [])[tab] = backup;
         }
 
-        return true;
+        if (repairs is null) return state;
+        SessionTab Repaired(SessionTab tab) => repairs.GetValueOrDefault(tab, tab);
+        return state with { Tabs = state.Tabs.ConvertAll(Repaired), ClosedTabs = state.ClosedTabs?.ConvertAll(Repaired) };
+    }
+
+    private static bool HasPrimaryDraft(SessionTab tab) => tab.DraftSha256 is not null
+        && tab.DraftRef is { } reference && reference.StartsWith("standalone/", StringComparison.Ordinal)
+        && reference.EndsWith(".txt", StringComparison.Ordinal);
+
+    private async Task<bool> IsValidDraftAsync(SessionTab tab, CancellationToken token)
+    {
+        try
+        {
+            var path = ResolveAnyDraftReference(tab.DraftRef!);
+            if ((File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) return false;
+            if (tab.DraftSha256 is null) return true;
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+                64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var hash = await SHA256.HashDataAsync(stream, token).ConfigureAwait(false);
+            return Convert.ToHexString(hash).Equals(tab.DraftSha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception error) when (IsInvalidCheckpointException(error)) { return false; }
+    }
+
+    private async Task EnsureBackupDraftAsync(SessionTab tab, CancellationToken token)
+    {
+        var backup = tab with { DraftRef = tab.DraftRef + ".bak" };
+        var path = ResolveAnyDraftReference(backup.DraftRef!);
+        var signature = GetFileSignature(path);
+        if (signature.Length >= 0 && (_verifiedBackupFiles.TryGetValue(path, out var verified) && verified == signature
+            || await IsValidDraftAsync(backup, token).ConfigureAwait(false)))
+        {
+            _verifiedBackupFiles[path] = signature;
+            return;
+        }
+
+        var temporary = path + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await using var input = new FileStream(ResolveAnyDraftReference(tab.DraftRef!), FileMode.Open,
+                FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite,
+                FileShare.None, 65536, FileOptions.Asynchronous))
+            {
+                await input.CopyToAsync(output, token).ConfigureAwait(false);
+                output.Flush(true);
+                output.Position = 0;
+                var hash = Convert.ToHexString(await SHA256.HashDataAsync(output, token).ConfigureAwait(false));
+                if (!hash.Equals(tab.DraftSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Черновик изменился во время создания резервной копии.");
+            }
+            File.Move(temporary, path, overwrite: true);
+            _verifiedBackupFiles[path] = GetFileSignature(path);
+        }
+        finally { File.Delete(temporary); }
     }
 
     private async Task<SessionState?> ReadCheckpointAsync(string pointerPath, CancellationToken cancellationToken)
@@ -536,7 +574,6 @@ internal sealed class StorageService
     }
 
     private async Task<SessionTab> PreserveDraftReferenceAsync(
-        string checkpoint,
         SessionTab tab,
         SessionTab? fallback,
         CancellationToken token)
@@ -549,23 +586,22 @@ internal sealed class StorageService
         if (fallback is { DraftRef: not null, DraftSha256: not null }
             && string.Equals(tab.DraftRef, fallback.DraftRef, StringComparison.Ordinal)
             && string.Equals(tab.DraftSha256, fallback.DraftSha256, StringComparison.OrdinalIgnoreCase)
-            && (tab.DraftRef.StartsWith("standalone/", StringComparison.Ordinal)
-                || tab.DraftRef.StartsWith("legacy/", StringComparison.Ordinal)))
+            && HasPrimaryDraft(tab))
         {
             return tab;
         }
 
-        if (await TryPreserveDraftAsync(checkpoint, tab, token).ConfigureAwait(false) is { } preserved)
+        if (await TryPreserveDraftAsync(tab, token).ConfigureAwait(false) is { } preserved)
         {
             return preserved;
         }
 
-        if (fallback is not null && await TryPreserveDraftAsync(checkpoint, fallback, token).ConfigureAwait(false) is { } recovered)
+        if (fallback is not null && await TryPreserveDraftAsync(fallback, token).ConfigureAwait(false) is { } recovered)
         {
             return tab with { DraftRef = recovered.DraftRef, DraftSha256 = recovered.DraftSha256 };
         }
 
-        return tab with { DraftRef = null, DraftSha256 = null };
+        throw new InvalidDataException("Не удалось сохранить черновик из текущей или резервной контрольной точки.");
     }
 
     private static async Task<(string TemporaryPath, string Hash, long LineCount)> WriteDraftStreamAsync(
@@ -657,7 +693,12 @@ internal sealed class StorageService
             foreach (var tab in (state.Tabs ?? []).Concat(state.ClosedTabs ?? []))
             {
                 if (tab.DraftRef is not { } reference) continue;
-                try { referenced.Add(Path.GetFullPath(ResolveAnyDraftReference(reference))); }
+                try
+                {
+                    var path = ResolveAnyDraftReference(reference);
+                    referenced.Add(path);
+                    if (pointer == previous && HasPrimaryDraft(tab)) referenced.Add(path + ".bak");
+                }
                 catch (Exception error) when (IsInvalidCheckpointException(error)) { }
             }
         }
@@ -670,12 +711,12 @@ internal sealed class StorageService
                 && !file.Name.StartsWith("closed-", StringComparison.Ordinal)) continue;
             var fullPath = Path.GetFullPath(file.FullName);
             if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase) || referenced.Contains(fullPath)) continue;
-            try { file.Delete(); }
+            try { file.Delete(); _verifiedBackupFiles.Remove(fullPath); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
     }
 
-    private async Task<SessionTab?> TryPreserveDraftAsync(string checkpoint, SessionTab tab, CancellationToken token)
+    private async Task<SessionTab?> TryPreserveDraftAsync(SessionTab tab, CancellationToken token)
     {
         if (string.IsNullOrWhiteSpace(tab.DraftRef)) return null;
         string source;
@@ -701,6 +742,7 @@ internal sealed class StorageService
             return null;
         }
 
+        if (HasPrimaryDraft(tab)) return tab;
         var name = $"session-{tab.Id}-{sha}.txt";
         var destination = Path.Combine(_drafts, name);
         var saved = tab with { DraftRef = "standalone/" + name, DraftSha256 = sha };

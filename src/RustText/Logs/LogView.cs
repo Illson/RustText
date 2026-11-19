@@ -158,6 +158,8 @@ internal sealed partial class LogView : UserControl, IDisposable
     private LogPage? _page;
     private FileStamp _fileStamp;
     private byte[]? _observedDigest;
+    private LogFileIdentity? _bookmarkIdentity;
+    private LogFingerprint? _bookmarkFingerprint;
     private long _hiddenOffset;
     private long _searchOffset;
     private long _indexedTo;
@@ -194,7 +196,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         var effectiveEncoding = LogDataReader.DetectEncoding(_file, _encodingOverride);
         _reader = new LogDataReader(_file, effectiveEncoding);
         _fileStamp = FileStamp.Read(_path, _file);
-        _observedDigest = TryReadObservedDigest(_fileStamp.Length);
+        RefreshBookmarkProof();
         var bookmarkRestorable = _isDraft || CanRestoreBookmark(state);
         var restoreState = bookmarkRestorable ? state : state is null ? null : state with { Offset = 0, HiddenOffset = 0 };
         var savedHiddenOffset = Math.Clamp(restoreState?.HiddenOffset ?? 0, 0, _file.Length);
@@ -256,7 +258,6 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     public LogTabState CaptureState()
     {
-        var (identity, size, fingerprint) = CaptureBookmarkProof();
         return new LogTabState(
             _encodingOverride,
             _page?.StartOffset ?? _hiddenOffset,
@@ -270,9 +271,9 @@ internal sealed partial class LogView : UserControl, IDisposable
             _caseBox.IsChecked == true,
             _wholeWordBox.IsChecked == true,
             _searchBox.Text ?? string.Empty,
-            identity,
-            size,
-            fingerprint,
+            _bookmarkIdentity,
+            _fileStamp.Length,
+            _bookmarkFingerprint,
             _indexOptIn);
     }
 
@@ -318,19 +319,13 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
     }
 
-    private (LogFileIdentity? Identity, long Size, LogFingerprint? Fingerprint) CaptureBookmarkProof()
+    private void RefreshBookmarkProof()
     {
-        try
-        {
-            var size = _file.Length;
-            var modified = GetFileModifiedTime(_file.SafeFileHandle);
-            var digest = _reader.ComputeBookmarkDigest(size).Select(value => (int)value).ToArray();
-            return (ReadFileIdentity(_file.SafeFileHandle), size, new LogFingerprint(modified, digest));
-        }
-        catch (IOException)
-        {
-            return (ReadFileIdentity(_file.SafeFileHandle), _file.Length, null);
-        }
+        _observedDigest = TryReadObservedDigest(_fileStamp.Length);
+        _bookmarkIdentity = ReadFileIdentity(_file.SafeFileHandle);
+        _bookmarkFingerprint = _observedDigest is { } digest
+            ? new LogFingerprint(GetFileModifiedTime(_file.SafeFileHandle), Array.ConvertAll(digest, value => (int)value))
+            : null;
     }
 
     private static bool IdentityEquals(LogFileIdentity expected, LogFileIdentity actual) =>
@@ -1110,6 +1105,10 @@ internal sealed partial class LogView : UserControl, IDisposable
             _moreButton.IsEnabled = _searchHasMore;
             SetStatus(result.Message ?? (result.Results.Count == 0 ? "Совпадений не найдено." : $"Найдено {result.Results.Count} совпадений. Нажмите «Ещё» для продолжения."));
         }
+        catch (ObjectDisposedException) when (token.IsCancellationRequested)
+        {
+            // Rotation or shutdown released the file handle of this search.
+        }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
             if (!_closed)
@@ -1138,11 +1137,12 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
 
         var results = new List<SearchResult>(SearchResultsPerPage);
-        var cursor = Math.Max(offset, _hiddenOffset);
+        var reader = _reader;
+        var cursor = Math.Max(Math.Max(offset, _hiddenOffset), reader.PreambleLength);
         var pageEnd = _file.Length;
         var pendingLine = new StringBuilder();
         var pendingOffset = cursor;
-        long? lineNumber = FindLineNumber(_reader, cursor, token);
+        var lineNumber = FindLineNumber(reader, cursor, token);
         string? notice = null;
         var skippingOversizedLine = false;
         var nextOffset = cursor;
@@ -1150,74 +1150,40 @@ internal sealed partial class LogView : UserControl, IDisposable
         while (cursor < pageEnd && results.Count < SearchResultsPerPage)
         {
             token.ThrowIfCancellationRequested();
-            var page = _reader.ReadPage(cursor, pageSize: 80, maxFrameBytes: 16 * 1024, maxPageBytes: 128 * 1024, cancellationToken: token);
-            if (page.Rows.Count == 0 || page.NextOffset <= cursor)
-            {
-                break;
-            }
-
+            var page = reader.ReadPage(cursor, cancellationToken: token);
+            if (page.NextOffset <= cursor) break;
             foreach (var row in page.Rows)
             {
                 token.ThrowIfCancellationRequested();
-                var startsWithinLine = row.ContinuesLine && pendingLine.Length > 0 || IsContinuationAt(row.StartOffset);
-                if (!startsWithinLine)
+                nextOffset = row.EndOffset;
+                if (!row.StartsWithinLine) pendingOffset = row.StartOffset;
+                if (row.EndOffset - pendingOffset > MaximumSearchLineBytes)
                 {
-                    var pendingText = pendingLine.ToString();
-                    var match = !skippingOversizedLine && pendingLine.Length > 0
-                        ? FindMatch(pendingText, query, expression, matchCase, wholeWord)
-                        : null;
-                    if (match is { } previousMatch)
-                    {
-                        results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingText), previousMatch.Index, previousMatch.Length));
-                        if (results.Count >= SearchResultsPerPage)
-                        {
-                            nextOffset = row.StartOffset;
-                            break;
-                        }
-                    }
-                    pendingLine.Clear();
-                    skippingOversizedLine = false;
-                    pendingOffset = row.StartOffset;
-                    lineNumber++;
+                    skippingOversizedLine = true;
+                    notice = $"Пропущена строка длиннее лимита поиска в {MaximumSearchLineBytes:N0} байт.";
                 }
 
-                if (skippingOversizedLine || row.EndOffset - pendingOffset > MaximumSearchLineBytes)
+                if (row.IsTruncated)
                 {
-                    pendingLine.Clear();
-                    skippingOversizedLine = row.ContinuesLine;
-                    notice = $"Пропущена строка длиннее лимита поиска в {MaximumSearchLineBytes:N0} символов.";
+                    if (!skippingOversizedLine) pendingLine.Append(row.Text);
                     continue;
                 }
-                pendingLine.Append(row.Text);
-                if (!row.ContinuesLine && !IsContinuationAt(row.EndOffset)
-                    && FindMatch(pendingLine.ToString(), query, expression, matchCase, wholeWord) is { } currentMatch)
+
+                if (!skippingOversizedLine)
                 {
-                    results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingLine.ToString()), currentMatch.Index, currentMatch.Length));
-                    pendingLine.Clear();
-                    if (results.Count >= SearchResultsPerPage)
+                    var text = pendingLine.Length == 0 ? row.Text : pendingLine.Append(row.Text).ToString();
+                    if (FindMatch(text, query, expression, matchCase, wholeWord) is { } match)
                     {
-                        nextOffset = row.EndOffset;
-                        break;
+                        results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(text), match.Index, match.Length));
                     }
                 }
-                else if (!row.ContinuesLine && !IsContinuationAt(row.EndOffset))
-                {
-                    pendingLine.Clear();
-                }
-                nextOffset = row.EndOffset;
+                pendingLine.Clear();
+                skippingOversizedLine = false;
+                lineNumber++;
+                if (results.Count == SearchResultsPerPage) break;
             }
-
             cursor = page.NextOffset;
-            if (results.Count >= SearchResultsPerPage || !page.HasMore)
-            {
-                break;
-            }
-        }
-
-        if (cursor >= pageEnd && !skippingOversizedLine && pendingLine.Length > 0
-            && FindMatch(pendingLine.ToString(), query, expression, matchCase, wholeWord) is { } finalMatch)
-        {
-            results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(pendingLine.ToString()), finalMatch.Index, finalMatch.Length));
+            if (!page.HasMore) break;
         }
 
         var resultNextOffset = results.Count == SearchResultsPerPage ? nextOffset : cursor;
@@ -1582,7 +1548,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _file = replacement;
         _reader = reader;
         _fileStamp = FileStamp.Read(_path, replacement);
-        _observedDigest = TryReadObservedDigest(_fileStamp.Length);
+        RefreshBookmarkProof();
         previous.Dispose();
 
         _previousOffsets.Clear();
@@ -1641,7 +1607,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             {
                 _fileStamp = now;
                 _totalLineCount = null;
-                _observedDigest = TryReadObservedDigest(now.Length);
+                RefreshBookmarkProof();
                 var offset = _followEnd ? _reader.GetEndOffset(_closing.Token) : _page?.StartOffset ?? _hiddenOffset;
                 await LoadPageAsync(offset, saveHistory: false);
             }

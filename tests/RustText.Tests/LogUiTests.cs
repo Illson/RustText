@@ -333,6 +333,25 @@ public sealed class LogUiTests
     });
 
     [Fact]
+    public Task SearchNumbersMatchPhysicalLinesAcrossResultPages() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "line-numbers.log");
+        var lines = Enumerable.Range(1, 34).Select(n => n == 2 ? new string('x', 17000) + "hit" : $"hit {n}");
+        await File.WriteAllTextAsync(path, string.Join("\n", lines), Encoding.Unicode);
+        var (window, log) = await ShowLogAsync(path, null);
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "hit";
+            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", true);
+            var buttons = (StackPanel)Field(log, "_searchResultButtons");
+            var labels = buttons.Children.Cast<Button>().Select(button => ((TextBlock)button.Content!).Text!.Split(' ')[0]);
+            Assert.Equal(Enumerable.Range(1, 34).Select(n => n.ToString()), labels);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public async Task SearchNavigatesAndHighlightsLongLineHitsWithF3InBothDirections()
     {
         await HeadlessTests.RunAsync(async _ =>

@@ -398,8 +398,7 @@ public partial class MainWindow
             }
             if ((saved.Log is not null || saved.LogOffset is not null) && saved.Path is { } logPath)
             {
-                AttachLog(tab, logPath, saved.Encoding,
-                    saved.Log ?? new LogTabState(saved.Encoding, saved.LogOffset ?? 0, WordWrap: _wordWrap));
+                RestoreSavedLog(tab, logPath, saved);
             }
             else if (saved.DraftRef is not null)
             {
@@ -449,7 +448,10 @@ public partial class MainWindow
             }
             else if (saved.Path is { } path)
             {
-                AttachLoadedEditor(tab, await DocumentFiles.ReadAsync(path, saved.Encoding, token));
+                if (new FileInfo(path).Length > LogThreshold)
+                    AttachLog(tab, path, saved.Encoding);
+                else
+                    AttachLoadedEditor(tab, await DocumentFiles.ReadAsync(path, saved.Encoding, token));
             }
             else
             {
@@ -475,6 +477,12 @@ public partial class MainWindow
             tab.Loading = false;
             tab.LoadCancellation = null;
         }
+    }
+
+    private void RestoreSavedLog(WorkTab tab, string path, SessionTab saved)
+    {
+        var state = saved.Log ?? new LogTabState(saved.Encoding, saved.LogOffset ?? 0, WordWrap: _wordWrap);
+        AttachLog(tab, path, state.Encoding, state);
     }
 
     private static void RestoreEditorView(WorkTab tab, SessionTab saved)
@@ -657,8 +665,7 @@ public partial class MainWindow
                     }
                     else if (isLog)
                     {
-                        AttachLog(existing, path, saved.Encoding,
-                            saved.Log ?? new LogTabState(saved.Encoding, saved.LogOffset ?? 0, WordWrap: _wordWrap));
+                        RestoreSavedLog(existing, path, saved);
                     }
                     else
                     {
@@ -743,18 +750,18 @@ public partial class MainWindow
 
     private async Task OpenRecentAsync(RecentFileEntry entry)
     {
-        await OpenPathAsync(entry.Path, entry.ViewAsLog, entry.Encoding);
-        if (ActiveTab is { } tab)
+        var encoding = entry.Log is { } bookmark ? bookmark.Encoding : entry.Encoding;
+        var tab = await OpenPathAsync(entry.Path, entry.ViewAsLog, encoding);
+        if (_tabs.TryGetValue(tab.Id, out var current) && ReferenceEquals(current, tab))
         {
             if (tab.Log is not null)
             {
                 if (tab.Log.HasPendingEdit || tab.Recovery is not null) return;
                 var log = (entry.Log ?? new LogTabState(entry.Encoding, entry.LogOffset ?? 0)) with
                 {
-                    Encoding = entry.Encoding,
                     WordWrap = _wordWrap
                 };
-                AttachLog(tab, entry.Path, entry.Encoding, log);
+                AttachLog(tab, entry.Path, encoding, log);
             }
             else if (tab.Editor is not null)
             {

@@ -89,11 +89,12 @@ public partial class MainWindow
             await GuardAsync(() => LoadOpenRequestAsync(request, encoding));
     }
 
-    private async Task OpenPathAsync(string path, bool asLog = false, TextEncodingKind? encoding = null)
+    private async Task<WorkTab> OpenPathAsync(string path, bool asLog = false, TextEncodingKind? encoding = null)
     {
         var request = PrepareOpen(path, asLog, encoding);
         Select(request.Tab);
         await LoadOpenRequestAsync(request, encoding);
+        return request.Tab;
     }
 
     private OpenRequest PrepareOpen(string path, bool asLog, TextEncodingKind? encoding)

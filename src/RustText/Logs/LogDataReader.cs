@@ -217,7 +217,7 @@ internal sealed class LogDataReader
                 // A CR at the final code unit of a frame is already a valid
                 // terminator, but when its LF lies in lookahead, consume both so
                 // CRLF is never split across pages.
-                if (terminated && lineEnding.Length == _codeUnitBytes
+                if (terminated && consumedBytes == frameLimit && lineEnding.Length == _codeUnitBytes
                     && IsCarriageReturn(frame.Slice(lineEnding.Index, _codeUnitBytes))
                     && TryGetLineEndingAt(bytes, position + frameLimit, out var followingEnding)
                     && followingEnding == _codeUnitBytes

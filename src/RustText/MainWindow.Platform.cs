@@ -277,8 +277,60 @@ public partial class MainWindow
 
         SetStatus("Скачивание и проверка архива…");
         await using var stage = await UpdateService.StageAsync(release, ExecutablePath, _lifetime.Token);
-        await SaveSessionAsync();
-        await UpdateService.ApplyStagedAsync(stage, ExecutablePath, _lifetime.Token);
-        Close();
+        await RestartForUpdateAsync(() => UpdateService.ApplyStagedAsync(stage, ExecutablePath, _lifetime.Token));
+    }
+
+    private async Task RestartForUpdateAsync(Func<Task> startHelper)
+    {
+        if (!await _workspace.CloseGate.WaitAsync(0))
+            throw new IOException("Дождитесь завершения закрытия окна.");
+
+        var windows = _workspace.Windows.Where(window => !window._closed).ToArray();
+        try
+        {
+            foreach (var window in windows)
+            {
+                if (!window._restoreFinished || window._closing || window.OwnedWindows.Count != 0
+                    || window._tabs.Values.Any(tab => tab.Saving || tab.Loading || tab.Closing || tab.Log?.HasPendingEdit == true))
+                {
+                    window.Activate();
+                    throw new IOException("Завершите операции во всех окнах и сохраните или отмените правки страницы перед обновлением.");
+                }
+            }
+
+            foreach (var window in windows)
+            {
+                window._closing = true;
+                window.IsEnabled = false;
+                window.CancelTabDrag();
+                window._checkpoint.Stop();
+            }
+
+            try
+            {
+                await SaveSessionAsync();
+                await startHelper();
+            }
+            catch
+            {
+                foreach (var window in windows)
+                {
+                    window._closing = false;
+                    window.IsEnabled = true;
+                    window._checkpoint.Start();
+                }
+                throw;
+            }
+
+            foreach (var window in windows)
+            {
+                window.CloseWorkspaceContents();
+                window.Close();
+            }
+        }
+        finally
+        {
+            _workspace.CloseGate.Release();
+        }
     }
 }

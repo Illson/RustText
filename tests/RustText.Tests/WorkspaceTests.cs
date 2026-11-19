@@ -10,6 +10,7 @@ using Avalonia.VisualTree;
 using AvaloniaEdit;
 using RustText.Demo;
 using RustText.Demo.Editor;
+using RustText.Demo.Logs;
 using Xunit;
 
 namespace RustText.Tests;
@@ -17,6 +18,170 @@ namespace RustText.Tests;
 [Collection(HeadlessCollection.Name)]
 public sealed class WorkspaceTests
 {
+    [Fact]
+    public Task RecentLogKeepsItsTargetWhenSelectionChanges() => HeadlessTests.RunAsync(async profile =>
+    {
+        var first = Path.Combine(profile, "first.log");
+        var second = Path.Combine(profile, "second.log");
+        await File.WriteAllTextAsync(first, "first");
+        await File.WriteAllTextAsync(second, "second");
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenPathAsync", second, true, null);
+            var selected = ActiveTab(window);
+            var storage = Field(window, "_storage");
+            var gate = (SemaphoreSlim)typeof(StorageService).GetField("_recentGate", Private)!.GetValue(storage)!;
+            await gate.WaitAsync();
+            Task opening;
+            try
+            {
+                opening = CallAsync(window, "OpenRecentAsync", new RecentFileEntry(first, TextEncodingKind.Utf8, true));
+                Invoke(window, "Select", selected);
+            }
+            finally { gate.Release(); }
+            await opening;
+
+            var log = Read<LogView>(ActiveTab(window), "Log");
+            await log.InitialPageLoad;
+            await EditLogPageAsync(log, "edited second");
+            await CallAsync(window, "SaveAsync", false);
+            Assert.Equal("first", await File.ReadAllTextAsync(first));
+            Assert.Equal("edited second", await File.ReadAllTextAsync(second));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task AutoDetectedLogEncodingSurvivesHistoryAndRestart() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string text = "Первая строка";
+        var path = Path.Combine(profile, "utf16.log");
+        await File.WriteAllTextAsync(path, text, System.Text.Encoding.Unicode);
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenPathAsync", path, true, null);
+            var recent = Assert.Single(await StorageService.OpenForTesting(profile).GetRecentFilesAsync());
+            await CallAsync(window, "CloseTabAsync", ActiveTab(window));
+            await CallAsync(window, "OpenRecentAsync", recent);
+            await AssertPageTextAsync();
+            await CloseAsync(window);
+            window = await OpenWorkspaceAsync();
+            await AssertPageTextAsync();
+        }
+        finally { if (window.IsVisible) await CloseAsync(window); }
+
+        async Task AssertPageTextAsync()
+        {
+            var log = Read<LogView>(ActiveTab(window), "Log");
+            await log.InitialPageLoad;
+            Assert.Equal(text, LogText(log).Text);
+        }
+    });
+
+    [Fact]
+    public Task RestoredFileAboveEditorLimitUsesLogView() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "growing.txt");
+        await File.WriteAllTextAsync(path, "first row\n");
+        var window = await OpenWorkspaceAsync(path);
+        await CloseAsync(window);
+        using (var file = File.OpenWrite(path)) file.SetLength(DocumentFiles.MaximumDocumentBytes + 1);
+        window = await OpenWorkspaceAsync();
+        try
+        {
+            var log = Assert.IsType<LogView>(Property(ActiveTab(window), "Log"));
+            await log.InitialPageLoad;
+            Assert.StartsWith("first row", LogText(log).Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task IdleLogReusesCheckpointUntilBookmarkChanges() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "stationary.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat("line\n", 200)));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenPathAsync", path, true, null);
+            var log = Read<LogView>(ActiveTab(window), "Log");
+            await log.InitialPageLoad;
+            var pointer = Path.Combine(profile, "dotnet-demo", "session", "latest.json");
+            await CallAsync(window, "SaveSessionAsync");
+            var first = await File.ReadAllTextAsync(pointer);
+            await CallAsync(window, "SaveSessionAsync");
+            Assert.Equal(first, await File.ReadAllTextAsync(pointer));
+
+            await (Task)typeof(LogView).GetMethod("NavigateAsync", Private)!.Invoke(log, [100L, true])!;
+            await CallAsync(window, "SaveSessionAsync");
+            Assert.NotEqual(first, await File.ReadAllTextAsync(pointer));
+            var saved = await StorageService.OpenForTesting(profile).LoadSessionAsync();
+            Assert.Equal(100L, Assert.Single(saved!.Tabs).Log!.Offset);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task UpdateChecksAllWindowsAndSavesTheirTabsBeforeStartingHelper() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "page.log");
+        await File.WriteAllTextAsync(path, "original");
+        var window = await OpenWorkspaceAsync();
+        MainWindow? detached = null;
+        try
+        {
+            Invoke(window, "NewTab", "unsaved draft");
+            await CallAsync(window, "OpenPathAsync", path, true, null);
+            Invoke(window, "OpenTabWindow", ActiveTab(window), null);
+            detached = Assert.IsType<MainWindow>(window.FindOtherWindow());
+            await HeadlessTests.WaitForAsync(() => Property(ActiveTab(detached), "Log") is LogView);
+            var log = Read<LogView>(ActiveTab(detached), "Log");
+            await log.InitialPageLoad;
+            await EditLogPageAsync(log, "pending edit");
+            var starts = 0;
+            Func<Task> start = () => { starts++; return Task.CompletedTask; };
+            await Assert.ThrowsAsync<IOException>(() => CallAsync(window, "RestartForUpdateAsync", start));
+            Assert.Equal(0, starts);
+            Assert.Equal("pending edit", LogText(log).Text);
+            Assert.True(window.IsVisible && detached.IsVisible);
+
+            await log.SavePageEditAsync();
+            Func<Task> failed = () => Task.FromException(new IOException("helper unavailable"));
+            await Assert.ThrowsAsync<IOException>(() => CallAsync(window, "RestartForUpdateAsync", failed));
+            Assert.True(window.IsEnabled && detached.IsEnabled);
+            var storage = StorageService.OpenForTesting(profile);
+            await CallAsync(window, "RestartForUpdateAsync", (Func<Task>)(async () =>
+            {
+                starts++;
+                var saved = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
+                Assert.Equal(2, saved.Tabs.Count);
+                Assert.Equal("unsaved draft", await storage.LoadDraftAsync(saved.Tabs.Single(tab => tab.Path is null)));
+                Assert.Contains(saved.Tabs, tab => tab.Path == path);
+            }));
+            Assert.Equal(1, starts);
+            Assert.False(window.IsVisible);
+            Assert.False(detached.IsVisible);
+            Assert.Equal("pending edit", await File.ReadAllTextAsync(path));
+        }
+        finally
+        {
+            if (detached is { IsVisible: true }) await CloseAsync(detached);
+            if (window.IsVisible) await CloseAsync(window);
+        }
+    });
+
+    private static TextBox LogText(LogView log) => (TextBox)typeof(LogView).GetField("_logText", Private)!.GetValue(log)!;
+
+    private static async Task EditLogPageAsync(LogView log, string content)
+    {
+        await (Task)typeof(LogView).GetMethod("TogglePageEditAsync", Private)!.Invoke(log, null)!;
+        Assert.False(log.IsReadOnly);
+        LogText(log).Text = content;
+    }
+
     [Fact]
     public Task ExternalChangesReloadAnInactiveFileAndKeepTheView() => HeadlessTests.RunAsync(async profile =>
     {
