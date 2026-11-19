@@ -446,12 +446,24 @@ public partial class MainWindow
         ? new TextBlock { Text = "Проверка сохранённой вкладки…", Margin = new Thickness(18) }
         : FocusButton(Button("Загрузить вкладку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
 
-    private async Task ActivateDeferredAsync(WorkTab tab)
+    private Task ActivateDeferredAsync(WorkTab tab) => ActivateDeferredCoreAsync(tab, allowDuringWorkspaceSwitch: false);
+
+    private Task ActivateDeferredDuringWorkspaceSwitchAsync(WorkTab tab) =>
+        ActivateDeferredCoreAsync(tab, allowDuringWorkspaceSwitch: true);
+
+    private async Task ActivateDeferredCoreAsync(WorkTab tab, bool allowDuringWorkspaceSwitch)
     {
-        if (tab.Deferred is not { } saved || tab.Loading || tab.CheckingSession || _closed)
+        if ((_workspaceSwitchPending && !allowDuringWorkspaceSwitch)
+            || tab.Closing || tab.Deferred is not { } saved || tab.Loading || tab.CheckingSession || _closed)
         {
             return;
         }
+
+        var storage = SessionStorage;
+        var workspaceId = _workspaceId;
+        var tabs = _tabs;
+        bool IsCurrentTab() => _workspaceId == workspaceId && ReferenceEquals(_tabs, tabs)
+            && tabs.TryGetValue(tab.Id, out var current) && ReferenceEquals(current, tab);
 
         using var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         tab.Loading = true;
@@ -461,8 +473,9 @@ public partial class MainWindow
         {
             var token = source.Token;
             var previousDeferred = saved;
-            saved = await SessionStorage.ResolveCurrentDraftAsync(saved, token);
+            saved = await storage.ResolveCurrentDraftAsync(saved, token);
             token.ThrowIfCancellationRequested();
+            if (!IsCurrentTab()) return;
             if (ReferenceEquals(tab.Deferred, previousDeferred))
             {
                 tab.Deferred = saved;
@@ -473,14 +486,15 @@ public partial class MainWindow
             }
             else if (saved.DraftRef is not null)
             {
-                var draftPath = SessionStorage.GetDraftPath(saved);
+                var draftPath = storage.GetDraftPath(saved);
                 if (draftPath is not null && new FileInfo(draftPath).Length > LineGeneratorThreshold)
                 {
                     AttachPagedDraftEditor(tab, saved, draftPath);
                 }
                 else
                 {
-                    var draft = await SessionStorage.LoadDraftAsync(saved, token) ?? "";
+                    var draft = await storage.LoadDraftAsync(saved, token) ?? "";
+                    if (!IsCurrentTab()) return;
                     if (draftPath is not null && IsOversizedEditorText(draft))
                     {
                         AttachPagedDraftEditor(tab, saved, draftPath);
@@ -500,6 +514,7 @@ public partial class MainWindow
                                 if (saved.LegacyStamp is { } legacy)
                                 {
                                     var stamp = await DocumentFiles.GetStampAsync(original, token);
+                                    if (!IsCurrentTab()) return;
                                     if (stamp.Length == legacy.Length && stamp.LastWriteUtc == legacy.LastWriteUtc
                                         && (legacy.CreatedUtc is null || File.GetCreationTimeUtc(original) == legacy.CreatedUtc))
                                     {
@@ -528,7 +543,11 @@ public partial class MainWindow
                         AttachLog(tab, path, saved.Encoding,
                             new LogTabState(saved.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh, EditPages: true));
                     else
-                        AttachLoadedEditor(tab, await DocumentFiles.ReadAsync(path, saved.Encoding, token));
+                    {
+                        var loaded = await DocumentFiles.ReadAsync(path, saved.Encoding, token);
+                        if (!IsCurrentTab()) return;
+                        AttachLoadedEditor(tab, loaded);
+                    }
                 }
             }
             else
@@ -543,7 +562,7 @@ public partial class MainWindow
         }
         catch
         {
-            if (_tabs.ContainsKey(tab.Id))
+            if (IsCurrentTab())
             {
                 tab.Item.Content = FocusButton(Button("Повторить загрузку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
             }
@@ -693,19 +712,28 @@ public partial class MainWindow
 
     private Task RestoreLastClosedAsync() => _closedTabs.Count > 0 ? RestoreClosedAsync(_closedTabs[0]) : Task.CompletedTask;
 
-    private async Task RestoreClosedAsync(SessionTab saved)
+    private Task RestoreClosedAsync(SessionTab saved) => RestoreClosedCoreAsync(saved, allowDuringWorkspaceSwitch: false);
+
+    private Task RestoreClosedWhileHoldingWorkspaceSwitchGateAsync(SessionTab saved) =>
+        RestoreClosedCoreAsync(saved, allowDuringWorkspaceSwitch: true);
+
+    private async Task RestoreClosedCoreAsync(SessionTab saved, bool allowDuringWorkspaceSwitch)
     {
-        if (!_closedTabs.Any(tab => tab.Id == saved.Id) || !_workspace.ClosedTabOperations.Add(saved.Id))
+        if ((_workspaceSwitchPending && !allowDuringWorkspaceSwitch)
+            || !_closedTabs.Any(tab => tab.Id == saved.Id)
+            || !_workspace.ClosedTabOperations.Add(saved.Id))
         {
             return;
         }
 
+        _closedTabRestoreOperations++;
         try
         {
             await RestoreClosedCoreAsync(saved);
         }
         finally
         {
+            _closedTabRestoreOperations--;
             _workspace.ClosedTabOperations.Remove(saved.Id);
         }
     }

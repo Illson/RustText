@@ -8,6 +8,8 @@ public partial class MainWindow
 {
     private readonly WorkspaceSession _workspace;
     private readonly bool _restoreWorkspace;
+    private bool _workspaceSwitchPending;
+    private int _closedTabRestoreOperations;
 
     private sealed class WorkspaceSession
     {

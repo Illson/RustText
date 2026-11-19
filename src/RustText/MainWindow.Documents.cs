@@ -1075,7 +1075,8 @@ public partial class MainWindow
 
     private async Task CloseTabAsync(WorkTab tab)
     {
-        if (_closing || !_tabs.ContainsKey(tab.Id) || _confirmingTabClose || tab.Closing || tab.CheckingSession)
+        if (_closing || _workspaceSwitchPending || !_tabs.ContainsKey(tab.Id)
+            || _confirmingTabClose || tab.Closing || tab.CheckingSession)
         {
             return;
         }
@@ -1088,6 +1089,9 @@ public partial class MainWindow
         }
 
         tab.Closing = true;
+        var editor = tab.Editor;
+        var editorWasEnabled = editor?.IsEnabled == true;
+        if (editor is not null) editor.IsEnabled = false;
         try
         {
             if (tab is { Dirty: true, Path: { } path, Recovery: null })
@@ -1133,6 +1137,8 @@ public partial class MainWindow
         finally
         {
             tab.Closing = false;
+            if (!_closing && ReferenceEquals(tab.Editor, editor) && editor is not null)
+                editor.IsEnabled = editorWasEnabled;
         }
     }
 

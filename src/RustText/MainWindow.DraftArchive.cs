@@ -242,7 +242,7 @@ public partial class MainWindow
                     {
                         restoredTab = (await archive.RestoreAsync(entry, _lifetime.Token)) with { Id = NextId() };
                         _closedTabs.Insert(0, restoredTab);
-                        await RestoreClosedAsync(restoredTab);
+                        await RestoreClosedWhileHoldingWorkspaceSwitchGateAsync(restoredTab);
                         if (!_closedTabs.Any(tab => tab.Id == restoredTab.Id))
                         {
                             await SaveSessionAsync();

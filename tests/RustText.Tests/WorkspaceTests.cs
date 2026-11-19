@@ -84,6 +84,94 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task ClosingTabCannotRemoveSameIdFromWorkspaceSwitchedDuringClose() => HeadlessTests.RunAsync(async profile =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            const string text = "same id draft";
+            Invoke(window, "NewTab", text);
+            var original = ActiveTab(window);
+            var tabId = Property(original, "Id");
+            var create = CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Collision copy");
+            await create;
+            var copiedWorkspaceId = (string)Field(window, "_workspaceId");
+            Assert.NotEqual(WorkspaceCatalogStore.DefaultWorkspaceId, copiedWorkspaceId);
+
+            await CallAsync(window, "SwitchWorkspaceAsync", WorkspaceCatalogStore.DefaultWorkspaceId);
+            var current = Tabs(window).Single(tab => Equals(Property(tab, "Id"), tabId));
+            var workspace = Field(window, "_workspace");
+            var saveGate = (SemaphoreSlim)Property(workspace, "SaveGate",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+            await saveGate.WaitAsync();
+            var closing = CallAsync(window, "CloseTabAsync", current);
+            try
+            {
+                await HeadlessTests.WaitForAsync(() => Read<bool>(current, "Closing"));
+                await CallAsync(window, "SwitchWorkspaceAsync", copiedWorkspaceId);
+                Assert.Equal(WorkspaceCatalogStore.DefaultWorkspaceId, Field(window, "_workspaceId"));
+            }
+            finally
+            {
+                saveGate.Release();
+            }
+
+            await closing;
+            Assert.DoesNotContain(Tabs(window), tab => Equals(Property(tab, "Id"), tabId));
+
+            await CallAsync(window, "SwitchWorkspaceAsync", copiedWorkspaceId);
+            var copied = Assert.Single(Tabs(window), tab => Equals(Property(tab, "Id"), tabId));
+            if (Property(copied, "Deferred") is not null)
+                await CallAsync(window, "ActivateDeferredAsync", copied);
+            Assert.Equal(text, Read<TextEditor>(copied, "Editor").Text);
+        }
+        finally
+        {
+            if (window.IsVisible) await CloseAsync(window);
+        }
+    });
+
+    [Fact]
+    public Task WorkspaceSwitchBlocksNewCloseAndActivatesItsSelectedDeferredTab() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "switch-pending.txt");
+        await File.WriteAllTextAsync(path, "original");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var sourceTab = ActiveTab(window);
+            Read<TextEditor>(sourceTab, "Editor").Document.Insert(0, "edited ");
+            var create = CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Pending copy");
+            await KeepDraftsDialogAsync(window);
+            await create;
+            var copiedWorkspaceId = (string)Field(window, "_workspaceId");
+
+            await SwitchKeepingDraftsAsync(window, WorkspaceCatalogStore.DefaultWorkspaceId);
+            sourceTab = Tabs(window).Single(tab => Equals(Property(tab, "Path"), path));
+            var switching = CallAsync(window, "SwitchWorkspaceAsync", copiedWorkspaceId);
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.OfType<Window>()
+                .Any(dialog => dialog.Title == "Переключить рабочее пространство?"));
+
+            await CallAsync(window, "CloseTabAsync", sourceTab);
+            Assert.False(Read<bool>(sourceTab, "Closing"));
+            Assert.Contains(Tabs(window), tab => ReferenceEquals(tab, sourceTab));
+            var dialog = window.OwnedWindows.OfType<Window>()
+                .Single(item => item.Title == "Переключить рабочее пространство?");
+            Click(dialog.GetVisualDescendants().OfType<Button>()
+                .Single(button => Equals(button.Content, "Оставить черновики")));
+            await switching;
+
+            Assert.Equal(copiedWorkspaceId, Field(window, "_workspaceId"));
+            var selected = ActiveTab(window);
+            Assert.Equal("edited original", Read<TextEditor>(selected, "Editor").Text);
+        }
+        finally
+        {
+            if (window.IsVisible) await CloseAsync(window);
+        }
+    });
+
+    [Fact]
     public Task EmptyStartupLeavesTheLastSavedWorkspaceAvailable() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "kept-session.txt");

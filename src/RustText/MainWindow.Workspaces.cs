@@ -100,22 +100,39 @@ public partial class MainWindow
 
     private async Task SwitchWorkspaceAsync(string workspaceId)
     {
-        await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
+        if (_workspaceSwitchPending || _closing || _closed) return;
+        _workspaceSwitchPending = true;
+        var editorStates = LoadedWorkspaceTabs().Select(tab => tab.Editor)
+            .Where(editor => editor is not null)
+            .Select(editor => (Editor: editor!, editor!.IsEnabled))
+            .ToArray();
+        foreach (var (editor, _) in editorStates) editor.IsEnabled = false;
+        var gateHeld = false;
         try
         {
+            await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
+            gateHeld = true;
             await SwitchWorkspaceCoreAsync(workspaceId);
         }
         finally
         {
-            _workspace.WorkspaceSwitchGate.Release();
+            if (gateHeld) _workspace.WorkspaceSwitchGate.Release();
+            _workspaceSwitchPending = false;
+            if (!_closing && !_closed)
+                foreach (var (editor, isEnabled) in editorStates) editor.IsEnabled = isEnabled;
         }
     }
 
     private async Task SwitchWorkspaceCoreAsync(string workspaceId)
     {
         if (workspaceId == _workspaceId) return;
-        if (_tabs.Values.Any(tab => tab.Saving || tab.Log?.HasPendingEdit == true))
-            throw new InvalidOperationException("Сначала завершите сохранение вкладки или отмените правки страницы.");
+        if (_closedTabRestoreOperations > 0
+            || _tabs.Values.Any(tab => tab.Closing || tab.Loading || tab.CheckingSession
+                || tab.Saving || tab.Log?.HasPendingEdit == true))
+        {
+            SetStatus("Дождитесь завершения закрытия или загрузки вкладки перед переключением пространства.");
+            return;
+        }
 
         var dirtyFiles = _tabs.Values.Where(tab => tab.Dirty && tab.Path is not null).ToArray();
         if (dirtyFiles.Length > 0)
@@ -208,7 +225,8 @@ public partial class MainWindow
             _closedTabs.AddRange((targetState.ClosedTabs ?? []).Take(100));
             MountSessionTabs(targetState, pending: false);
             ApplyTextAppearance();
-            if (SelectedIn(_active) is { } selected) await ActivateDeferredAsync(selected);
+            if (SelectedIn(_active) is { } selected)
+                await ActivateDeferredDuringWorkspaceSwitchAsync(selected);
         }
         else
         {
