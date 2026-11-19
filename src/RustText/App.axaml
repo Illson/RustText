@@ -107,11 +107,13 @@
         </Style>
         <Style Selector="aeEditing|TextArea">
             <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.InactiveEditorSelection}" />
+            <Setter Property="SelectionBorder" Value="{x:Static local:FocusTheme.InactiveEditorSelectionOutline}" />
             <Setter Property="SelectionForeground" Value="{x:Static local:FocusTheme.Text}" />
-            <Setter Property="SelectionCornerRadius" Value="2" />
+            <Setter Property="SelectionCornerRadius" Value="3" />
         </Style>
         <Style Selector="aeEditing|TextArea:focus-within">
             <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.EditorSelection}" />
+            <Setter Property="SelectionBorder" Value="{x:Static local:FocusTheme.EditorSelectionOutline}" />
         </Style>
         <Style Selector="TabItem.focus-tab">
             <Setter Property="Theme" Value="{StaticResource FocusDocumentTab}" />

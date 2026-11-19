@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Media;
 using AvaloniaEdit;
+using AvaloniaEdit.Rendering;
 using RustText.Demo;
 using Xunit;
 
@@ -84,11 +85,11 @@ public sealed class ViceCityThemeTests
     });
 
     [Fact]
-    public Task EditorDrawsAThickerCaretAndKeepsSelectionReadableWithAndWithoutFocus() =>
+    public Task EditorDrawsTheThickCaretAndOutlinedSelectionWithAndWithoutFocus() =>
         HeadlessTests.RunAsync(async profile =>
         {
             var path = Path.Combine(profile, "caret.txt");
-            await File.WriteAllTextAsync(path, "Строка для проверки");
+            await File.WriteAllTextAsync(path, "Строка      для проверки\nСтрока    два");
             var window = new MainWindow([path]) { Width = 1080, Height = 700 };
             window.Show();
             await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_restoreFinished"));
@@ -98,7 +99,6 @@ public sealed class ViceCityThemeTests
                 var editor = (TextEditor)tab.GetType().GetProperty("Editor")!.GetValue(tab)!;
                 var area = editor.TextArea;
                 var view = area.TextView;
-                editor.CaretOffset = editor.Text.Length;
                 window.UpdateLayout();
                 await HeadlessTests.WaitForAsync(() => view.VisualLinesValid);
                 area.Focus();
@@ -107,18 +107,29 @@ public sealed class ViceCityThemeTests
                 foreach (var theme in Enum.GetValues<AppTheme>())
                 {
                     FocusTheme.Apply(theme);
+                    editor.Select(0, 0);
+                    editor.CaretOffset = editor.Text.Length;
                     Assert.True(Contrast(FocusTheme.EditorCaret.Color, FocusTheme.Editor.Color) >= 3);
                     AssertCaretPixels(window, editor);
+
+                    editor.Select(0, 12);
                     Assert.Same(FocusTheme.EditorSelection, area.SelectionBrush);
+                    Assert.Same(FocusTheme.EditorSelectionOutline, area.SelectionBorder);
+                    Assert.Equal(3, area.SelectionCornerRadius);
                     Assert.True(Contrast(FocusTheme.Text.Color, FocusTheme.EditorSelection.Color) >= 4.5);
+                    AssertSelectionPixels(window, editor, line: 1, column: 10);
                 }
 
-                editor.Select(0, 6);
+                editor.Select(0, editor.Document.GetOffset(2, 11));
+                AssertSelectionPixels(window, editor, line: 2, column: 9);
+                var selectedText = editor.SelectedText;
                 window.FindControl<Button>("CaptionMinimize")!.Focus();
                 Assert.False(area.IsKeyboardFocusWithin);
                 Assert.Same(FocusTheme.InactiveEditorSelection, area.SelectionBrush);
+                Assert.Same(FocusTheme.InactiveEditorSelectionOutline, area.SelectionBorder);
                 Assert.True(Contrast(FocusTheme.Text.Color, FocusTheme.InactiveEditorSelection.Color) >= 4.5);
-                Assert.Equal("Строка", editor.SelectedText);
+                Assert.Equal(selectedText, editor.SelectedText);
+                AssertSelectionPixels(window, editor, line: 2, column: 9);
             }
             finally
             {
@@ -146,15 +157,48 @@ public sealed class ViceCityThemeTests
             frame.CopyPixels(new PixelRect(x, y, 2, 1), buffer, 8, 8);
             for (var offset = 0; offset < 8; offset += 4)
             {
-                var color = FocusTheme.EditorCaret.Color;
-                var first = Marshal.ReadByte(buffer, offset);
-                var green = Marshal.ReadByte(buffer, offset + 1);
-                var third = Marshal.ReadByte(buffer, offset + 2);
-                Assert.Equal(color.G, green);
-                Assert.True((first == color.R && third == color.B) || (first == color.B && third == color.R));
+                Assert.True(PixelMatches(buffer, offset, FocusTheme.EditorCaret.Color));
             }
         }
         finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    private static void AssertSelectionPixels(MainWindow window, TextEditor editor, int line, int column)
+    {
+        window.UpdateLayout();
+        using var frame = window.CaptureRenderedFrame();
+        Assert.NotNull(frame);
+        var area = editor.TextArea;
+        var view = area.TextView;
+        var origin = view.TranslatePoint(default, window)!.Value - view.ScrollOffset;
+        var position = new TextViewPosition(line, column);
+        var top = view.GetVisualPosition(position, VisualYPosition.LineTop) + origin;
+        var bottom = view.GetVisualPosition(position, VisualYPosition.LineBottom) + origin;
+        var scale = window.RenderScaling;
+        var x = (int)Math.Round(top.X * scale);
+        var y = (int)Math.Floor(top.Y * scale);
+        var rows = (int)Math.Ceiling(bottom.Y * scale) - y;
+        const int stride = 4;
+        var buffer = Marshal.AllocHGlobal(rows * stride);
+        try
+        {
+            frame.CopyPixels(new PixelRect(x, y, 1, rows), buffer, rows * stride, stride);
+            var outline = Assert.IsAssignableFrom<ISolidColorBrush>(area.SelectionBorder.Brush).Color;
+            var fill = Assert.IsAssignableFrom<ISolidColorBrush>(area.SelectionBrush).Color;
+            var offsets = Enumerable.Range(0, rows).Select(row => row * stride);
+            Assert.Contains(offsets, offset => PixelMatches(buffer, offset, outline));
+            Assert.Contains(offsets, offset => PixelMatches(buffer, offset, fill));
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    // Headless framebuffers may use BGRA or RGBA.
+    private static bool PixelMatches(nint buffer, int offset, Color color)
+    {
+        var first = Marshal.ReadByte(buffer, offset);
+        var green = Marshal.ReadByte(buffer, offset + 1);
+        var third = Marshal.ReadByte(buffer, offset + 2);
+        return green == color.G && ((first == color.R && third == color.B) || (first == color.B && third == color.R));
     }
 
     private static (Color Background, Color Foreground, Color Border) ButtonColors(Button button) =>
