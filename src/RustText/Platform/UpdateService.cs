@@ -25,6 +25,9 @@ public static class UpdateService
     private const string StageDirectoryPrefix = ".rusttext-dotnet-update-";
     private const string CleanupPidVariable = "RUSTTEXT_DOTNET_UPDATE_HELPER_PID";
     private const string CleanupDirectoryVariable = "RUSTTEXT_DOTNET_UPDATE_STAGE_DIRECTORY";
+    private const string LegacyRustCleanupPidVariable = "RUSTTEXT_UPDATE_HELPER_PID";
+    private const string LegacyRustCleanupDirectoryVariable = "RUSTTEXT_UPDATE_STAGING_DIRECTORY";
+    private const string LegacyRustStagingDirectoryPrefix = ".rusttext-update-";
     private const int MaximumReleaseJsonBytes = 256 * 1024;
     private const int MaximumReleaseHistoryPageBytes = 2 * 1024 * 1024;
     private const int ReleaseHistoryPageSize = 100;
@@ -416,6 +419,93 @@ public static class UpdateService
         {
             Directory.Delete(stagingDirectory, recursive: true);
         }
+    }
+
+    internal static bool IsLegacyRustStagingDirectory(string installDirectory, string stagingDirectory)
+    {
+        if (!Path.IsPathFullyQualified(installDirectory) || !Path.IsPathFullyQualified(stagingDirectory))
+            return false;
+
+        string install;
+        string stage;
+        try
+        {
+            install = NormalizeWindowsPathForComparison(installDirectory);
+            stage = NormalizeWindowsPathForComparison(stagingDirectory);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return false;
+        }
+
+        if (!string.Equals(Path.GetDirectoryName(stage), install, StringComparison.OrdinalIgnoreCase) ||
+            !Path.GetFileName(stage).StartsWith(LegacyRustStagingDirectoryPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            var attributes = File.GetAttributes(stage);
+            return (attributes & FileAttributes.Directory) != 0 &&
+                (attributes & FileAttributes.ReparsePoint) == 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    internal static void CleanupLegacyRustStagingDirectory(string installDirectory, string stagingDirectory)
+    {
+        if (!IsLegacyRustStagingDirectory(installDirectory, stagingDirectory))
+            return;
+
+        var stage = NormalizeWindowsPathForComparison(stagingDirectory);
+        foreach (var name in new[]
+        {
+            "replacement.exe",
+            ".rusttext-previous.exe",
+            ".helper-ready",
+            "rusttext-updater.exe"
+        })
+        {
+            if (!IsLegacyRustStagingDirectory(installDirectory, stage))
+                return;
+
+            var path = Path.Combine(stage, name);
+            try
+            {
+                var attributes = File.GetAttributes(path);
+                if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) == 0)
+                    File.Delete(path);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+
+        if (!IsLegacyRustStagingDirectory(installDirectory, stage))
+            return;
+
+        try
+        {
+            Directory.Delete(stage, recursive: false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static string NormalizeWindowsPathForComparison(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+            path = @"\\" + path[8..];
+        else if (path.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+            path = path[4..];
+
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
     }
 
     private static HttpClient CreateClient(TimeSpan timeout)
@@ -1106,10 +1196,15 @@ public static class UpdateService
     {
         var processText = Environment.GetEnvironmentVariable(CleanupPidVariable);
         var stageDirectory = Environment.GetEnvironmentVariable(CleanupDirectoryVariable);
+        var legacyProcessText = Environment.GetEnvironmentVariable(LegacyRustCleanupPidVariable);
+        var legacyStageDirectory = Environment.GetEnvironmentVariable(LegacyRustCleanupDirectoryVariable);
         Environment.SetEnvironmentVariable(CleanupPidVariable, null);
         Environment.SetEnvironmentVariable(CleanupDirectoryVariable, null);
+        Environment.SetEnvironmentVariable(LegacyRustCleanupPidVariable, null);
+        Environment.SetEnvironmentVariable(LegacyRustCleanupDirectoryVariable, null);
         if (!int.TryParse(processText, out var processId) || processId <= 0 || string.IsNullOrWhiteSpace(stageDirectory))
         {
+            StartLegacyRustStageCleanup(legacyProcessText, legacyStageDirectory);
             return;
         }
 
@@ -1117,6 +1212,7 @@ public static class UpdateService
         var installDirectory = executable is null ? null : Path.GetDirectoryName(Path.GetFullPath(executable));
         if (installDirectory is null || !IsOwnedStagingDirectory(installDirectory, stageDirectory))
         {
+            StartLegacyRustStageCleanup(legacyProcessText, legacyStageDirectory);
             return;
         }
 
@@ -1132,6 +1228,10 @@ public static class UpdateService
             }
             catch (InvalidOperationException)
             {
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                return;
             }
 
             for (var attempt = 0; attempt < 30; attempt++)
@@ -1149,6 +1249,44 @@ public static class UpdateService
                 {
                     await Task.Delay(1000).ConfigureAwait(false);
                 }
+            }
+        });
+    }
+
+    private static void StartLegacyRustStageCleanup(string? processText, string? stagingDirectory)
+    {
+        if (!int.TryParse(processText, out var processId) || processId <= 0 ||
+            string.IsNullOrWhiteSpace(stagingDirectory))
+        {
+            return;
+        }
+
+        var executable = Environment.ProcessPath;
+        var installDirectory = executable is null ? null : Path.GetDirectoryName(Path.GetFullPath(executable));
+        if (installDirectory is null || !IsLegacyRustStagingDirectory(installDirectory, stagingDirectory))
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var helper = Process.GetProcessById(processId);
+                if (!helper.WaitForExit((int)ParentWaitLimit.TotalMilliseconds))
+                    return;
+            }
+            catch (ArgumentException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            for (var attempt = 0; attempt < 30; attempt++)
+            {
+                CleanupLegacyRustStagingDirectory(installDirectory, stagingDirectory);
+                if (!Directory.Exists(NormalizeWindowsPathForComparison(stagingDirectory)))
+                    return;
+                await Task.Delay(1000).ConfigureAwait(false);
             }
         });
     }

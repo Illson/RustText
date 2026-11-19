@@ -58,6 +58,8 @@ jobs:
             $reader.Dispose()
           }
 
+          ./tools/Package-RustText.ps1 -Executable $files[0].FullName -OutputDirectory (Join-Path $env:RUNNER_TEMP 'rusttext-release-packages')
+
           $managedInput = Resolve-Path -LiteralPath 'src/RustText/obj/Release/net11.0/win-x64/rusttext.dll'
           $reader = [System.Reflection.PortableExecutable.PEReader]::new([IO.File]::OpenRead($managedInput.Path))
           try {
