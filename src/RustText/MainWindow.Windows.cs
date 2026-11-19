@@ -64,8 +64,8 @@ public partial class MainWindow
     private sealed record WorkspaceViewState(Dictionary<long, WorkTab> Tabs, Group Root, Group Active, bool Home,
         double Width, double Height, bool Maximized, bool WordWrap, double FontSize, StorageService Storage, List<SessionTab> ClosedTabs);
 
-    private sealed record SessionViewSnapshot(MainWindow Owner, Dictionary<long, WorkTab> Tabs, Group Root, Group Active,
-        WorkTab[] OrderedTabs, double Width, double Height, bool Maximized, bool WordWrap, double FontSize);
+    private WorkspaceViewState CaptureWorkspaceView() => new(_tabs, _root, _active, _home,
+        Width, Height, WindowState == WindowState.Maximized, _wordWrap, _fontSize, SessionStorage, _closedTabs);
 
     private StorageService SessionStorage => _workspace.GetStorage(_workspaceId, _windowId, _shareDefaultSession);
     private static string StorageCacheKey(StorageService storage) => Path.GetFullPath(storage.RootDirectory)

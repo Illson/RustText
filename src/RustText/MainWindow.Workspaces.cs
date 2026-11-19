@@ -191,8 +191,7 @@ public partial class MainWindow
         await SaveWorkspaceSessionAsync(excludeWindow: null);
         await _workspace.CatalogStore.SetWindowWorkspaceAsync(_windowId, workspaceId, _lifetime.Token);
         _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-        _workspaceViews[_workspaceId] = new WorkspaceViewState(_tabs, _root, _active, _home,
-            Width, Height, WindowState == WindowState.Maximized, _wordWrap, _fontSize, SessionStorage, _closedTabs);
+        _workspaceViews[_workspaceId] = CaptureWorkspaceView();
         CloseSearchPanel();
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids) grid.Children.Clear();

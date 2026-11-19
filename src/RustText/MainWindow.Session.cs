@@ -271,281 +271,104 @@ public partial class MainWindow
 
     private async Task SaveWorkspaceSessionAsync(MainWindow? excludeWindow, SessionTab? forgetClosedTab = null)
     {
-        var forgetClosedId = forgetClosedTab?.Id;
-        var cacheKey = WorkspaceCacheKey;
-        var workspaceId = _workspaceId;
-        var windowId = _windowId;
-        var storage = SessionStorage;
-        var closedTabs = _closedTabs;
-        if (_workspace.UnavailableSessions.Contains(cacheKey))
+        var activeStorage = SessionStorage;
+        var activeTabs = _tabs;
+        if (forgetClosedTab is null && ((!_restoreFinished && !_closing) || (_startEmpty && _tabs.Count == 0)))
             return;
-        if (_startEmpty && _tabs.Count == 0 && forgetClosedId is null)
-            return;
-        if (!_restoreFinished && !_closing && forgetClosedId is null)
-        {
-            return;
-        }
 
         await _workspace.SaveGate.WaitAsync();
         try
         {
-            if (_workspaceId != workspaceId || _windowId != windowId
-                || !string.Equals(WorkspaceCacheKey, cacheKey, StringComparison.Ordinal)
-                || !ReferenceEquals(SessionStorage, storage))
-                return;
-
-            var windows = workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
-                && (windowId == WorkspaceCatalogStore.PrimaryWindowId || _shareDefaultSession)
-                ? _workspace.Windows.Where(window => !window._closed
-                    && !ReferenceEquals(window, excludeWindow) && window._workspaceId == workspaceId
-                    && (window._windowId == WorkspaceCatalogStore.PrimaryWindowId || window._shareDefaultSession)).ToArray()
-                : _workspace.Windows.Where(window => ReferenceEquals(window, this) && window._workspaceId == workspaceId && window._windowId == windowId && !window._closed
-                    && !ReferenceEquals(window, excludeWindow)).ToArray();
-            if (windows.Length == 0) return;
-            var homeWindow = windows[0];
-            var windowKeys = windows.ToDictionary(window => window, window => window.WorkspaceCacheKey);
-            var entries = windows.SelectMany(window => window.TabsInVisualOrder().Select(tab => (Window: window, CacheKey: windowKeys[window], Tab: tab))).ToArray();
-            var tabs = entries.Select(entry => entry.Tab).ToArray();
-            var recoveries = tabs.Select(tab => tab.Recovery).ToArray();
-            var state = entries.Select(entry => entry.Window.CaptureTab(entry.Tab)).ToList();
-            var index = homeWindow.ActiveTab is { } active ? Array.IndexOf(tabs, active) : 0;
-            var width = double.IsFinite(homeWindow.Width) ? homeWindow.Width : 1080;
-            var height = double.IsFinite(homeWindow.Height) ? homeWindow.Height : 700;
-            var capturedClosedTabs = closedTabs.ToArray();
-            var session = new SessionState(state, capturedClosedTabs.Where(tab => tab.Id != forgetClosedId).Take(100).ToList(),
-                Math.Max(0, index), width, height, homeWindow.WindowState == WindowState.Maximized,
-                homeWindow._wordWrap, homeWindow._fontSize, homeWindow.CaptureLayout(homeWindow._root), homeWindow._active.Id);
-            var fingerprint = CheckpointFingerprint(session, tabs);
-            if (forgetClosedId is null && !_closing && _workspace.GetLastCheckpoint(cacheKey) == fingerprint)
+            if (!ReferenceEquals(activeStorage, SessionStorage) || !ReferenceEquals(activeTabs, _tabs)) return;
+            var stores = _workspaceViews.Values.Select(view => view.Storage).Prepend(activeStorage).Distinct().ToArray();
+            foreach (var storage in stores)
             {
-                await SaveCachedWorkspaceViewsAsync(excludeWindow);
-                return;
+                if (_workspace.UnavailableSessions.Contains(StorageCacheKey(storage))) continue;
+                var isActive = ReferenceEquals(storage, activeStorage);
+                var views = SessionViews(storage, isActive ? excludeWindow : null).ToList();
+                if (views.Count == 0) continue;
+                await SaveSessionViewsAsync(storage, views, isActive ? forgetClosedTab : null, isActive && _closing);
             }
-
-            var drafts = new Dictionary<long, Func<TextReader>>();
-            var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
-            for (var i = 0; i < tabs.Length; i++)
-            {
-                var tab = tabs[i];
-                if (tab.Editor is not { } editor || !(tab.Dirty || tab.Path is null)) continue;
-
-                var document = editor.Document;
-                liveDrafts.Add(tab.Id, (document, tab.Revision));
-                if (entries[i].Window.FindSavedLiveDraft(tab) is { } previous)
-                {
-                    session.Tabs[i] = session.Tabs[i] with { DraftRef = previous.DraftRef, DraftSha256 = previous.DraftSha256 };
-                }
-                else
-                {
-                    var snapshot = document.CreateSnapshot();
-                    drafts.Add(tab.Id, snapshot.CreateReader);
-                }
-            }
-
-            var committed = await storage.SaveSessionWithDraftReadersAsync(session, drafts);
-            foreach (var window in windows)
-                window._workspace.GetLiveDrafts(windowKeys[window]).Clear();
-            for (var i = 0; i < tabs.Length; i++)
-            {
-                var captured = session.Tabs[i];
-                var saved = committed.Tabs[i];
-                if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = saved;
-                if (recoveries[i] is { } recovery && ReferenceEquals(tabs[i].Recovery, recovery)) tabs[i].Recovery = saved;
-                if (saved.DraftRef is not null && liveDrafts.TryGetValue(saved.Id, out var live))
-                {
-                    entries[i].Window._workspace.GetLiveDrafts(entries[i].CacheKey)
-                        .Add(saved.Id, new(new(live.Document), live.Revision, saved));
-                }
-            }
-
-            var capturedClosed = session.ClosedTabs ?? [];
-            for (var i = 0; i < Math.Min(capturedClosed.Count, committed.ClosedTabs?.Count ?? 0); i++)
-            {
-                var closedIndex = Array.FindIndex(capturedClosedTabs, item => ReferenceEquals(item, capturedClosed[i]));
-                if (closedIndex >= 0 && closedIndex < closedTabs.Count
-                    && ReferenceEquals(closedTabs[closedIndex], capturedClosedTabs[closedIndex]))
-                    closedTabs[closedIndex] = committed.ClosedTabs![i];
-            }
-            _workspace.SetLastCheckpoint(cacheKey, fingerprint);
-            if (forgetClosedTab is { } removed)
-            {
-                closedTabs.RemoveAll(tab => tab.Id == removed.Id);
-                _workspace.SetLastCheckpoint(cacheKey, null);
-                var removeBackupDraft = removed.DraftRef is not null && committed.Tabs.All(tab => tab.Id != removed.Id);
-                await storage.RemoveHistoryFromPreviousCheckpointAsync(removed.Id, removeBackupDraft);
-                _workspace.SetLastCheckpoint(cacheKey, fingerprint);
-            }
-            await SaveCachedWorkspaceViewsAsync(excludeWindow);
         }
-        finally
+        finally { _workspace.SaveGate.Release(); }
+    }
+
+    private IEnumerable<(MainWindow Owner, WorkspaceViewState View)> SessionViews(StorageService storage, MainWindow? excludeWindow)
+    {
+        var windows = _workspace.Windows.Where(window => !window._closed && !ReferenceEquals(window, excludeWindow)).ToArray();
+        // A shared default session keeps the visible primary layout first, followed by detached and hidden views.
+        foreach (var window in windows.OrderByDescending(window => window._windowId == WorkspaceCatalogStore.PrimaryWindowId))
         {
-            _workspace.SaveGate.Release();
+            if (ReferenceEquals(window.SessionStorage, storage))
+                yield return (window, window.CaptureWorkspaceView());
+        }
+        foreach (var window in windows)
+        {
+            foreach (var view in window._workspaceViews.Values.Where(view => ReferenceEquals(view.Storage, storage)))
+                yield return (window, view);
         }
     }
 
-    private async Task SaveCachedWorkspaceViewsAsync(MainWindow? excludeWindow)
+    private async Task SaveSessionViewsAsync(StorageService storage,
+        List<(MainWindow Owner, WorkspaceViewState View)> views, SessionTab? forget, bool force)
     {
-        foreach (var (workspaceId, view) in _workspaceViews.ToArray())
+        var (owner, home) = views[0];
+        var entries = views.SelectMany(pair =>
         {
-            var storage = _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession);
-            var cacheKey = StorageCacheKey(storage);
-            if (ReferenceEquals(storage, _workspace.Storage)) continue;
-            if (_workspace.UnavailableSessions.Contains(cacheKey)) continue;
-
-            var byItem = view.Tabs.Values.ToDictionary(tab => tab.Item);
-            var tabs = Groups(view.Root).SelectMany(group => group.Tabs.Items.OfType<TabItem>())
-                .Select(item => byItem[item]).ToArray();
-            if (tabs.Length == 0) continue;
-
-            var stateTabs = tabs.Select(CaptureTab).ToList();
-            var activeTab = view.Active.Tabs.SelectedItem is TabItem activeItem
-                ? view.Tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, activeItem)) : null;
-            var index = Array.IndexOf(tabs, activeTab);
-            if (index < 0) index = 0;
-            var closedTabs = _workspace.GetClosedTabs(storage).ToArray();
-            var session = new SessionState(stateTabs, closedTabs.Take(100).ToList(), index,
-                double.IsFinite(view.Width) ? view.Width : 1080, double.IsFinite(view.Height) ? view.Height : 700,
-                view.Maximized, view.WordWrap, view.FontSize, CaptureLayout(view.Root, view.Tabs), view.Active.Id);
-            var fingerprint = CheckpointFingerprint(session, tabs);
-            if (_workspace.GetLastCheckpoint(cacheKey) == fingerprint) continue;
-
-            var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
-            var draftReaders = new Dictionary<long, Func<TextReader>>();
-            var existingDrafts = _workspace.GetLiveDrafts(cacheKey);
-            for (var i = 0; i < tabs.Length; i++)
-            {
-                var tab = tabs[i];
-                if (tab.Editor is not { } editor || !(tab.Dirty || tab.Path is null)) continue;
-                var document = editor.Document;
-                liveDrafts.Add(tab.Id, (document, tab.Revision));
-                if (existingDrafts.TryGetValue(tab.Id, out var previous)
-                    && previous.Revision == tab.Revision && previous.Document.TryGetTarget(out var priorDocument)
-                    && ReferenceEquals(priorDocument, document))
-                {
-                    stateTabs[i] = stateTabs[i] with { DraftRef = previous.Saved.DraftRef, DraftSha256 = previous.Saved.DraftSha256 };
-                }
-                else
-                {
-                    var snapshot = document.CreateSnapshot();
-                    draftReaders.Add(tab.Id, snapshot.CreateReader);
-                }
-            }
-
-            var committed = await storage.SaveSessionWithDraftReadersAsync(session, draftReaders, _lifetime.Token);
-            existingDrafts.Clear();
-            for (var i = 0; i < tabs.Length; i++)
-            {
-                var captured = stateTabs[i];
-                var saved = committed.Tabs[i];
-                if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = saved;
-                if (tabs[i].Recovery is { } recovery && ReferenceEquals(recovery, captured)) tabs[i].Recovery = saved;
-                if (saved.DraftRef is not null && liveDrafts.TryGetValue(saved.Id, out var live))
-                    existingDrafts.Add(saved.Id, new(new(live.Document), live.Revision, saved));
-            }
-            for (var i = 0; i < Math.Min(closedTabs.Length, committed.ClosedTabs?.Count ?? 0); i++)
-            {
-                var closedIndex = _workspace.GetClosedTabs(storage).FindIndex(item => ReferenceEquals(item, closedTabs[i]));
-                var history = _workspace.GetClosedTabs(storage);
-                if (closedIndex >= 0 && closedIndex < history.Count && ReferenceEquals(history[closedIndex], closedTabs[i]))
-                    history[closedIndex] = committed.ClosedTabs![i];
-            }
-            _workspace.SetLastCheckpoint(cacheKey, fingerprint);
-        }
-
-        await SaveSharedDefaultWorkspaceAsync(excludeWindow);
-    }
-
-    private async Task SaveSharedDefaultWorkspaceAsync(MainWindow? excludeWindow)
-    {
-        var storage = _workspace.Storage;
-        var cacheKey = StorageCacheKey(storage);
-        var views = new List<SessionViewSnapshot>();
-        var hasCachedDefaultView = false;
-        foreach (var window in _workspace.Windows.Where(window => !window._closed))
-        {
-            if (ReferenceEquals(window, excludeWindow)) continue;
-            if (window._workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
-                && ReferenceEquals(window.SessionStorage, storage))
-            {
-                views.Add(new SessionViewSnapshot(window, window._tabs, window._root, window._active,
-                    window.TabsInVisualOrder().ToArray(), window.Width, window.Height,
-                    window.WindowState == WindowState.Maximized, window._wordWrap, window._fontSize));
-            }
-
-            if (window._workspaceViews.TryGetValue(WorkspaceCatalogStore.DefaultWorkspaceId, out var cached)
-                && ReferenceEquals(window._workspace.GetStorage(WorkspaceCatalogStore.DefaultWorkspaceId,
-                    window._windowId, window._shareDefaultSession), storage))
-            {
-                hasCachedDefaultView = true;
-                var byItem = cached.Tabs.Values.ToDictionary(tab => tab.Item);
-                var ordered = Groups(cached.Root).SelectMany(group => group.Tabs.Items.OfType<TabItem>())
-                    .Select(item => byItem[item]).ToArray();
-                views.Add(new SessionViewSnapshot(window, cached.Tabs, cached.Root, cached.Active, ordered,
-                    cached.Width, cached.Height, cached.Maximized, cached.WordWrap, cached.FontSize));
-            }
-        }
-
-        if (views.Count == 0 || !hasCachedDefaultView) return;
-        var home = views.FirstOrDefault(view => view.Owner._workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
-                && view.Owner._windowId == WorkspaceCatalogStore.PrimaryWindowId)
-            ?? views.FirstOrDefault(view => view.Owner._workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId)
-            ?? views.FirstOrDefault(view => view.Owner._windowId == WorkspaceCatalogStore.PrimaryWindowId)
-            ?? views[0];
-        var entries = views.SelectMany(view => view.OrderedTabs.Select(tab => (View: view, Tab: tab))).ToArray();
+            var byItem = pair.View.Tabs.Values.ToDictionary(tab => tab.Item);
+            return pair.Owner.Groups(pair.View.Root).SelectMany(group => group.Tabs.Items.OfType<TabItem>())
+                .Select(item => (pair.Owner, Tab: byItem[item]));
+        }).ToArray();
         var tabs = entries.Select(entry => entry.Tab).ToArray();
         var recoveries = tabs.Select(tab => tab.Recovery).ToArray();
-        var stateTabs = entries.Select(entry => entry.View.Owner.CaptureTab(entry.Tab)).ToList();
-        var selected = home.Active.Tabs.SelectedItem is TabItem activeItem
-            ? home.Tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, activeItem)) : null;
-        var index = Array.IndexOf(tabs, selected);
-        if (index < 0) index = 0;
-        var closedTabs = _workspace.GetClosedTabs(storage);
-        var capturedClosedTabs = closedTabs.ToArray();
-        var session = new SessionState(stateTabs, capturedClosedTabs.Take(100).ToList(), index,
+        var state = entries.Select(entry => entry.Owner.CaptureTab(entry.Tab)).ToList();
+        var selected = home.Tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, home.Active.Tabs.SelectedItem));
+        var history = _workspace.GetClosedTabs(storage);
+        var capturedHistory = history.Where(tab => tab.Id != forget?.Id).Take(100).ToList();
+        var session = new SessionState(state, capturedHistory, Math.Max(0, Array.IndexOf(tabs, selected)),
             double.IsFinite(home.Width) ? home.Width : 1080, double.IsFinite(home.Height) ? home.Height : 700,
-            home.Maximized, home.WordWrap, home.FontSize, home.Owner.CaptureLayout(home.Root, home.Tabs), home.Active.Id);
+            home.Maximized, home.WordWrap, home.FontSize, owner.CaptureLayout(home.Root, home.Tabs), home.Active.Id);
+        var cacheKey = StorageCacheKey(storage);
         var fingerprint = CheckpointFingerprint(session, tabs);
-        if (_workspace.GetLastCheckpoint(cacheKey) == fingerprint) return;
+        if (!force && forget is null && _workspace.GetLastCheckpoint(cacheKey) == fingerprint) return;
 
-        var draftReaders = new Dictionary<long, Func<TextReader>>();
-        var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
-        var existingDrafts = _workspace.GetLiveDrafts(cacheKey);
+        var existing = _workspace.GetLiveDrafts(cacheKey);
+        var readers = new Dictionary<long, Func<TextReader>>();
+        var live = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
         for (var i = 0; i < tabs.Length; i++)
         {
             var tab = tabs[i];
             if (tab.Editor is not { } editor || !(tab.Dirty || tab.Path is null)) continue;
             var document = editor.Document;
-            liveDrafts[tab.Id] = (document, tab.Revision);
-            if (existingDrafts.TryGetValue(tab.Id, out var previous)
-                && previous.Revision == tab.Revision && previous.Document.TryGetTarget(out var previousDocument)
-                && ReferenceEquals(previousDocument, document))
-            {
-                stateTabs[i] = stateTabs[i] with { DraftRef = previous.Saved.DraftRef, DraftSha256 = previous.Saved.DraftSha256 };
-            }
+            live.Add(tab.Id, (document, tab.Revision));
+            if (existing.TryGetValue(tab.Id, out var prior) && prior.Revision == tab.Revision
+                && prior.Document.TryGetTarget(out var previousDocument) && ReferenceEquals(previousDocument, document))
+                state[i] = state[i] with { DraftRef = prior.Saved.DraftRef, DraftSha256 = prior.Saved.DraftSha256 };
             else
-            {
-                var snapshot = document.CreateSnapshot();
-                draftReaders.TryAdd(tab.Id, snapshot.CreateReader);
-            }
+                readers.Add(tab.Id, document.CreateSnapshot().CreateReader);
         }
 
-        var committed = await storage.SaveSessionWithDraftReadersAsync(session, draftReaders, _lifetime.Token);
-        existingDrafts.Clear();
+        var committed = await storage.SaveSessionWithDraftReadersAsync(session, readers, _lifetime.Token);
+        existing.Clear();
         for (var i = 0; i < tabs.Length; i++)
         {
-            var captured = stateTabs[i];
             var saved = committed.Tabs[i];
-            if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = saved;
+            if (ReferenceEquals(tabs[i].Deferred, state[i])) tabs[i].Deferred = saved;
             if (recoveries[i] is { } recovery && ReferenceEquals(tabs[i].Recovery, recovery)) tabs[i].Recovery = saved;
-            if (saved.DraftRef is not null && liveDrafts.TryGetValue(saved.Id, out var live))
-                existingDrafts[saved.Id] = new(new(live.Document), live.Revision, saved);
+            if (saved.DraftRef is not null && live.TryGetValue(saved.Id, out var document))
+                existing.Add(saved.Id, new(new(document.Document), document.Revision, saved));
         }
-        for (var i = 0; i < Math.Min(capturedClosedTabs.Length, committed.ClosedTabs?.Count ?? 0); i++)
+        for (var i = 0; i < Math.Min(capturedHistory.Count, committed.ClosedTabs?.Count ?? 0); i++)
         {
-            var closedIndex = closedTabs.FindIndex(tab => ReferenceEquals(tab, capturedClosedTabs[i]));
-            if (closedIndex >= 0 && closedIndex < closedTabs.Count
-                && ReferenceEquals(closedTabs[closedIndex], capturedClosedTabs[i]))
-                closedTabs[closedIndex] = committed.ClosedTabs![i];
+            var index = history.FindIndex(tab => ReferenceEquals(tab, capturedHistory[i]));
+            if (index >= 0) history[index] = committed.ClosedTabs![i];
+        }
+        if (forget is not null)
+        {
+            history.RemoveAll(tab => tab.Id == forget.Id);
+            _workspace.SetLastCheckpoint(cacheKey, null);
+            await storage.RemoveHistoryFromPreviousCheckpointAsync(forget.Id,
+                forget.DraftRef is not null && committed.Tabs.All(tab => tab.Id != forget.Id), _lifetime.Token);
         }
         _workspace.SetLastCheckpoint(cacheKey, fingerprint);
     }

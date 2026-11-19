@@ -262,14 +262,10 @@ public sealed class WorkspaceTests
             MainWindow? detached = null;
             try
             {
-                var constructor = typeof(MainWindow).GetConstructors(Private)
-                    .Single(candidate => candidate.GetParameters().Length == 5);
-                var windowId = "window:" + Guid.NewGuid().ToString("N");
-                detached = (MainWindow)constructor.Invoke([
-                    Array.Empty<string>(), Field(primary, "_workspace"), WorkspaceCatalogStore.DefaultWorkspaceId,
-                    windowId, true
-                ]);
-                detached.Show();
+                Invoke(primary, "NewTab", "detached scratch");
+                Invoke(primary, "OpenTabWindow", ActiveTab(primary), null);
+                detached = Read<List<MainWindow>>(Field(primary, "_workspace"), "Windows").Single(window => window != primary);
+                var windowId = (string)Field(detached, "_windowId");
                 await CallAsync(detached, "OpenPathsAsync", new[] { path }, false, null);
                 var primaryTab = Tabs(primary).Single(tab => Equals(Property(tab, "Path"), path));
                 var detachedTab = Tabs(detached).Single(tab => Equals(Property(tab, "Path"), path));
@@ -289,6 +285,12 @@ public sealed class WorkspaceTests
                 await CallAsync(detached, "SaveSessionAsync");
 
                 var defaultStorage = StorageService.OpenForTesting(profile);
+                await CallAsync(primary, "SaveSessionAsync");
+                var pointer = Path.Combine(defaultStorage.RootDirectory, "session", "latest.json");
+                var unchanged = await File.ReadAllTextAsync(pointer);
+                await CallAsync(primary, "SaveSessionAsync");
+                await CallAsync(detached, "SaveSessionAsync");
+                Assert.Equal(unchanged, await File.ReadAllTextAsync(pointer));
                 var sharedDefault = await defaultStorage.LoadSessionAsync();
                 Assert.Equal(2, sharedDefault!.Tabs.Count(tab => tab.Path == path));
                 foreach (var saved in sharedDefault.Tabs.Where(tab => tab.Path == path))
