@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Avalonia;
+using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
@@ -21,11 +22,32 @@ internal sealed class App : Application
         {
             var window = new MainWindow(desktop.Args ?? []);
             _window = window;
+            desktop.ShutdownMode = ShutdownMode.OnLastWindowClose;
             desktop.MainWindow = window;
-            window.Opened += (_, _) => DrainRequests();
+            TrackWindow(window);
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    internal static void TrackWindow(MainWindow window)
+    {
+        if (Current?.ApplicationLifetime is not IClassicDesktopStyleApplicationLifetime) return;
+
+        window.Opened += (_, _) =>
+        {
+            _window = window;
+            DrainRequests();
+        };
+        window.Activated += (_, _) => _window = window;
+        window.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_window, window))
+            {
+                _window = window.FindOtherWindow();
+                DrainRequests();
+            }
+        };
     }
 
     internal static Task ForwardAsync(LaunchRequest request, CancellationToken cancellationToken)
@@ -46,9 +68,13 @@ internal sealed class App : Application
         _drainingRequests = true;
         try
         {
-            while (Pending.TryDequeue(out var request))
+            while (window.IsVisible && Pending.TryDequeue(out var request))
             {
                 await window.ReceivePathsAsync(request.AbsolutePaths, request.Activate);
+                if (!window.IsVisible && _window is { IsVisible: true } next)
+                {
+                    window = next;
+                }
             }
         }
         finally

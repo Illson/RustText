@@ -12,9 +12,8 @@ namespace RustText.Demo;
 
 public partial class MainWindow
 {
-    private readonly StorageService _storage = StorageService.OpenDefault();
-    private readonly SemaphoreSlim _sessionGate = new(1, 1);
-    private readonly List<SessionTab> _closedTabs = [];
+    private readonly StorageService _storage;
+    private readonly List<SessionTab> _closedTabs;
     private IReadOnlyList<RecentFileEntry> _recent = [];
     private UserSettings _settings = new();
     private MenuItem? _recentMenu;
@@ -22,7 +21,6 @@ public partial class MainWindow
     private Action? _refreshHome;
     private DateTimeOffset _lastHomeRefresh;
     private bool _checkingDisk;
-    private int? _lastCheckpoint;
 
     private async Task RestoreSessionAsync()
     {
@@ -54,7 +52,7 @@ public partial class MainWindow
         _wordWrap = state.Wrap;
         _fontSize = Math.Clamp(state.FontSize, 8, 48);
         _closedTabs.AddRange((state.ClosedTabs ?? []).Take(100));
-        _nextId = Math.Max(_nextId, state.Tabs.Concat(_closedTabs).Select(tab => tab.Id).DefaultIfEmpty().Max());
+        _workspace.NextId = Math.Max(_workspace.NextId, state.Tabs.Concat(_closedTabs).Select(tab => tab.Id).DefaultIfEmpty().Max());
         _root = state.Layout is { } layout ? RestoreLayout(layout) : MakeGroup();
         var groups = Groups().ToArray();
         _active = groups.FirstOrDefault(group => group.Id == state.ActiveGroupId) ?? groups[0];
@@ -92,7 +90,7 @@ public partial class MainWindow
 
     private Group RestoreLayout(WorkspaceLayout state)
     {
-        _nextId = Math.Max(_nextId, state.GroupId);
+        _workspace.NextId = Math.Max(_workspace.NextId, state.GroupId);
         if (state.First is not { } first || state.Second is not { } second)
         {
             return MakeGroup(state.GroupId);
@@ -172,53 +170,77 @@ public partial class MainWindow
             return;
         }
 
-        await _sessionGate.WaitAsync();
+        await _workspace.SaveGate.WaitAsync();
         try
         {
-            var tabs = _tabs.Values.ToArray();
-            var state = tabs.Select(CaptureTab).ToList();
-            var drafts = new Dictionary<long, string>();
-            foreach (var tab in tabs)
-            {
-                if (tab.Editor is { } editor && (tab.Dirty || tab.Path is null))
-                {
-                    drafts[tab.Id] = editor.Text;
-                }
-            }
-
-            var index = ActiveTab is { } active ? Array.IndexOf(tabs, active) : 0;
-            var width = double.IsFinite(Width) ? Width : 1080;
-            var height = double.IsFinite(Height) ? Height : 700;
-
+            var windows = _workspace.Windows.Where(window => !window._closed).ToArray();
+            if (windows.Length == 0) return;
+            var homeWindow = windows[0];
+            var entries = windows.SelectMany(window => window.TabsInVisualOrder().Select(tab => (Window: window, Tab: tab))).ToArray();
+            var tabs = entries.Select(entry => entry.Tab).ToArray();
+            var state = entries.Select(entry => entry.Window.CaptureTab(entry.Tab)).ToList();
+            var index = homeWindow.ActiveTab is { } active ? Array.IndexOf(tabs, active) : 0;
+            var width = double.IsFinite(homeWindow.Width) ? homeWindow.Width : 1080;
+            var height = double.IsFinite(homeWindow.Height) ? homeWindow.Height : 700;
             var session = new SessionState(state, _closedTabs.Take(100).ToList(),
-                Math.Max(0, index), width, height, WindowState == WindowState.Maximized,
-                _wordWrap, _fontSize, CaptureLayout(_root), _active.Id);
+                Math.Max(0, index), width, height, homeWindow.WindowState == WindowState.Maximized,
+                homeWindow._wordWrap, homeWindow._fontSize, homeWindow.CaptureLayout(homeWindow._root), homeWindow._active.Id);
             var fingerprint = CheckpointFingerprint(session, tabs);
-            if (_closing || _lastCheckpoint != fingerprint)
+            if (!_closing && _workspace.LastCheckpoint == fingerprint) return;
+
+            var drafts = new Dictionary<long, Func<TextReader>>();
+            var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
+            for (var i = 0; i < tabs.Length; i++)
             {
-                var committed = await _storage.SaveSessionAsync(session, drafts);
-                for (var i = 0; i < tabs.Length; i++)
-                {
-                    var captured = session.Tabs[i];
-                    if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = committed.Tabs[i];
-                    if (ReferenceEquals(tabs[i].Recovery, captured)) tabs[i].Recovery = committed.Tabs[i];
-                }
+                var tab = tabs[i];
+                if (tab.Editor is not { } editor || !(tab.Dirty || tab.Path is null)) continue;
 
-                var capturedClosed = session.ClosedTabs ?? [];
-                for (var i = 0; i < Math.Min(capturedClosed.Count, committed.ClosedTabs?.Count ?? 0); i++)
+                var document = editor.Document;
+                liveDrafts.Add(tab.Id, (document, tab.Revision));
+                if (FindSavedLiveDraft(tab) is { } previous)
                 {
-                    var closedIndex = _closedTabs.FindIndex(item => ReferenceEquals(item, capturedClosed[i]));
-                    if (closedIndex >= 0) _closedTabs[closedIndex] = committed.ClosedTabs![i];
+                    session.Tabs[i] = session.Tabs[i] with { DraftRef = previous.DraftRef, DraftSha256 = previous.DraftSha256 };
                 }
-
-                _lastCheckpoint = fingerprint;
+                else
+                {
+                    var snapshot = document.CreateSnapshot();
+                    drafts.Add(tab.Id, snapshot.CreateReader);
+                }
             }
+
+            var committed = await _storage.SaveSessionWithDraftReadersAsync(session, drafts);
+            _workspace.LiveDrafts.Clear();
+            for (var i = 0; i < tabs.Length; i++)
+            {
+                var captured = session.Tabs[i];
+                var saved = committed.Tabs[i];
+                if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = saved;
+                if (ReferenceEquals(tabs[i].Recovery, captured)) tabs[i].Recovery = saved;
+                if (saved.DraftRef is not null && liveDrafts.TryGetValue(saved.Id, out var live))
+                {
+                    _workspace.LiveDrafts.Add(saved.Id, new(new(live.Document), live.Revision, saved));
+                }
+            }
+
+            var capturedClosed = session.ClosedTabs ?? [];
+            for (var i = 0; i < Math.Min(capturedClosed.Count, committed.ClosedTabs?.Count ?? 0); i++)
+            {
+                var closedIndex = _closedTabs.FindIndex(item => ReferenceEquals(item, capturedClosed[i]));
+                if (closedIndex >= 0) _closedTabs[closedIndex] = committed.ClosedTabs![i];
+            }
+            _workspace.LastCheckpoint = fingerprint;
         }
         finally
         {
-            _sessionGate.Release();
+            _workspace.SaveGate.Release();
         }
     }
+
+    private SessionTab? FindSavedLiveDraft(WorkTab tab) =>
+        _workspace.LiveDrafts.TryGetValue(tab.Id, out var saved)
+        && saved.Revision == tab.Revision
+        && saved.Document.TryGetTarget(out var document)
+        && ReferenceEquals(document, tab.Editor?.Document) ? saved.Saved : null;
 
     private static int CheckpointFingerprint(SessionState state, WorkTab[] tabs)
     {
@@ -479,7 +501,15 @@ public partial class MainWindow
         var saved = CaptureTab(tab);
         if (tab.Editor is { } editor && tab.Path is null)
         {
-            saved = await _storage.SaveClosedDraftAsync(saved, editor.Text, _lifetime.Token);
+            if (FindSavedLiveDraft(tab) is { } existingDraft)
+            {
+                saved = saved with { DraftRef = existingDraft.DraftRef, DraftSha256 = existingDraft.DraftSha256 };
+            }
+            else
+            {
+                var snapshot = editor.Document.CreateSnapshot();
+                saved = await _storage.SaveClosedDraftAsync(saved, snapshot.CreateReader, _lifetime.Token);
+            }
         }
 
         _closedTabs.RemoveAll(item => item.Id == saved.Id);
@@ -495,6 +525,23 @@ public partial class MainWindow
     private Task RestoreLastClosedAsync() => _closedTabs.Count > 0 ? RestoreClosedAsync(_closedTabs[0]) : Task.CompletedTask;
 
     private async Task RestoreClosedAsync(SessionTab saved)
+    {
+        if (!_workspace.RestoringClosedTabs.Add(saved.Id))
+        {
+            return;
+        }
+
+        try
+        {
+            await RestoreClosedCoreAsync(saved);
+        }
+        finally
+        {
+            _workspace.RestoringClosedTabs.Remove(saved.Id);
+        }
+    }
+
+    private async Task RestoreClosedCoreAsync(SessionTab saved)
     {
         if (saved is { Path: { } path, DraftRef: null })
         {
@@ -653,13 +700,38 @@ public partial class MainWindow
             Foreground = FocusTheme.Text,
             BorderBrush = FocusTheme.Border
         };
-        var rows = new StackPanel { Spacing = 3 };
+        var recentRows = new StackPanel { Spacing = 3 };
+        var closedRows = new StackPanel { Spacing = 3 };
         var footer = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
         var index = 0;
+        var closedSection = new StackPanel { Spacing = 5 };
+        closedSection.Children.Add(new TextBlock { Text = "Закрытые вкладки", Foreground = FocusTheme.Text, FontSize = 16 });
+        closedSection.Children.Add(closedRows);
         void Rebuild()
         {
-            rows.Children.Clear();
+            recentRows.Children.Clear();
+            closedRows.Children.Clear();
             var term = input.Text?.Trim() ?? "";
+            var closed = _closedTabs
+                .Select(item => (Item: item, Name: ClosedTabDisplayName(item)))
+                .Where(entry => entry.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
+                    || entry.Item.Path?.Contains(term, StringComparison.OrdinalIgnoreCase) == true)
+                .ToArray();
+            foreach (var (item, name) in closed)
+            {
+                var label = FocusButton(Button($"{name}   {DescribeWork(item.LineCount, item.LastWorkedMs)}",
+                    () => Run(() => RestoreClosedAsync(item))));
+                label.HorizontalAlignment = HorizontalAlignment.Stretch;
+                label.HorizontalContentAlignment = HorizontalAlignment.Left;
+                if (item.Path is { } path)
+                {
+                    ToolTip.SetTip(label, path);
+                }
+
+                closedRows.Children.Add(label);
+            }
+            closedSection.IsVisible = closedRows.Children.Count > 0;
+
             var visible = _recent.Where(item => item.Path.Contains(term, StringComparison.OrdinalIgnoreCase)).ToArray();
             var count = Math.Max(1, (visible.Length + 15) / 16);
             index = Math.Clamp(index, 0, count - 1);
@@ -670,7 +742,7 @@ public partial class MainWindow
                 label.HorizontalAlignment = HorizontalAlignment.Stretch;
                 label.HorizontalContentAlignment = HorizontalAlignment.Left;
                 ToolTip.SetTip(label, entry.Path);
-                rows.Children.Add(label);
+                recentRows.Children.Add(label);
             }
 
             footer.Text = $"Страница {index + 1} из {count}";
@@ -701,7 +773,14 @@ public partial class MainWindow
         surface.Children.Add(head);
         Grid.SetRow(input, 1);
         surface.Children.Add(input);
-        var scroll = new ScrollViewer { Content = rows };
+        var historyRows = new StackPanel { Spacing = 14 };
+        historyRows.Children.Add(closedSection);
+
+        var recentSection = new StackPanel { Spacing = 5 };
+        recentSection.Children.Add(new TextBlock { Text = "Недавние файлы", Foreground = FocusTheme.Text, FontSize = 16 });
+        recentSection.Children.Add(recentRows);
+        historyRows.Children.Add(recentSection);
+        var scroll = new ScrollViewer { Content = historyRows };
         Grid.SetRow(scroll, 2);
         surface.Children.Add(scroll);
         Grid.SetRow(actions, 3);

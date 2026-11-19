@@ -1,5 +1,6 @@
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:chrome="using:Avalonia.Controls.Chrome"
              xmlns:local="using:RustText.Demo"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
@@ -94,6 +95,12 @@
                                        ListMedium="{x:Static local:FocusTheme.SelectionColor}" />
             </FluentTheme.Palettes>
         </FluentTheme>
+        <Style Selector="chrome|WindowDrawnDecorations /template/ Button#PART_FullScreenButton,
+                         chrome|WindowDrawnDecorations /template/ Button#PART_PopoverFullScreenButton,
+                         chrome|WindowDrawnDecorations /template/ Panel#PART_TitleTextPanel,
+                         chrome|WindowDrawnDecorations /template/ TextBlock#PART_PopoverTitleText">
+            <Setter Property="IsVisible" Value="False" />
+        </Style>
         <Style Selector="Window">
             <Setter Property="Background" Value="{x:Static local:FocusTheme.Chrome}" />
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />

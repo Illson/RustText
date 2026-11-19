@@ -35,7 +35,8 @@ internal sealed record LogTabState(
     string SearchText = "",
     LogFileIdentity? Identity = null,
     long Size = 0,
-    LogFingerprint? Fingerprint = null);
+    LogFingerprint? Fingerprint = null,
+    bool? IndexOptIn = null);
 
 internal sealed record LogFileIdentity(ulong Volume, int[] Id);
 internal sealed record LogSystemTime(long SecsSinceEpoch, uint NanosSinceEpoch);
@@ -47,6 +48,7 @@ internal sealed class LogView : UserControl, IDisposable
     private const int SearchResultsPerPage = 32;
     private const int MaximumSearchLineBytes = 1024 * 1024;
     private const int IndexBatchBytes = 16 * 1024 * 1024;
+    private const long LargeLogIndexOptInBytes = 128L * 1024 * 1024;
     private static readonly TimeSpan SearchRegexTimeout = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(1);
 
@@ -168,6 +170,7 @@ internal sealed class LogView : UserControl, IDisposable
     private bool _followEnd;
     private bool _autoRefresh;
     private bool _indexPaused;
+    private bool _indexOptIn;
     private bool _busy;
     private bool _closed;
     private bool _firstFrameReported;
@@ -200,7 +203,9 @@ internal sealed class LogView : UserControl, IDisposable
         _wordWrap = state?.WordWrap ?? false;
         _followEnd = restoreState?.FollowEnd ?? false;
         _autoRefresh = restoreState?.AutoRefresh ?? true;
-        _indexPaused = restoreState?.IndexPaused ?? false;
+        _indexOptIn = restoreState?.IndexOptIn == true;
+        _indexPaused = restoreState?.IndexPaused == true
+            || (_file.Length >= LargeLogIndexOptInBytes && !_indexOptIn);
         _searchBox.Text = restoreState?.SearchText ?? string.Empty;
         _regexBox.IsChecked = restoreState?.Regex ?? false;
         _caseBox.IsChecked = restoreState?.MatchCase ?? false;
@@ -262,7 +267,8 @@ internal sealed class LogView : UserControl, IDisposable
             _searchBox.Text ?? string.Empty,
             identity,
             size,
-            fingerprint);
+            fingerprint,
+            _indexOptIn);
     }
 
     private bool CanRestoreBookmark(LogTabState? state)
@@ -1618,6 +1624,7 @@ internal sealed class LogView : UserControl, IDisposable
                 SetStatus("Файл был заменён, очищен или перезаписан. Позиция и индекс сброшены.");
                 await LoadPageAsync(0, saveHistory: false);
             }
+            ApplyLargeLogIndexOptInPolicy();
             StartIndexIfNeeded();
             LoadMinimapSamples();
         }
@@ -1625,6 +1632,21 @@ internal sealed class LogView : UserControl, IDisposable
         {
             SetStatus($"Не удалось проверить лог. {error.Message}");
         }
+    }
+
+    private void ApplyLargeLogIndexOptInPolicy()
+    {
+        if (_file.Length < LargeLogIndexOptInBytes || _indexOptIn)
+        {
+            return;
+        }
+
+        _indexPaused = true;
+        if (_indexBuilding)
+        {
+            _indexCancellation?.Cancel();
+        }
+        RefreshButtons();
     }
 
     private void ToggleIndexing()
@@ -1639,6 +1661,7 @@ internal sealed class LogView : UserControl, IDisposable
         _indexPaused = !_indexPaused;
         if (!_indexPaused)
         {
+            _indexOptIn = true;
             StartIndexIfNeeded();
         }
         RefreshButtons();
@@ -1959,7 +1982,13 @@ internal sealed class LogView : UserControl, IDisposable
         _followButton.Foreground = _followEnd ? FocusTheme.Accent : FocusTheme.Text;
         _indexButton.Background = _indexPaused ? FocusTheme.Hover : Brushes.Transparent;
         _indexButton.Foreground = _indexPaused ? FocusTheme.Accent : FocusTheme.Text;
-        _indexButton.Content = _indexPaused ? "Продолжить индекс" : "Индексирование";
+        var largeIndexOptInRequired = _file.Length >= LargeLogIndexOptInBytes && !_indexOptIn;
+        _indexButton.Content = _indexPaused
+            ? largeIndexOptInRequired ? "Индексировать весь файл" : "Продолжить индекс"
+            : "Индексирование";
+        ToolTip.SetTip(_indexButton, _indexPaused && largeIndexOptInRequired
+            ? "Большой файл не индексируется автоматически. Нажмите, чтобы начать полный проход."
+            : "Построить индекс строк для навигации по файлу.");
         _wrapButton.Content = _wordWrap ? "Перенос: вкл." : "Перенос: выкл.";
         _wrapButton.Background = _wordWrap ? FocusTheme.Hover : Brushes.Transparent;
         _wrapButton.Foreground = _wordWrap ? FocusTheme.Accent : FocusTheme.Text;

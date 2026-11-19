@@ -15,6 +15,12 @@ internal sealed class StorageService
     private readonly string _drafts;
     private readonly string _versions;
     private readonly bool _hasProfileOverride;
+    private SessionState? _cachedSession;
+    private bool _hasCachedSession;
+    private bool _cachedSessionWasLatest;
+    private string? _cachedLatestPointer;
+    private string? _cachedPreviousPointer;
+    private Dictionary<string, (long Length, long LastWriteTicks)> _cachedFiles = new(StringComparer.OrdinalIgnoreCase);
 
     private StorageService(string profileBaseDirectory, bool hasProfileOverride)
     {
@@ -60,23 +66,86 @@ internal sealed class StorageService
         return Path.Combine(local, "RustText");
     }
 
+    private void CacheSession(SessionState? state, bool isLatest)
+    {
+        _cachedSession = state;
+        _hasCachedSession = true;
+        _cachedSessionWasLatest = isLatest;
+        var latest = Path.Combine(_checkpoints, "latest.json");
+        var previous = Path.Combine(_checkpoints, "previous.json");
+        _cachedLatestPointer = File.Exists(latest) ? File.ReadAllText(latest).Trim() : null;
+        _cachedPreviousPointer = File.Exists(previous) ? File.ReadAllText(previous).Trim() : null;
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pointer in new[] { _cachedLatestPointer, _cachedPreviousPointer })
+        {
+            if (pointer is null || Path.GetFileName(pointer) != pointer || !pointer.StartsWith("checkpoint-", StringComparison.Ordinal)) continue;
+            files.Add(Path.Combine(_checkpoints, pointer, "manifest.json"));
+        }
+        if (state is not null)
+        {
+            foreach (var tab in (state.Tabs ?? []).Concat(state.ClosedTabs ?? []))
+            {
+                if (tab.DraftRef is null) continue;
+                try { files.Add(ResolveAnyDraftReference(tab.DraftRef)); }
+                catch (Exception error) when (IsInvalidCheckpointException(error)) { }
+            }
+        }
+        _cachedFiles = files.ToDictionary(path => path, GetFileSignature, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private bool CachedFilesAreUnchanged()
+    {
+        var latestPath = Path.Combine(_checkpoints, "latest.json");
+        var previousPath = Path.Combine(_checkpoints, "previous.json");
+        var latest = File.Exists(latestPath) ? File.ReadAllText(latestPath).Trim() : null;
+        var previous = File.Exists(previousPath) ? File.ReadAllText(previousPath).Trim() : null;
+        return string.Equals(latest, _cachedLatestPointer, StringComparison.Ordinal)
+            && string.Equals(previous, _cachedPreviousPointer, StringComparison.Ordinal)
+            && _cachedFiles.All(entry => GetFileSignature(entry.Key) == entry.Value);
+    }
+
+    private static (long Length, long LastWriteTicks) GetFileSignature(string path)
+    {
+        var info = new FileInfo(path);
+        return info.Exists ? (info.Length, info.LastWriteTimeUtc.Ticks) : (-1, -1);
+    }
+
     public async Task<SessionState?> LoadSessionAsync(CancellationToken cancellationToken = default)
     {
         var current = Path.Combine(_checkpoints, "latest.json");
         var backup = Path.Combine(_checkpoints, "previous.json");
-        foreach (var path in new[] { current, backup })
+        foreach (var (path, isLatest) in new[] { (current, true), (backup, false) })
         {
             if (await ReadValidCheckpointAsync(path, cancellationToken).ConfigureAwait(false) is { } state)
+            {
+                CacheSession(state, isLatest);
                 return state;
+            }
         }
-        return await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
+        var legacy = await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
+        CacheSession(legacy, isLatest: false);
+        return legacy;
     }
 
     public async Task<SessionState> SaveSessionAsync(SessionState state, IReadOnlyDictionary<long, string>? drafts = null, CancellationToken cancellationToken = default)
     {
+        var readers = drafts?.ToDictionary(pair => pair.Key, pair => (Func<TextReader>)(() => new StringReader(pair.Value)));
+        return await SaveSessionWithDraftReadersAsync(state, readers, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<SessionState> SaveSessionWithDraftReadersAsync(
+        SessionState state,
+        IReadOnlyDictionary<long, Func<TextReader>>? drafts,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentNullException.ThrowIfNull(state);
         using var writerLock = AcquireSessionLock();
-        var fallbackState = await LoadSessionAsync(cancellationToken).ConfigureAwait(false);
+        // Startup and explicit loads always validate every referenced draft. Within this process,
+        // successful checkpoints are immutable and already validated, so a benign save can reuse
+        // the validated manifest without reading every large draft again.
+        var fallbackState = _hasCachedSession && CachedFilesAreUnchanged()
+            ? _cachedSession
+            : await LoadSessionAsync(cancellationToken).ConfigureAwait(false);
         var fallbackDrafts = (fallbackState?.Tabs ?? [])
             .Concat(fallbackState?.ClosedTabs ?? [])
             .Where(tab => tab.DraftRef is not null)
@@ -90,12 +159,27 @@ internal sealed class StorageService
             var draftRefs = new Dictionary<long, (string Reference, string Hash)>();
             if (drafts is not null)
             {
-                foreach (var (tabId, content) in drafts)
+                foreach (var (tabId, openReader) in drafts)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var name = $"draft-{tabId}.txt";
-                    await AtomicWriteAsync(Path.Combine(checkpoint, name), System.Text.Encoding.UTF8.GetBytes(content), cancellationToken).ConfigureAwait(false);
-                    draftRefs[tabId] = (Path.GetFileName(checkpoint) + "/" + name, Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content))));
+                    var (temporary, hash) = await WriteDraftStreamAsync(checkpoint, tabId, openReader, cancellationToken).ConfigureAwait(false);
+                    var previousDraft = fallbackDrafts.GetValueOrDefault(tabId);
+                    if (previousDraft is { DraftRef: not null, DraftSha256: not null }
+                        && hash.Equals(previousDraft.DraftSha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (previousDraft.DraftRef.StartsWith($"standalone/session-{tabId}-", StringComparison.Ordinal))
+                        {
+                            File.Delete(temporary);
+                            draftRefs[tabId] = (previousDraft.DraftRef, previousDraft.DraftSha256);
+                        }
+                        else
+                        {
+                            draftRefs[tabId] = await MoveToStableDraftAsync(temporary, tabId, hash, cancellationToken).ConfigureAwait(false);
+                        }
+                        continue;
+                    }
+
+                    draftRefs[tabId] = await MoveToStableDraftAsync(temporary, tabId, hash, cancellationToken).ConfigureAwait(false);
                 }
             }
             var tabs = new List<SessionTab>(state.Tabs.Count);
@@ -114,7 +198,7 @@ internal sealed class StorageService
             }
             var latest = Path.Combine(_checkpoints, "latest.json");
             var previous = Path.Combine(_checkpoints, "previous.json");
-            if (await ReadValidCheckpointAsync(latest, cancellationToken).ConfigureAwait(false) is not null)
+            if (_cachedSessionWasLatest && File.Exists(latest))
             {
                 var currentPointer = await File.ReadAllTextAsync(latest, cancellationToken).ConfigureAwait(false);
                 await AtomicWriteAsync(previous, System.Text.Encoding.UTF8.GetBytes(currentPointer.Trim()), cancellationToken).ConfigureAwait(false);
@@ -137,6 +221,8 @@ internal sealed class StorageService
                 }
                 retained.Add(old.Name);
             }
+            await PruneUnreferencedDraftsAsync(latest, previous, cancellationToken).ConfigureAwait(false);
+            CacheSession(snapshot, isLatest: true);
             return snapshot;
         }
         catch
@@ -186,10 +272,24 @@ internal sealed class StorageService
 
     public async Task<SessionTab> SaveClosedDraftAsync(SessionTab tab, string text, CancellationToken token = default)
     {
-        var file = Path.Combine(_drafts, $"closed-{tab.Id}.txt");
-        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
-        await AtomicWriteAsync(file, bytes, token).ConfigureAwait(false);
-        return tab with { DraftRef = "standalone/closed-" + tab.Id + ".txt", DraftSha256 = Convert.ToHexString(SHA256.HashData(bytes)) };
+        return await SaveClosedDraftAsync(tab, () => new StringReader(text), token).ConfigureAwait(false);
+    }
+
+    public async Task<SessionTab> SaveClosedDraftAsync(SessionTab tab, Func<TextReader> openReader, CancellationToken token = default)
+    {
+        var (temporary, hash) = await WriteDraftStreamAsync(_drafts, tab.Id, openReader, token).ConfigureAwait(false);
+        var name = $"closed-{tab.Id}-{hash}.txt";
+        var file = Path.Combine(_drafts, name);
+        try
+        {
+            File.Move(temporary, file, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(temporary); } catch { }
+            throw;
+        }
+        return tab with { DraftRef = "standalone/" + name, DraftSha256 = hash };
     }
 
     public async Task SaveDraftAsync(long tabId, string content, CancellationToken cancellationToken = default)
@@ -388,6 +488,15 @@ internal sealed class StorageService
             return tab;
         }
 
+        if (fallback is { DraftRef: not null, DraftSha256: not null }
+            && string.Equals(tab.DraftRef, fallback.DraftRef, StringComparison.Ordinal)
+            && string.Equals(tab.DraftSha256, fallback.DraftSha256, StringComparison.OrdinalIgnoreCase)
+            && (tab.DraftRef.StartsWith("standalone/", StringComparison.Ordinal)
+                || tab.DraftRef.StartsWith("legacy/", StringComparison.Ordinal)))
+        {
+            return tab;
+        }
+
         if (await TryPreserveDraftAsync(checkpoint, tab, token).ConfigureAwait(false) is { } preserved)
         {
             return preserved;
@@ -399,6 +508,89 @@ internal sealed class StorageService
         }
 
         return tab with { DraftRef = null, DraftSha256 = null };
+    }
+
+    private static async Task<(string TemporaryPath, string Hash)> WriteDraftStreamAsync(
+        string checkpoint,
+        long tabId,
+        Func<TextReader> openReader,
+        CancellationToken token)
+    {
+        var temporary = Path.Combine(checkpoint, $"draft-{tabId}-{Guid.NewGuid():N}.tmp");
+        var encoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        var encoder = encoding.GetEncoder();
+        var chars = new char[32 * 1024];
+        var bytes = new byte[encoding.GetMaxByteCount(chars.Length)];
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        try
+        {
+            using var reader = openReader();
+            await using var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
+            while (true)
+            {
+                var read = await reader.ReadAsync(chars.AsMemory(), token).ConfigureAwait(false);
+                var flush = read == 0;
+                encoder.Convert(chars, 0, read, bytes, 0, bytes.Length, flush,
+                    out _, out var bytesUsed, out var completed);
+                if (bytesUsed > 0)
+                {
+                    hash.AppendData(bytes, 0, bytesUsed);
+                    await output.WriteAsync(bytes.AsMemory(0, bytesUsed), token).ConfigureAwait(false);
+                }
+                if (flush && completed) break;
+            }
+            await output.FlushAsync(token).ConfigureAwait(false);
+            output.Flush(flushToDisk: true);
+            return (temporary, Convert.ToHexString(hash.GetHashAndReset()));
+        }
+        catch
+        {
+            try { File.Delete(temporary); } catch { }
+            throw;
+        }
+    }
+
+    private Task<(string Reference, string Hash)> MoveToStableDraftAsync(string temporary, long tabId, string hash, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var name = $"session-{tabId}-{hash}.txt";
+        File.Move(temporary, Path.Combine(_drafts, name), overwrite: true);
+        return Task.FromResult(("standalone/" + name, hash));
+    }
+
+    private async Task PruneUnreferencedDraftsAsync(string latest, string previous, CancellationToken token)
+    {
+        var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pointer in new[] { latest, previous })
+        {
+            if (!File.Exists(pointer)) continue;
+            var checkpointName = (await File.ReadAllTextAsync(pointer, token).ConfigureAwait(false)).Trim();
+            if (Path.GetFileName(checkpointName) != checkpointName || !checkpointName.StartsWith("checkpoint-", StringComparison.Ordinal)) continue;
+            var manifest = Path.Combine(_checkpoints, checkpointName, "manifest.json");
+            if (!File.Exists(manifest)) continue;
+            await using var stream = File.OpenRead(manifest);
+            var state = await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.SessionState, token).ConfigureAwait(false);
+            if (state is null) continue;
+            foreach (var tab in (state.Tabs ?? []).Concat(state.ClosedTabs ?? []))
+            {
+                if (tab.DraftRef is not { } reference) continue;
+                try { referenced.Add(Path.GetFullPath(ResolveAnyDraftReference(reference))); }
+                catch (Exception error) when (IsInvalidCheckpointException(error)) { }
+            }
+        }
+
+        var root = Path.GetFullPath(_drafts) + Path.DirectorySeparatorChar;
+        foreach (var file in new DirectoryInfo(_drafts).EnumerateFiles())
+        {
+            token.ThrowIfCancellationRequested();
+            if (!file.Name.StartsWith("session-", StringComparison.Ordinal)
+                && !file.Name.StartsWith("closed-", StringComparison.Ordinal)) continue;
+            var fullPath = Path.GetFullPath(file.FullName);
+            if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase) || referenced.Contains(fullPath)) continue;
+            try { file.Delete(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
     }
 
     private async Task<SessionTab?> TryPreserveDraftAsync(string checkpoint, SessionTab tab, CancellationToken token)
@@ -419,8 +611,6 @@ internal sealed class StorageService
             return null;
         }
 
-        var name = $"draft-{tab.Id}.txt";
-        var destination = Path.Combine(checkpoint, name);
         await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var hash = await SHA256.HashDataAsync(input, token).ConfigureAwait(false);
         var sha = Convert.ToHexString(hash);
@@ -429,11 +619,26 @@ internal sealed class StorageService
             return null;
         }
 
+        var name = $"session-{tab.Id}-{sha}.txt";
+        var destination = Path.Combine(_drafts, name);
+        var temporary = destination + $".{Guid.NewGuid():N}.tmp";
         input.Position = 0;
-        await using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
-        await input.CopyToAsync(output, token).ConfigureAwait(false);
-        await output.FlushAsync(token).ConfigureAwait(false); output.Flush(true);
-        return tab with { DraftRef = Path.GetFileName(checkpoint) + "/" + name, DraftSha256 = sha };
+        try
+        {
+            await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await input.CopyToAsync(output, token).ConfigureAwait(false);
+                await output.FlushAsync(token).ConfigureAwait(false);
+                output.Flush(true);
+            }
+            File.Move(temporary, destination, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(temporary); } catch { }
+            throw;
+        }
+        return tab with { DraftRef = "standalone/" + name, DraftSha256 = sha };
     }
 
     private async Task<SessionState?> LoadLegacySessionAsync(CancellationToken token)

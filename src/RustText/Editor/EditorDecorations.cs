@@ -10,9 +10,11 @@ using AvaloniaEdit.Rendering;
 
 namespace RustText.Demo.Editor;
 
-internal sealed class DocumentMinimap : Control
+internal sealed class DocumentMinimap : Control, IDisposable
 {
     private readonly TextEditor _editor;
+    private readonly EventHandler _textChanged;
+    private readonly EventHandler _visualLinesChanged;
     private bool _dragging;
 
     public DocumentMinimap(TextEditor editor)
@@ -20,9 +22,17 @@ internal sealed class DocumentMinimap : Control
         _editor = editor;
         Width = 72;
         Cursor = new Cursor(StandardCursorType.Arrow);
-        _editor.TextChanged += (_, _) => InvalidateVisual();
-        _editor.TextArea.TextView.VisualLinesChanged += (_, _) => InvalidateVisual();
+        _textChanged = (_, _) => InvalidateVisual();
+        _visualLinesChanged = (_, _) => InvalidateVisual();
+        _editor.TextChanged += _textChanged;
+        _editor.TextArea.TextView.VisualLinesChanged += _visualLinesChanged;
         ToolTip.SetTip(this, "Перейти к области документа");
+    }
+
+    public void Dispose()
+    {
+        _editor.TextChanged -= _textChanged;
+        _editor.TextArea.TextView.VisualLinesChanged -= _visualLinesChanged;
     }
 
     public override void Render(DrawingContext context)

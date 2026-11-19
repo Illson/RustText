@@ -9,6 +9,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using RustText.Demo.Logs;
 
 namespace RustText.Demo;
@@ -23,7 +24,6 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _checkpoint;
     private Group _root;
     private Group _active;
-    private long _nextId;
     private bool _home;
     private bool _closing;
     private bool _closed;
@@ -38,8 +38,18 @@ public partial class MainWindow : Window
     {
     }
 
-    internal MainWindow(string[] startupPaths)
+    internal MainWindow(string[] startupPaths) : this(startupPaths, null)
     {
+    }
+
+    private MainWindow(string[] startupPaths, WorkspaceSession? workspace)
+    {
+        _workspace = workspace ?? new WorkspaceSession();
+        _storage = _workspace.Storage;
+        _closedTabs = _workspace.ClosedTabs;
+        _restoreWorkspace = workspace is null;
+        _workspace.Windows.Add(this);
+        Closed += (_, _) => _workspace.Windows.Remove(this);
         _startupPaths = startupPaths;
         InitializeComponent();
         _root = _active = MakeGroup();
@@ -54,7 +64,7 @@ public partial class MainWindow : Window
                 _refreshHome?.Invoke();
             }
 
-            if (_sessionGate.CurrentCount > 0)
+            if (_workspace.SaveGate.CurrentCount > 0)
             {
                 Run(SaveSessionAsync);
             }
@@ -72,6 +82,14 @@ public partial class MainWindow : Window
     protected override async void OnOpened(EventArgs e)
     {
         base.OnOpened(e);
+        EnsureIdleUnloadTimer();
+        if (!_restoreWorkspace)
+        {
+            _restoreFinished = true;
+            _checkpoint.Start();
+            return;
+        }
+
         await GuardAsync(async () =>
         {
             await RestoreSessionAsync();
@@ -147,7 +165,22 @@ public partial class MainWindow : Window
         }, RoutingStrategies.Tunnel);
         group.Tabs.DoubleTapped += (_, e) =>
         {
-            if (ReferenceEquals(e.Source, group.Tabs) || e.Source is Border { Name: "TabBar" })
+            var inTabBar = false;
+            for (var visual = e.Source as Visual; visual is not null; visual = visual.GetVisualParent())
+            {
+                if (visual is TabItem || visual is Avalonia.Controls.Button || visual is Avalonia.Controls.Primitives.ScrollBar)
+                {
+                    break;
+                }
+
+                if (visual is Border { Name: "TabBar" })
+                {
+                    inTabBar = true;
+                    break;
+                }
+            }
+
+            if (inTabBar)
             {
                 _active = group;
                 NewTab();
@@ -163,7 +196,7 @@ public partial class MainWindow : Window
         DragDrop.SetAllowDrop(control, true);
         control.AddHandler(DragDrop.DragOverEvent, (_, e) =>
         {
-            if (e.DataTransfer.TryGetValue(TabDrag) is not null)
+            if (GetTabTransfer(e.DataTransfer) is { Tab: { Loading: false, Closing: false } })
             {
                 e.DragEffects = DragDropEffects.Move;
                 e.Handled = true;
@@ -171,10 +204,14 @@ public partial class MainWindow : Window
         });
         control.AddHandler(DragDrop.DropEvent, (_, e) =>
         {
-            if (long.TryParse(e.DataTransfer.TryGetValue(TabDrag), out var id) && _tabs.TryGetValue(id, out var tab))
+            if (!_closing && GetTabTransfer(e.DataTransfer) is { Tab: { Loading: false, Closing: false } } drag)
             {
-                MoveTab(tab, insertBefore?.Group ?? group, insertBefore);
                 e.Handled = true;
+                drag.Source.TransferTab(drag.Tab, this, insertBefore?.Group ?? group, insertBefore);
+                if (drag.Source._tabs.Count == 0 && !ReferenceEquals(drag.Source, this))
+                {
+                    drag.Source.Run(drag.Source.ShowHomeAsync);
+                }
             }
         });
     }
@@ -183,7 +220,7 @@ public partial class MainWindow : Window
     {
         group ??= _active;
         var tab = new WorkTab(id ?? NextId(), group);
-        _nextId = Math.Max(_nextId, tab.Id);
+        _workspace.NextId = Math.Max(_workspace.NextId, tab.Id);
         _tabs.Add(tab.Id, tab);
         var label = new TextBlock
         {
@@ -215,6 +252,7 @@ public partial class MainWindow : Window
             {
                 Command("Показать в Проводнике", () => RevealTab(tab)),
                 Command("Скопировать путь", () => Run(() => CopyTextAsync(tab.Path))),
+                Command("Переместить в новое окно", () => OpenTabWindow(tab)),
                 Command("Закрыть", () => Run(() => CloseTabAsync(tab)))
             }
         };
@@ -222,7 +260,7 @@ public partial class MainWindow : Window
         Point origin = default;
         header.AddHandler(PointerPressedEvent, (_, e) =>
         {
-            if (e.GetCurrentPoint(header).Properties.IsLeftButtonPressed)
+            if (e.GetCurrentPoint(header).Properties.IsLeftButtonPressed && e.Source is not Avalonia.Controls.Button)
             {
                 pressed = e;
                 origin = e.GetPosition(header);
@@ -237,9 +275,7 @@ public partial class MainWindow : Window
                 if (Math.Abs(distance.X) + Math.Abs(distance.Y) >= 8)
                 {
                     pressed = null;
-                    var data = new DataTransfer();
-                    data.Add(DataTransferItem.Create(TabDrag, tab.Id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-                    await DragDrop.DoDragDropAsync(start, data, DragDropEffects.Move);
+                    await GuardAsync(() => DragTabAsync(start, tab));
                 }
             }
         };
@@ -466,7 +502,7 @@ public partial class MainWindow : Window
         group.Tabs.SelectedItem is TabItem item ? _tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, item)) : null;
 
     private WorkTab? ActiveTab => _home ? null : SelectedIn(_active);
-    private long NextId() => ++_nextId;
+    private long NextId() => ++_workspace.NextId;
 
     private void ActivateTab(WorkTab tab)
     {
@@ -476,6 +512,7 @@ public partial class MainWindow : Window
         }
 
         _active = tab.Group;
+        tab.LastWorked = DateTimeOffset.Now;
         if (tab.Deferred is not null && !tab.Loading)
         {
             Run(() => ActivateDeferredAsync(tab));
@@ -527,11 +564,18 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_tabs.Values.Any(tab => tab.Closing))
+        {
+            SetStatus("Дождитесь сохранения закрываемой вкладки.");
+            return;
+        }
+
         _closing = true;
         _checkpoint.Stop();
         try
         {
             await SaveSessionAsync();
+            ReturnTabsToOtherWindow();
         }
         catch (Exception error) when (IsUserError(error))
         {
@@ -542,12 +586,14 @@ public partial class MainWindow : Window
         }
 
         _closed = true;
+        _idleUnloadTimer?.Stop();
         _lifetime.Cancel();
         _searchCancellation?.Cancel();
         foreach (var tab in _tabs.Values)
         {
             tab.LoadCancellation?.Cancel();
             tab.Log?.Close();
+            DetachEditor(tab);
         }
 
         Close();

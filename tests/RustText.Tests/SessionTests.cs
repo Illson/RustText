@@ -91,7 +91,7 @@ public sealed class SessionTests
     }
 
     [Fact]
-    public async Task StaleDeferredDraftReference_ResolvesAfterFourCheckpointRotations()
+    public async Task UnchangedDeferredDraftReference_IsReusedAcrossCheckpointRotations()
     {
         using var directory = new TempDirectory();
         var storage = StorageService.OpenForTesting(directory.Path);
@@ -107,9 +107,30 @@ public sealed class SessionTests
             await storage.SaveSessionAsync(current);
         }
 
-        Assert.False(File.Exists(storage.GetDraftPath(stale)!));
+        Assert.True(File.Exists(storage.GetDraftPath(stale)!));
+        Assert.Single(Directory.GetFiles(Path.Combine(storage.RootDirectory, "drafts"), "session-9-*.txt"));
         var resolved = await storage.ResolveCurrentDraftAsync(stale);
         Assert.Equal(text, await storage.LoadDraftAsync(resolved));
+    }
+
+    [Fact]
+    public async Task SaveSessionWithDraftReaders_StreamsUtf8AndReusesUnchangedReference()
+    {
+        using var directory = new TempDirectory();
+        var storage = StorageService.OpenForTesting(directory.Path);
+        const string text = "стриминговый черновик 💡";
+        var state = State(new SessionTab(31, null, TextEncodingKind.Utf8));
+        var first = await storage.SaveSessionWithDraftReadersAsync(state,
+            new Dictionary<long, Func<TextReader>> { [31] = () => new StringReader(text) });
+        var firstTab = first.Tabs.Single();
+        Assert.Equal(text, await storage.LoadDraftAsync(firstTab));
+
+        var second = await storage.SaveSessionWithDraftReadersAsync(first,
+            new Dictionary<long, Func<TextReader>> { [31] = () => new StringReader(text) });
+        var secondTab = second.Tabs.Single();
+        Assert.Equal(firstTab.DraftRef, secondTab.DraftRef);
+        Assert.Equal(firstTab.DraftSha256, secondTab.DraftSha256);
+        Assert.Single(Directory.GetFiles(Path.Combine(storage.RootDirectory, "drafts"), "session-31-*.txt"));
     }
 
     [Fact]

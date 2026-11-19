@@ -8,6 +8,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using AvaloniaEdit;
+using AvaloniaEdit.Document;
 using AvaloniaEdit.Highlighting;
 using RustText.Demo.Editor;
 using RustText.Demo.Logs;
@@ -143,12 +144,25 @@ public partial class MainWindow
 
     private void AttachEditor(WorkTab tab, string text)
     {
+        var document = new TextDocument(text);
+        document.UndoStack.MarkAsOriginalFile();
+        AttachEditor(tab, document, resetDirtyState: true);
+    }
+
+    private void AttachEditor(WorkTab tab, TextDocument document)
+    {
+        AttachEditor(tab, document, resetDirtyState: false);
+    }
+
+    private void AttachEditor(WorkTab tab, TextDocument document, bool resetDirtyState)
+    {
+        EnsureIdleUnloadTimer();
         tab.Log?.Close();
         tab.Log = null;
         tab.LastWorked = DateTimeOffset.Now;
         var editor = new TextEditor
         {
-            Text = text,
+            Document = document,
             FontFamily = new FontFamily("Cascadia Mono, Consolas, monospace"),
             FontSize = _fontSize,
             Background = FocusTheme.Editor,
@@ -165,12 +179,14 @@ public partial class MainWindow
         editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
         tab.Editor = editor;
         SetSyntax(editor, tab.Path);
-        tab.RestoredDirty = false;
-        tab.Dirty = false;
+        if (resetDirtyState)
+        {
+            tab.RestoredDirty = false;
+            tab.Dirty = false;
+        }
         tab.Highlights = new SearchHighlights(editor);
         editor.TextArea.TextView.BackgroundRenderers.Add(tab.Highlights);
-        var undoStack = editor.Document.UndoStack;
-        undoStack.MarkAsOriginalFile();
+        var undoStack = document.UndoStack;
 
         var warning = new TextBlock
         {
@@ -213,7 +229,7 @@ public partial class MainWindow
         Grid.SetColumn(minimap, 1);
         grid.Children.Add(minimap);
         tab.Item.Content = grid;
-        undoStack.PropertyChanged += (_, e) =>
+        System.ComponentModel.PropertyChangedEventHandler undoHandler = (_, e) =>
         {
             if (e.PropertyName == nameof(undoStack.IsOriginalFile) && ReferenceEquals(tab.Editor, editor))
             {
@@ -221,7 +237,8 @@ public partial class MainWindow
                 UpdateTab(tab);
             }
         };
-        editor.TextChanged += (_, _) =>
+        undoStack.PropertyChanged += undoHandler;
+        EventHandler textChangedHandler = (_, _) =>
         {
             tab.Revision++;
             tab.LastWorked = DateTimeOffset.Now;
@@ -236,20 +253,59 @@ public partial class MainWindow
                 RefreshSearchHighlights();
             }
         };
-        editor.TextArea.Caret.PositionChanged += (_, _) =>
+        editor.TextChanged += textChangedHandler;
+        EventHandler caretHandler = (_, _) =>
         {
             if (ReferenceEquals(tab, ActiveTab))
             {
                 UpdateStatus(tab);
             }
         };
+        editor.TextArea.Caret.PositionChanged += caretHandler;
+        tab.EditorSubscriptions =
+        [
+            () => undoStack.PropertyChanged -= undoHandler,
+            () => editor.TextChanged -= textChangedHandler,
+            () => editor.TextArea.Caret.PositionChanged -= caretHandler
+        ];
+        tab.Minimap = minimap;
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
+    }
+
+    private AvaloniaEdit.Document.TextDocument? DetachEditor(WorkTab tab)
+    {
+        if (tab.Editor is not { } editor)
+        {
+            return null;
+        }
+
+        tab.JsonCancellation?.Cancel();
+        tab.JsonCancellation = null;
+        foreach (var unsubscribe in tab.EditorSubscriptions)
+        {
+            unsubscribe();
+        }
+        tab.EditorSubscriptions = [];
+        if (tab.Highlights is { } highlights)
+        {
+            editor.TextArea.TextView.BackgroundRenderers.Remove(highlights);
+        }
+        tab.Highlights = null;
+        tab.Minimap?.Dispose();
+        tab.Minimap = null;
+        var document = editor.Document;
+        editor.Document = new TextDocument();
+        tab.Editor = null;
+        tab.JsonBanner = null;
+        tab.JsonMessage = null;
+        return document;
     }
 
     private void AttachLog(WorkTab tab, string path, TextEncodingKind? encoding = null, LogTabState? state = null)
     {
         tab.Log?.Close();
+        _ = DetachEditor(tab);
         tab.Editor = null;
         var log = new LogView(path, encoding, state) { WordWrap = state?.WordWrap ?? _wordWrap };
         log.SetTextSize(_fontSize);
@@ -390,44 +446,57 @@ public partial class MainWindow
 
     private async Task CloseTabAsync(WorkTab tab)
     {
-        if (!_tabs.ContainsKey(tab.Id) || _confirmingTabClose)
+        if (_closing || !_tabs.ContainsKey(tab.Id) || _confirmingTabClose || tab.Closing)
         {
             return;
         }
 
-        if (tab is { Dirty: true, Path: { } path, Recovery: null })
+        tab.Closing = true;
+        try
         {
-            var body = DialogPanel(new TextBlock
+            if (tab is { Dirty: true, Path: { } path, Recovery: null })
             {
-                Text = $"Вкладка «{Path.GetFileName(path)}» содержит несохранённый текст.",
-                TextWrapping = TextWrapping.Wrap
-            });
-            var dialog = Dialog("Закрыть без сохранения?", body);
-            var cancel = FocusButton(Button("Отмена", () => dialog.Close(false)));
-            cancel.IsCancel = true;
-            var discard = Button("Закрыть", () => dialog.Close(true));
-            discard.Classes.Add("focus-danger");
-            body.Children.Add(Row(cancel, discard));
-            _confirmingTabClose = true;
-            try
-            {
-                if (!await dialog.ShowDialog<bool>(this))
+                var body = DialogPanel(new TextBlock
                 {
-                    return;
+                    Text = $"Вкладка «{Path.GetFileName(path)}» содержит несохранённый текст.",
+                    TextWrapping = TextWrapping.Wrap
+                });
+                var dialog = Dialog("Закрыть без сохранения?", body);
+                var cancel = FocusButton(Button("Отмена", () => dialog.Close(false)));
+                cancel.IsCancel = true;
+                var discard = Button("Закрыть", () => dialog.Close(true));
+                discard.Classes.Add("focus-danger");
+                body.Children.Add(Row(cancel, discard));
+                _confirmingTabClose = true;
+                try
+                {
+                    if (!await dialog.ShowDialog<bool>(this))
+                    {
+                        return;
+                    }
+                }
+                finally
+                {
+                    _confirmingTabClose = false;
                 }
             }
-            finally
+
+            if (!_tabs.ContainsKey(tab.Id) || _closing)
             {
-                _confirmingTabClose = false;
+                return;
+            }
+
+            await RememberClosedAsync(tab);
+            await RecordRecentAsync(tab);
+            RemoveTab(tab);
+            if (_tabs.Count == 0)
+            {
+                await ShowHomeAsync();
             }
         }
-
-        await RememberClosedAsync(tab);
-        await RecordRecentAsync(tab);
-        RemoveTab(tab);
-        if (_tabs.Count == 0)
+        finally
         {
-            await ShowHomeAsync();
+            tab.Closing = false;
         }
     }
 
@@ -436,6 +505,8 @@ public partial class MainWindow
         tab.LoadCancellation?.Cancel();
         tab.JsonCancellation?.Cancel();
         tab.Log?.Close();
+        tab.Log = null;
+        _ = DetachEditor(tab);
         _tabs.Remove(tab.Id);
         tab.Group.Tabs.Items.Remove(tab.Item);
         if (ReferenceEquals(_active, tab.Group) && SelectedIn(_active) is { } next)
@@ -497,7 +568,7 @@ public partial class MainWindow
     {
         if (tab.Editor?.Document is not { } document || document.TextLength == 0)
         {
-            return "Без имени";
+            return (tab.Deferred ?? tab.Recovery)?.UntitledName ?? "Без имени";
         }
 
         var line = document.GetLineByNumber(1);
@@ -635,10 +706,13 @@ public partial class MainWindow
         public bool Dirty { get; set; }
         public bool RestoredDirty { get; set; }
         public bool Loading { get; set; }
+        public bool Closing { get; set; }
         public bool JsonDisabled { get; set; }
         public long Revision { get; set; }
         public DateTimeOffset LastWorked { get; set; } = DateTimeOffset.Now;
         public SearchHighlights? Highlights { get; set; }
+        public DocumentMinimap? Minimap { get; set; }
+        public List<Action> EditorSubscriptions { get; set; } = [];
         public JsonProblem? JsonError { get; set; }
         public Border? JsonBanner { get; set; }
         public TextBlock? JsonMessage { get; set; }

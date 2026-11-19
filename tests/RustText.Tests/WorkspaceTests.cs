@@ -115,13 +115,55 @@ public sealed class WorkspaceTests
 
             Assert.Single(Tabs(window));
             Assert.Equal("остаётся в окне", Read<TextEditor>(ActiveTab(window), "Editor").Text);
-            Assert.Same(editor, Read<TextEditor>(tab, "Editor"));
+            Assert.Null(Property(tab, "Editor"));
+            Assert.Equal(0, editor.Document.TextLength);
         }
         finally
         {
             await CloseAsync(window);
         }
     });
+
+    [Fact]
+    public Task DetachedTabKeepsDocumentUndoAndReturnsWhenSecondWindowCloses() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "move.txt");
+            await File.WriteAllTextAsync(path, "исходный документ");
+            var original = await OpenWorkspaceAsync(path);
+            MainWindow? detached = null;
+            try
+            {
+                var tab = ActiveTab(original);
+                var editor = Read<TextEditor>(tab, "Editor");
+                var document = editor.Document;
+                document.Insert(document.TextLength, " + правка");
+                Assert.True(document.UndoStack.CanUndo);
+
+                var item = Read<TabItem>(tab, "Item");
+                var move = item.ContextMenu!.Items.OfType<MenuItem>()
+                    .Single(menu => Equals(menu.Header, "Переместить в новое окно"));
+                move.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                detached = Assert.IsType<MainWindow>(original.FindOtherWindow());
+                Assert.Empty(Tabs(original));
+                var movedTab = ActiveTab(detached);
+                Assert.Same(document, Read<TextEditor>(movedTab, "Editor").Document);
+                Assert.Equal("исходный документ + правка", document.Text);
+                Assert.True(Read<bool>(movedTab, "Dirty"));
+                document.UndoStack.Undo();
+                Assert.Equal("исходный документ", document.Text);
+                Assert.False(Read<bool>(movedTab, "Dirty"));
+
+                await CloseAsync(detached);
+                Assert.Single(Tabs(original));
+                Assert.Same(document, Read<TextEditor>(ActiveTab(original), "Editor").Document);
+            }
+            finally
+            {
+                if (detached is { IsVisible: true }) await CloseAsync(detached);
+                await CloseAsync(original);
+            }
+        });
 
     [Fact]
     public Task SplitButtonsAndClosingNestedGroupsPreserveDraftOrderAndActiveTabAfterRestart() =>
@@ -409,7 +451,9 @@ public sealed class WorkspaceTests
     private static async Task CloseAsync(MainWindow window)
     {
         window.Close();
-        await HeadlessTests.WaitForAsync(() => !window.IsVisible);
+        await HeadlessTests.WaitForAsync(() => !window.IsVisible ||
+            window.FindControl<TextBlock>("StatusText")?.Text?.StartsWith("Не удалось записать сессию.", StringComparison.Ordinal) == true);
+        Assert.False(window.IsVisible, window.FindControl<TextBlock>("StatusText")?.Text);
     }
 
     private static object ActiveTab(MainWindow window) => Property(window, "ActiveTab", Private)!;
