@@ -407,7 +407,7 @@ public partial class MainWindow
         var perFile = new TextBox { Text = (Settings.VersionFileLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
         var total = new TextBox { Text = (Settings.VersionTotalLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
         var draftLines = new CheckBox { Content = "Число строк у вкладок без имени", IsChecked = Settings.ShowDraftLineCount };
-        var autoUpdate = new CheckBox { Content = "Проверять обновления при запуске и каждый час", IsChecked = Settings.AutoCheckUpdates ?? true };
+        var autoUpdate = new CheckBox { Content = "Проверять обновления при запуске и каждый час", IsChecked = Settings.AutoCheckUpdates };
         var wordWrap = new CheckBox { Content = "Переносить длинные строки", IsChecked = _wordWrap };
         var fontSize = new TextBox { Text = _fontSize.ToString(CultureInfo.CurrentCulture) };
         var startupMode = new ComboBox
@@ -495,11 +495,10 @@ public partial class MainWindow
 
         if (await dialog.ShowDialog<Func<UserSettings, UserSettings>?>(this) is { } update)
         {
-            var wasAutomaticChecksEnabled = Settings.AutoCheckUpdates is not false;
+            var wasAutomaticChecksEnabled = Settings.AutoCheckUpdates;
             await SaveWorkspaceSettingsAsync(update);
-            SynchronizeAutomaticUpdateTimer(
-                runImmediately: !wasAutomaticChecksEnabled && Settings.AutoCheckUpdates is not false,
-                forceImmediateCheck: !wasAutomaticChecksEnabled && Settings.AutoCheckUpdates is not false);
+            var turnedOn = !wasAutomaticChecksEnabled && Settings.AutoCheckUpdates;
+            SynchronizeAutomaticUpdateTimer(runImmediately: turnedOn, forceImmediateCheck: turnedOn);
             foreach (var window in _workspace.Windows)
             {
                 window._wordWrap = Settings.WordWrap ?? window._wordWrap;

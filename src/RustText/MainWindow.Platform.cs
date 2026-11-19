@@ -20,8 +20,8 @@ public partial class MainWindow
     private static string ExecutablePath => Environment.ProcessPath ?? throw new IOException("Путь программы недоступен.");
     internal static TimeSpan AutomaticUpdateCheckInterval => TimeSpan.FromHours(1);
 
-    internal static bool ShouldRunAutomaticUpdateCheck(bool? setting, bool isWindows, string? profileOverride) =>
-        setting is not false && isWindows && string.IsNullOrWhiteSpace(profileOverride);
+    internal static bool ShouldRunAutomaticUpdateCheck(bool enabled, bool isWindows, string? profileOverride) =>
+        enabled && isWindows && string.IsNullOrWhiteSpace(profileOverride);
 
     internal static bool ShouldPresentBackgroundUpdate(UpdateRelease? release, string? dismissedVersion) =>
         release is not null && release.Version != dismissedVersion;
