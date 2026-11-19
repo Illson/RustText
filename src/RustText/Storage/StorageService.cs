@@ -162,7 +162,7 @@ internal sealed class StorageService
                 foreach (var (tabId, openReader) in drafts)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var (temporary, hash) = await WriteDraftStreamAsync(checkpoint, tabId, openReader, cancellationToken).ConfigureAwait(false);
+                    var (temporary, hash, _) = await WriteDraftStreamAsync(checkpoint, tabId, openReader, cancellationToken).ConfigureAwait(false);
                     var previousDraft = fallbackDrafts.GetValueOrDefault(tabId);
                     if (previousDraft is { DraftRef: not null, DraftSha256: not null }
                         && hash.Equals(previousDraft.DraftSha256, StringComparison.OrdinalIgnoreCase))
@@ -277,7 +277,7 @@ internal sealed class StorageService
 
     public async Task<SessionTab> SaveClosedDraftAsync(SessionTab tab, Func<TextReader> openReader, CancellationToken token = default)
     {
-        var (temporary, hash) = await WriteDraftStreamAsync(_drafts, tab.Id, openReader, token).ConfigureAwait(false);
+        var (temporary, hash, lineCount) = await WriteDraftStreamAsync(_drafts, tab.Id, openReader, token).ConfigureAwait(false);
         var name = $"closed-{tab.Id}-{hash}.txt";
         var file = Path.Combine(_drafts, name);
         try
@@ -289,7 +289,7 @@ internal sealed class StorageService
             try { File.Delete(temporary); } catch { }
             throw;
         }
-        return tab with { DraftRef = "standalone/" + name, DraftSha256 = hash };
+        return tab with { DraftRef = "standalone/" + name, DraftSha256 = hash, LineCount = lineCount };
     }
 
     public async Task SaveDraftAsync(long tabId, string content, CancellationToken cancellationToken = default)
@@ -510,7 +510,7 @@ internal sealed class StorageService
         return tab with { DraftRef = null, DraftSha256 = null };
     }
 
-    private static async Task<(string TemporaryPath, string Hash)> WriteDraftStreamAsync(
+    private static async Task<(string TemporaryPath, string Hash, long LineCount)> WriteDraftStreamAsync(
         string checkpoint,
         long tabId,
         Func<TextReader> openReader,
@@ -522,6 +522,10 @@ internal sealed class StorageService
         var chars = new char[32 * 1024];
         var bytes = new byte[encoding.GetMaxByteCount(chars.Length)];
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        long lineBreakCount = 0;
+        var hasCharacters = false;
+        var lastCharacter = '\0';
+        var previousCarriageReturn = false;
         try
         {
             using var reader = openReader();
@@ -531,6 +535,25 @@ internal sealed class StorageService
             {
                 var read = await reader.ReadAsync(chars.AsMemory(), token).ConfigureAwait(false);
                 var flush = read == 0;
+                for (var index = 0; index < read; index++)
+                {
+                    hasCharacters = true;
+                    lastCharacter = chars[index];
+                    if (chars[index] == '\r')
+                    {
+                        lineBreakCount++;
+                        previousCarriageReturn = true;
+                    }
+                    else if (chars[index] == '\n')
+                    {
+                        if (!previousCarriageReturn) lineBreakCount++;
+                        previousCarriageReturn = false;
+                    }
+                    else
+                    {
+                        previousCarriageReturn = false;
+                    }
+                }
                 encoder.Convert(chars, 0, read, bytes, 0, bytes.Length, flush,
                     out _, out var bytesUsed, out var completed);
                 if (bytesUsed > 0)
@@ -542,7 +565,8 @@ internal sealed class StorageService
             }
             await output.FlushAsync(token).ConfigureAwait(false);
             output.Flush(flushToDisk: true);
-            return (temporary, Convert.ToHexString(hash.GetHashAndReset()));
+            var lineCount = lineBreakCount + (hasCharacters && lastCharacter is not ('\r' or '\n') ? 1 : 0);
+            return (temporary, Convert.ToHexString(hash.GetHashAndReset()), lineCount);
         }
         catch
         {

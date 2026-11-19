@@ -17,7 +17,8 @@ public partial class MainWindow
     private IReadOnlyList<RecentFileEntry> _recent = [];
     private UserSettings _settings = new();
     private MenuItem? _recentMenu;
-    private MenuItem? _closedMenu;
+    private MenuItem? _closedFilesMenu;
+    private MenuItem? _closedDraftsMenu;
     private Action? _refreshHome;
     private DateTimeOffset _lastHomeRefresh;
     private bool _checkingDisk;
@@ -143,7 +144,13 @@ public partial class MainWindow
 
         if (tab.Recovery is { } recovered)
         {
-            return recovered;
+            return tab.Log is { } preview
+                ? recovered with
+                {
+                    DraftOffset = preview.CurrentOffset ?? recovered.DraftOffset,
+                    LineCount = preview.KnownLineCount
+                }
+                : recovered;
         }
 
         var editor = tab.Editor;
@@ -163,7 +170,9 @@ public partial class MainWindow
         };
     }
 
-    private async Task SaveSessionAsync()
+    private Task SaveSessionAsync() => SaveWorkspaceSessionAsync(excludeWindow: null);
+
+    private async Task SaveWorkspaceSessionAsync(MainWindow? excludeWindow)
     {
         if (!_restoreFinished && !_closing)
         {
@@ -173,11 +182,12 @@ public partial class MainWindow
         await _workspace.SaveGate.WaitAsync();
         try
         {
-            var windows = _workspace.Windows.Where(window => !window._closed).ToArray();
+            var windows = _workspace.Windows.Where(window => !window._closed && !ReferenceEquals(window, excludeWindow)).ToArray();
             if (windows.Length == 0) return;
             var homeWindow = windows[0];
             var entries = windows.SelectMany(window => window.TabsInVisualOrder().Select(tab => (Window: window, Tab: tab))).ToArray();
             var tabs = entries.Select(entry => entry.Tab).ToArray();
+            var recoveries = tabs.Select(tab => tab.Recovery).ToArray();
             var state = entries.Select(entry => entry.Window.CaptureTab(entry.Tab)).ToList();
             var index = homeWindow.ActiveTab is { } active ? Array.IndexOf(tabs, active) : 0;
             var width = double.IsFinite(homeWindow.Width) ? homeWindow.Width : 1080;
@@ -215,7 +225,7 @@ public partial class MainWindow
                 var captured = session.Tabs[i];
                 var saved = committed.Tabs[i];
                 if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = saved;
-                if (ReferenceEquals(tabs[i].Recovery, captured)) tabs[i].Recovery = saved;
+                if (recoveries[i] is { } recovery && ReferenceEquals(tabs[i].Recovery, recovery)) tabs[i].Recovery = saved;
                 if (saved.DraftRef is not null && liveDrafts.TryGetValue(saved.Id, out var live))
                 {
                     _workspace.LiveDrafts.Add(saved.Id, new(new(live.Document), live.Revision, saved));
@@ -477,8 +487,11 @@ public partial class MainWindow
 
     private void AttachDraftPreview(WorkTab tab, SessionTab saved, string draftPath)
     {
-        AttachLog(tab, draftPath, TextEncodingKind.Utf8);
         tab.Recovery = saved;
+        var name = saved.Path is { } path ? Path.GetFileName(path) : saved.UntitledName;
+        var state = new LogTabState(TextEncodingKind.Utf8, saved.DraftOffset ?? 0, WordWrap: _wordWrap);
+        var lineCount = saved.DraftOffset.HasValue ? saved.LineCount : null;
+        AttachLog(tab, draftPath, TextEncodingKind.Utf8, state, name ?? "Черновик", lineCount);
         var panel = new DockPanel();
         var copy = FocusButton(Button("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab))), primary: true);
         Avalonia.Controls.DockPanel.SetDock(copy, Dock.Top);
@@ -496,10 +509,13 @@ public partial class MainWindow
         if (_storage.GetDraftPath(current) is { } path) await SaveDraftCopyAsync(path);
     }
 
-    private async Task RememberClosedAsync(WorkTab tab)
+    private async Task RememberClosedAsync(
+        WorkTab tab,
+        bool preserveUnsavedText = false,
+        bool deferHistoryLimit = false)
     {
         var saved = CaptureTab(tab);
-        if (tab.Editor is { } editor && tab.Path is null)
+        if (tab.Editor is { } editor && (tab.Path is null || (preserveUnsavedText && tab.Dirty)))
         {
             if (FindSavedLiveDraft(tab) is { } existingDraft)
             {
@@ -514,7 +530,7 @@ public partial class MainWindow
 
         _closedTabs.RemoveAll(item => item.Id == saved.Id);
         _closedTabs.Insert(0, saved);
-        if (_closedTabs.Count > 100)
+        if (!deferHistoryLimit && _closedTabs.Count > 100)
         {
             _closedTabs.RemoveAt(_closedTabs.Count - 1);
         }
@@ -701,23 +717,29 @@ public partial class MainWindow
             BorderBrush = FocusTheme.Border
         };
         var recentRows = new StackPanel { Spacing = 3 };
-        var closedRows = new StackPanel { Spacing = 3 };
+        var closedFileRows = new StackPanel { Spacing = 3 };
+        var ghostRows = new StackPanel { Spacing = 3 };
         var footer = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
         var index = 0;
-        var closedSection = new StackPanel { Spacing = 5 };
-        closedSection.Children.Add(new TextBlock { Text = "Закрытые вкладки", Foreground = FocusTheme.Text, FontSize = 16 });
-        closedSection.Children.Add(closedRows);
+        var closedFilesSection = new StackPanel { Spacing = 5 };
+        closedFilesSection.Children.Add(new TextBlock { Text = "Закрытые файлы", Foreground = FocusTheme.Text, FontSize = 16 });
+        closedFilesSection.Children.Add(closedFileRows);
+        var ghostsSection = new StackPanel { Spacing = 5 };
+        ghostsSection.Children.Add(new TextBlock { Text = "Призрачные вкладки", Foreground = FocusTheme.Text, FontSize = 16 });
+        ghostsSection.Children.Add(ghostRows);
         void Rebuild()
         {
             recentRows.Children.Clear();
-            closedRows.Children.Clear();
+            closedFileRows.Children.Clear();
+            ghostRows.Children.Clear();
             var term = input.Text?.Trim() ?? "";
-            var closed = _closedTabs
+            var closedFiles = _closedTabs
+                .Where(item => item.Path is not null)
                 .Select(item => (Item: item, Name: ClosedTabDisplayName(item)))
                 .Where(entry => entry.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
                     || entry.Item.Path?.Contains(term, StringComparison.OrdinalIgnoreCase) == true)
                 .ToArray();
-            foreach (var (item, name) in closed)
+            foreach (var (item, name) in closedFiles)
             {
                 var label = FocusButton(Button($"{name}   {DescribeWork(item.LineCount, item.LastWorkedMs)}",
                     () => Run(() => RestoreClosedAsync(item))));
@@ -728,9 +750,24 @@ public partial class MainWindow
                     ToolTip.SetTip(label, path);
                 }
 
-                closedRows.Children.Add(label);
+                closedFileRows.Children.Add(label);
             }
-            closedSection.IsVisible = closedRows.Children.Count > 0;
+            closedFilesSection.IsVisible = closedFileRows.Children.Count > 0;
+
+            var ghosts = _closedTabs
+                .Where(item => item.Path is null)
+                .Select(item => (Item: item, Name: ClosedTabDisplayName(item)))
+                .Where(entry => entry.Name.Contains(term, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            foreach (var (item, name) in ghosts)
+            {
+                var label = FocusButton(Button($"{name}   {DescribeWork(item.LineCount, item.LastWorkedMs)}",
+                    () => Run(() => RestoreClosedAsync(item))));
+                label.HorizontalAlignment = HorizontalAlignment.Stretch;
+                label.HorizontalContentAlignment = HorizontalAlignment.Left;
+                ghostRows.Children.Add(label);
+            }
+            ghostsSection.IsVisible = ghostRows.Children.Count > 0;
 
             var visible = _recent.Where(item => item.Path.Contains(term, StringComparison.OrdinalIgnoreCase)).ToArray();
             var count = Math.Max(1, (visible.Length + 15) / 16);
@@ -774,7 +811,8 @@ public partial class MainWindow
         Grid.SetRow(input, 1);
         surface.Children.Add(input);
         var historyRows = new StackPanel { Spacing = 14 };
-        historyRows.Children.Add(closedSection);
+        historyRows.Children.Add(ghostsSection);
+        historyRows.Children.Add(closedFilesSection);
 
         var recentSection = new StackPanel { Spacing = 5 };
         recentSection.Children.Add(new TextBlock { Text = "Недавние файлы", Foreground = FocusTheme.Text, FontSize = 16 });
@@ -828,6 +866,15 @@ public partial class MainWindow
 
     private void RefreshHistoryMenus()
     {
+        foreach (var window in _workspace.Windows.ToArray())
+        {
+            window._recent = _recent;
+            window.RefreshHistoryMenusLocal();
+        }
+    }
+
+    private void RefreshHistoryMenusLocal()
+    {
         if (_recentMenu is { } recent)
         {
             recent.Items.Clear();
@@ -840,13 +887,24 @@ public partial class MainWindow
             recent.Items.Add(Command("Вся история", () => Run(ShowHomeAsync)));
         }
 
-        if (_closedMenu is { } closed)
+        if (_closedFilesMenu is { } closedFiles)
         {
-            closed.Items.Clear();
-            foreach (var item in _closedTabs)
+            closedFiles.Items.Clear();
+            foreach (var item in _closedTabs.Where(item => item.Path is not null))
             {
                 var name = ClosedTabDisplayName(item);
-                closed.Items.Add(Command(name + DescribeWork(item.LineCount, item.LastWorkedMs),
+                closedFiles.Items.Add(Command(name + DescribeWork(item.LineCount, item.LastWorkedMs),
+                    () => Run(() => RestoreClosedAsync(item))));
+            }
+        }
+
+        if (_closedDraftsMenu is { } closedDrafts)
+        {
+            closedDrafts.Items.Clear();
+            foreach (var item in _closedTabs.Where(item => item.Path is null))
+            {
+                var name = ClosedTabDisplayName(item);
+                closedDrafts.Items.Add(Command(name + DescribeWork(item.LineCount, item.LastWorkedMs),
                     () => Run(() => RestoreClosedAsync(item))));
             }
         }
@@ -890,7 +948,7 @@ public partial class MainWindow
 
     private static string DescribeWork(long? lines, long? stamp)
     {
-        var summary = lines is { } count ? $" · {count:N0} строк" : "";
+        var summary = lines is { } count ? $" · {LineNumbers.Format(count)} строк" : "";
         if (stamp is { } milliseconds)
         {
             var worked = DateTimeOffset.FromUnixTimeMilliseconds(milliseconds);

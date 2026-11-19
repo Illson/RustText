@@ -279,8 +279,16 @@ public partial class MainWindow : Window
                 }
             }
         };
-        header.DoubleTapped += (_, e) =>
+        tab.Item.DoubleTapped += (_, e) =>
         {
+            for (var visual = e.Source as Visual; visual is not null; visual = visual.GetVisualParent())
+            {
+                if (ReferenceEquals(visual, close))
+                {
+                    return;
+                }
+            }
+
             e.Handled = true;
             Run(() => CloseTabAsync(tab));
         };
@@ -572,31 +580,79 @@ public partial class MainWindow : Window
 
         _closing = true;
         _checkpoint.Stop();
+        var closeGateHeld = false;
+        var sessionSaved = false;
+        WorkTab[] archivedTabs = [];
+        var priorHistory = new List<(int Index, SessionTab Tab)>();
         try
         {
-            await SaveSessionAsync();
-            ReturnTabsToOtherWindow();
+            await _workspace.CloseGate.WaitAsync();
+            closeGateHeld = true;
+            if (FindOtherWindow() is not null)
+            {
+                archivedTabs = TabsInVisualOrder().ToArray();
+                var closingIds = archivedTabs.Select(tab => tab.Id).ToHashSet();
+                for (var index = 0; index < _closedTabs.Count; index++)
+                {
+                    if (closingIds.Contains(_closedTabs[index].Id))
+                    {
+                        priorHistory.Add((index, _closedTabs[index]));
+                    }
+                }
+
+                foreach (var tab in archivedTabs)
+                    await RememberClosedAsync(tab, preserveUnsavedText: true, deferHistoryLimit: true);
+
+                await SaveWorkspaceSessionAsync(excludeWindow: this);
+                if (_closedTabs.Count > 100)
+                {
+                    _closedTabs.RemoveRange(100, _closedTabs.Count - 100);
+                    RefreshHistoryMenus();
+                }
+            }
+            else
+            {
+                await SaveSessionAsync();
+            }
+            sessionSaved = true;
+
+            _closed = true;
+            _idleUnloadTimer?.Stop();
+            _lifetime.Cancel();
+            _searchCancellation?.Cancel();
+            foreach (var tab in _tabs.Values)
+            {
+                tab.LoadCancellation?.Cancel();
+                tab.Log?.Close();
+                DetachEditor(tab);
+            }
+
+            Close();
         }
-        catch (Exception error) when (IsUserError(error))
+        catch (Exception error) when (IsUserError(error) && !sessionSaved)
         {
+            if (archivedTabs.Length != 0)
+            {
+                var closingIds = archivedTabs.Select(tab => tab.Id).ToHashSet();
+                _closedTabs.RemoveAll(item => closingIds.Contains(item.Id));
+                foreach (var (index, tab) in priorHistory.OrderBy(entry => entry.Index))
+                {
+                    _closedTabs.Insert(Math.Clamp(index, 0, _closedTabs.Count), tab);
+                }
+                RefreshHistoryMenus();
+            }
+
             SetStatus($"Не удалось записать сессию. {error.Message}");
             _closing = false;
             _checkpoint.Start();
-            return;
         }
-
-        _closed = true;
-        _idleUnloadTimer?.Stop();
-        _lifetime.Cancel();
-        _searchCancellation?.Cancel();
-        foreach (var tab in _tabs.Values)
+        finally
         {
-            tab.LoadCancellation?.Cancel();
-            tab.Log?.Close();
-            DetachEditor(tab);
+            if (closeGateHeld)
+            {
+                _workspace.CloseGate.Release();
+            }
         }
-
-        Close();
     }
 
     private void HomeClicked(object? sender, RoutedEventArgs e) => Run(ShowHomeAsync);

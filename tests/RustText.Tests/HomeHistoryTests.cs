@@ -24,7 +24,7 @@ public sealed class HomeHistoryTests
             await CallAsync(window, "CloseTabAsync", ActiveTab(window));
 
             await HeadlessTests.WaitForAsync(() =>
-                window.GetVisualDescendants().OfType<TextBlock>().Any(text => text.Text == "Закрытые вкладки"));
+                window.GetVisualDescendants().OfType<TextBlock>().Any(text => text.Text == "Призрачные вкладки"));
             Assert.Contains(HomeButtons(window), button => button.Content is string label && label.StartsWith(caption, StringComparison.Ordinal));
 
             await CloseAsync(window);
@@ -35,7 +35,7 @@ public sealed class HomeHistoryTests
             closedDraft.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
 
             await HeadlessTests.WaitForAsync(() => ActiveEditor(window) is { Text: draft });
-            Assert.Empty((System.Collections.IEnumerable)Field(window, "_closedTabs"));
+            Assert.Empty((System.Collections.IEnumerable)Field(window, "_closedTabs")!);
         }
         finally
         {
@@ -55,7 +55,7 @@ public sealed class HomeHistoryTests
     {
         var window = new MainWindow();
         window.Show();
-        await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+        await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished")!);
         return window;
     }
 

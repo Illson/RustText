@@ -16,7 +16,8 @@ public partial class MainWindow
     private void BuildMenus()
     {
         _recentMenu = new MenuItem { Header = "Недавние файлы" };
-        _closedMenu = new MenuItem { Header = "Закрытые вкладки" };
+        _closedFilesMenu = new MenuItem { Header = "Закрытые файлы" };
+        _closedDraftsMenu = new MenuItem { Header = "Призрачные вкладки" };
         TopMenu.Items.Add(MenuGroup("_Файл",
             Command("Новая вкладка   Ctrl+N", () => NewTab()),
             Command("Открыть…   Ctrl+O", () => Run(() => OpenDialogAsync())),
@@ -35,7 +36,7 @@ public partial class MainWindow
             Command("Закрыть вкладку   Ctrl+W", CloseActive),
             Command("Восстановить вкладку   Ctrl+Shift+T", () => Run(RestoreLastClosedAsync)),
             _recentMenu,
-            _closedMenu,
+            _closedFilesMenu,
             new Separator(),
             Command("Настроить открытие файлов в Windows…", () => Run(RegisterAssociationsAsync)),
             Command("Выход", Close)));
@@ -52,6 +53,7 @@ public partial class MainWindow
             Command("Генератор строк…", () => Run(ShowGeneratorAsync)),
             Command("Сравнить списки…", () => Run(ShowListComparisonAsync)),
             Command("Версии файла…", () => Run(ShowVersionsAsync)),
+            _closedDraftsMenu,
             Command("Вывести окно на передний план…", () => Run(ShowWindowFinderAsync)),
             Command("Проверить обновления…", () => Run(CheckUpdatesAsync)),
             Command("Настройки…", () => Run(ShowSettingsAsync))));
@@ -200,15 +202,16 @@ public partial class MainWindow
         }
 
         var limit = editor.Document.LineCount;
-        var input = await PromptAsync("Перейти к строке", $"Номер от 1 до {limit:N0}", editor.TextArea.Caret.Line.ToString(CultureInfo.CurrentCulture));
+        var input = await PromptAsync("Перейти к строке", $"Номер от 1 до {LineNumbers.Format(limit)}", LineNumbers.Format(editor.TextArea.Caret.Line));
         if (input is null)
         {
             return;
         }
 
-        if (!int.TryParse(input, out var line) || line < 1 || line > limit)
+        if (!int.TryParse(input, NumberStyles.Integer | NumberStyles.AllowThousands, LineNumbers.FormatInfo, out var line)
+            || line < 1 || line > limit)
         {
-            throw new ArgumentException($"Укажите строку от 1 до {limit:N0}.");
+            throw new ArgumentException($"Укажите строку от 1 до {LineNumbers.Format(limit)}.");
         }
 
         SelectText(tab, editor.Document.GetLineByNumber(line).Offset, 0);
@@ -254,7 +257,7 @@ public partial class MainWindow
                 }
 
                 var generator = new LineGenerator(template.Text ?? "", rows);
-                export |= generator.EstimateBytes() > LineGenerator.TabByteLimit;
+                export |= generator.EstimateBytes() > LineGenerator.TabByteLimit || rows > LineGenerator.TabLineLimit;
                 generate.IsEnabled = file.IsEnabled = false;
                 progress.IsVisible = true;
                 progress.Value = 0;

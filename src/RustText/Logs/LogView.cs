@@ -53,6 +53,8 @@ internal sealed class LogView : UserControl, IDisposable
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(1);
 
     private readonly string _path;
+    private readonly bool _isDraft;
+    private readonly long? _savedLineCount;
     private readonly TextEncodingKind? _encodingOverride;
     private FileStream _file;
     private LogDataReader _reader;
@@ -153,7 +155,8 @@ internal sealed class LogView : UserControl, IDisposable
         FontSize = 12,
     };
 
-    private readonly List<IndexEntry> _lineIndex = [];
+    private readonly List<LogLineCheckpoint> _lineIndex = [];
+    private readonly object _lineIndexGate = new();
     private readonly HashSet<long> _skippedSearchLines = [];
     private CancellationTokenSource? _searchCancellation;
     private CancellationTokenSource? _indexCancellation;
@@ -165,6 +168,7 @@ internal sealed class LogView : UserControl, IDisposable
     private long _searchOffset;
     private long _indexedTo;
     private long _indexedLineCount;
+    private long? _totalLineCount;
     private long _trimGeneration;
     private bool _wordWrap;
     private bool _followEnd;
@@ -184,25 +188,28 @@ internal sealed class LogView : UserControl, IDisposable
     private int[] _displayRowStarts = [];
     private long?[] _displaySourceLineNumbers = [];
 
-    public LogView(string path, TextEncodingKind? encoding = null, LogTabState? state = null)
+    public LogView(string path, TextEncodingKind? encoding = null, LogTabState? state = null,
+        string? draftName = null, long? draftLineCount = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         _path = System.IO.Path.GetFullPath(path);
+        _isDraft = draftName is not null;
+        _savedLineCount = draftLineCount;
         _encodingOverride = encoding ?? state?.Encoding;
         _file = LogDataReader.Open(_path);
         var effectiveEncoding = LogDataReader.DetectEncoding(_file, _encodingOverride);
         _reader = new LogDataReader(_file, effectiveEncoding);
         _fileStamp = FileStamp.Read(_path, _file);
         _observedDigest = TryReadObservedDigest(_fileStamp.Length);
-        var bookmarkRestorable = CanRestoreBookmark(state);
+        var bookmarkRestorable = _isDraft || CanRestoreBookmark(state);
         var restoreState = bookmarkRestorable ? state : state is null ? null : state with { Offset = 0, HiddenOffset = 0 };
         var savedHiddenOffset = Math.Clamp(restoreState?.HiddenOffset ?? 0, 0, _file.Length);
         _hiddenOffset = savedHiddenOffset == _file.Length
             ? savedHiddenOffset
             : _reader.AlignToNextLine(savedHiddenOffset);
         _wordWrap = state?.WordWrap ?? false;
-        _followEnd = restoreState?.FollowEnd ?? false;
-        _autoRefresh = restoreState?.AutoRefresh ?? true;
+        _followEnd = !_isDraft && restoreState?.FollowEnd == true;
+        _autoRefresh = !_isDraft && restoreState?.AutoRefresh != false;
         _indexOptIn = restoreState?.IndexOptIn == true;
         _indexPaused = restoreState?.IndexPaused == true
             || (_file.Length >= LargeLogIndexOptInBytes && !_indexOptIn);
@@ -217,8 +224,8 @@ internal sealed class LogView : UserControl, IDisposable
         Content = BuildLayout();
         ScrollViewer.SetHorizontalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
         ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
-        _fileLabel.Text = System.IO.Path.GetFileName(_path);
-        ToolTip.SetTip(_fileLabel, _path);
+        _fileLabel.Text = draftName ?? System.IO.Path.GetFileName(_path);
+        if (!_isDraft) ToolTip.SetTip(_fileLabel, _path);
         ConfigureInteractions();
         _logText.LayoutUpdated += OnLogTextLayoutUpdated;
         RefreshButtons();
@@ -236,6 +243,8 @@ internal sealed class LogView : UserControl, IDisposable
 
     public string Path => _path;
     public bool IsReadOnly => true;
+    public long? CurrentOffset => _page?.StartOffset;
+    public long? KnownLineCount => _totalLineCount ?? _savedLineCount;
     public string StatusText { get; private set; } = string.Empty;
 
     public bool WordWrap
@@ -372,6 +381,7 @@ internal sealed class LogView : UserControl, IDisposable
     {
         _logText.FontSize = value;
         _lineGutterText.FontSize = value;
+        RefreshLineCount();
     }
 
     private int _activeSearchResult = -1;
@@ -532,7 +542,7 @@ internal sealed class LogView : UserControl, IDisposable
         _lineGutterScrollViewer.Content = new Border
         {
             Padding = new Thickness(0, 6),
-            Background = FocusTheme.Gutter,
+            Background = FocusTheme.Chrome,
             Child = _lineGutterText,
         };
         AutomationProperties.SetName(_lineGutterScrollViewer, "Номера строк лога");
@@ -570,7 +580,7 @@ internal sealed class LogView : UserControl, IDisposable
             };
             SetButtonStyle(button, "focus-quiet");
             button.Margin = new Thickness(0);
-            ToolTip.SetTip(button, $"{sample.Offset:N0} байт · {sample.Preview}");
+            ToolTip.SetTip(button, sample.Preview);
             button.Click += async (_, _) => await NavigateAsync(sample.Offset, true);
             return button;
         });
@@ -739,7 +749,7 @@ internal sealed class LogView : UserControl, IDisposable
         _startButton.Click += async (_, _) => await NavigateAsync(_hiddenOffset, true);
         _previousButton.Click += async (_, _) => await NavigatePreviousAsync();
         _nextButton.Click += async (_, _) => await NavigateAsync(_page?.NextOffset ?? _hiddenOffset, true);
-        _endButton.Click += async (_, _) => await NavigateAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true);
+        _endButton.Click += async (_, _) => await NavigateToPageAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true, scrollToEnd: true);
         _middleButton.Click += async (_, _) => await NavigateAsync(Math.Max(_hiddenOffset, _reader.GetMidpointOffset(_closing.Token)), true);
         _pauseButton.Click += (_, _) => SetAutoRefresh(!_autoRefresh);
         _followButton.Click += async (_, _) =>
@@ -777,40 +787,62 @@ internal sealed class LogView : UserControl, IDisposable
                 e.Handled = true;
             }
         };
-        _logText.KeyDown += async (_, e) =>
-        {
-            if (e.Key == Key.Home && e.KeyModifiers.HasFlag(KeyModifiers.Control))
-            {
-                await NavigateAsync(_hiddenOffset, true);
-                e.Handled = true;
-            }
-            else if (e.Key == Key.End && e.KeyModifiers.HasFlag(KeyModifiers.Control))
-            {
-                await NavigateAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true);
-                e.Handled = true;
-            }
-            else if (e.Key == Key.PageDown)
-            {
-                await NavigateAsync(_page?.NextOffset ?? _hiddenOffset, true);
-                e.Handled = true;
-            }
-            else if (e.Key == Key.PageUp)
-            {
-                await NavigatePreviousAsync();
-                e.Handled = true;
-            }
-            else if (e.Key == Key.F && e.KeyModifiers.HasFlag(KeyModifiers.Control))
-            {
-                FocusSearch();
-                e.Handled = true;
-            }
-        };
+        _logText.AddHandler(KeyDownEvent, OnLogKeyDown, RoutingStrategies.Tunnel);
+        _logText.AddHandler(PointerWheelChangedEvent, OnLogPointerWheel, RoutingStrategies.Tunnel);
         _minimapList.SelectionChanged += (_, _) => _minimapList.SelectedItem = null;
         _minimapList.AddHandler(InputElement.PointerPressedEvent, OnMinimapPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
         _minimapList.PointerMoved += OnMinimapPointerMoved;
         _minimapList.PointerReleased += OnMinimapPointerReleased;
         _minimapList.AddHandler(InputElement.PointerWheelChangedEvent, OnMinimapPointerWheelChanged, RoutingStrategies.Tunnel, handledEventsToo: true);
         WordWrap = _wordWrap;
+    }
+
+    private async void OnLogKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (_closed) return;
+
+        if (e.Key == Key.Home && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            e.Handled = true;
+            await NavigateAsync(_hiddenOffset, true);
+        }
+        else if (e.Key == Key.End && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            e.Handled = true;
+            await NavigateToPageAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true, scrollToEnd: true);
+        }
+        else if (e.Key == Key.PageDown)
+        {
+            e.Handled = true;
+            if (_page is { HasMore: true } page) await NavigateAsync(page.NextOffset, true);
+        }
+        else if (e.Key == Key.PageUp)
+        {
+            e.Handled = true;
+            await NavigatePreviousAsync(adjacent: true);
+        }
+        else if (e.Key == Key.F && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            e.Handled = true;
+            FocusSearch();
+        }
+    }
+
+    private async void OnLogPointerWheel(object? sender, PointerWheelEventArgs e)
+    {
+        if (_busy || _closed || _page is not { } page || _logScrollViewer is not { } scroll
+            || e.KeyModifiers != KeyModifiers.None || Math.Abs(e.Delta.Y) < Math.Abs(e.Delta.X)) return;
+
+        if (e.Delta.Y < 0 && page.HasMore && scroll.Offset.Y >= scroll.Extent.Height - scroll.Viewport.Height - 1)
+        {
+            e.Handled = true;
+            await NavigateAsync(page.NextOffset, saveHistory: false);
+        }
+        else if (e.Delta.Y > 0 && page.StartOffset > _hiddenOffset && scroll.Offset.Y <= 1)
+        {
+            e.Handled = true;
+            await NavigatePreviousAsync(scrollToEnd: true, adjacent: true);
+        }
     }
 
     private void OnMinimapPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -865,7 +897,7 @@ internal sealed class LogView : UserControl, IDisposable
     }
 
     private async Task LoadPageAsync(long offset, bool saveHistory = true, bool allowFollowEnd = true,
-        int maxPageBytes = LogDataReader.DefaultPageBytes)
+        int maxPageBytes = LogDataReader.DefaultPageBytes, bool scrollToEnd = false)
     {
         if (_closed || _busy)
         {
@@ -878,8 +910,14 @@ internal sealed class LogView : UserControl, IDisposable
         try
         {
             var requested = Math.Clamp(offset, _hiddenOffset, _file.Length);
-            var page = await Task.Run(() => _reader.ReadPage(requested, maxPageBytes: maxPageBytes,
-                cancellationToken: _closing.Token), _closing.Token);
+            var reader = _reader;
+            var token = _closing.Token;
+            var (page, firstLine) = await Task.Run(() =>
+            {
+                var result = reader.ReadPage(requested, maxPageBytes: maxPageBytes, cancellationToken: token);
+                var first = result.Rows.Count > 0 ? FindLineNumber(reader, result.Rows[0].StartOffset, token) : null;
+                return (result, first);
+            }, token);
             if (_closed)
             {
                 return;
@@ -899,21 +937,28 @@ internal sealed class LogView : UserControl, IDisposable
             for (var index = 0; index < page.Rows.Count; index++)
             {
                 var row = page.Rows[index];
-                if (index > 0 && !row.ContinuesLine)
+                if (index > 0 && !row.StartsWithinLine)
                 {
                     displayText.Append(Environment.NewLine);
                 }
                 displayText.Append(row.Text);
             }
             _logText.Text = displayText.ToString();
-            UpdatePageLineNumbers(page);
-            _positionLabel.Text = $"Байты [{page.StartOffset:N0}, {page.NextOffset:N0}) / {page.FileLength:N0}";
-            var firstLine = page.Rows.Count > 0 ? FindLineNumber(page.Rows[0].StartOffset) : FindLineNumber(page.StartOffset);
-            var lastLine = page.Rows.Count > 0 ? FindLineNumber(page.Rows[^1].StartOffset) : firstLine;
-            _lineNumberLabel.Text = firstLine is { } first && lastLine is { } last
-                ? $"Строки {first:N0}–{last:N0}"
-                : "Строки индексируются";
-            _countLabel.Text = $"Записей на странице · {page.Rows.Count} · {_reader.Encoding}";
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
+                scroll.Offset = new Vector(scroll.Offset.X,
+                    scrollToEnd ? Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height) : 0);
+            }, DispatcherPriority.Loaded);
+            var rows = page.Rows.Count == 0 ? 0 : 1 + page.Rows.Skip(1).Count(row => !row.StartsWithinLine);
+            _countLabel.Text = $"Строк на странице · {LineNumbers.Format(rows)}";
+            if (_isDraft && !_indexOptIn && (KnownLineCount is null || (firstLine is null && rows > 0)))
+            {
+                _indexOptIn = true;
+                _indexPaused = false;
+                StartIndexIfNeeded();
+            }
+            UpdatePageLineNumbers(page, firstLine);
             SetStatus(page.WasTruncated
                 ? "Файл изменился во время чтения. Позиция пересчитана по открытому файлу."
                 : string.Empty);
@@ -985,24 +1030,41 @@ internal sealed class LogView : UserControl, IDisposable
         return height <= 0 ? 0 : Math.Clamp(y / height, 0, 1);
     }
 
-    private async Task NavigateAsync(long offset, bool saveHistory)
+    private Task NavigateAsync(long offset, bool saveHistory) => NavigateToPageAsync(offset, saveHistory, scrollToEnd: false);
+
+    private async Task NavigateToPageAsync(long offset, bool saveHistory, bool scrollToEnd)
     {
         if (_page is { } current && offset == current.StartOffset)
         {
+            if (_logScrollViewer is { } scroll)
+            {
+                scroll.Offset = new Vector(scroll.Offset.X,
+                    scrollToEnd ? Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height) : 0);
+            }
             return;
         }
-        await LoadPageAsync(offset, saveHistory);
+        await LoadPageAsync(offset, saveHistory, allowFollowEnd: false, scrollToEnd: scrollToEnd);
     }
 
-    private async Task NavigatePreviousAsync()
+    private async Task NavigatePreviousAsync(bool scrollToEnd = false, bool adjacent = false)
     {
-        if (_previousOffsets.Count == 0 || _busy)
+        if (_page is not { } page || _busy || _closed)
         {
             return;
         }
-        var offset = _previousOffsets[^1];
-        _previousOffsets.RemoveAt(_previousOffsets.Count - 1);
-        await LoadPageAsync(offset, false);
+        long offset;
+        if (!adjacent && _previousOffsets.Count > 0)
+        {
+            offset = _previousOffsets[^1];
+            _previousOffsets.RemoveAt(_previousOffsets.Count - 1);
+        }
+        else
+        {
+            if (page.StartOffset <= _hiddenOffset) return;
+            offset = _reader.GetPreviousPageOffset(page.StartOffset, _closing.Token);
+        }
+        offset = Math.Max(_hiddenOffset, offset);
+        await LoadPageAsync(offset, saveHistory: false, allowFollowEnd: false, scrollToEnd: scrollToEnd);
     }
 
     private async Task JumpByPercentageAsync()
@@ -1013,6 +1075,12 @@ internal sealed class LogView : UserControl, IDisposable
             SetStatus("Введите процент от 0 до 100.");
             return;
         }
+        if (percent == 100)
+        {
+            await NavigateToPageAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true, scrollToEnd: true);
+            return;
+        }
+
         var target = (long)Math.Clamp(_file.Length * percent / 100d, _hiddenOffset, _file.Length);
         try
         {
@@ -1076,14 +1144,13 @@ internal sealed class LogView : UserControl, IDisposable
                     Background = FocusTheme.Panel,
                     Content = new TextBlock
                     {
-                        Text = $"{hit.LineNumber?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"} · {hit.Preview}",
+                        Text = hit.LineNumber is { } line ? $"{LineNumbers.Format(line)} · {hit.Preview}" : hit.Preview,
                         TextWrapping = TextWrapping.Wrap,
                         FontSize = 12,
                         Foreground = FocusTheme.Text,
                     }
                 };
                 SetButtonStyle(button, "focus-quiet");
-                ToolTip.SetTip(button, $"Байт {hit.Offset:N0}");
                 button.Click += async (_, _) => await OpenSearchHitAsync(hit);
                 _searchResultButtons.Children.Add(button);
             }
@@ -1124,7 +1191,7 @@ internal sealed class LogView : UserControl, IDisposable
         var pageEnd = _file.Length;
         var pendingLine = new StringBuilder();
         var pendingOffset = cursor;
-        long? lineNumber = FindLineNumber(cursor);
+        long? lineNumber = FindLineNumber(_reader, cursor, token);
         string? notice = null;
         var skippingOversizedLine = false;
         var nextOffset = cursor;
@@ -1346,7 +1413,7 @@ internal sealed class LogView : UserControl, IDisposable
             await NavigateAsync(_hiddenOffset, false);
         }
         RefreshButtons();
-        SetStatus($"Просмотр и поиск начинаются с байта {_hiddenOffset:N0}. Начало файла не изменено.");
+        SetStatus("Просмотр и поиск начинаются с выбранной строки.");
     }
 
     private async Task TrimBeginningAsync()
@@ -1359,7 +1426,7 @@ internal sealed class LogView : UserControl, IDisposable
         var boundary = _hiddenOffset;
         var expected = _fileStamp;
         var preambleLength = _reader.PreambleLength;
-        var confirm = await ShowConfirmationAsync($"Файл будет обрезан физически до байта {boundary:N0}. Рядом будет создана резервная копия. Продолжить?");
+        var confirm = await ShowConfirmationAsync("Строки перед скрытой границей будут удалены из файла. Рядом будет создана резервная копия. Продолжить?");
         if (!confirm || _closed || _busy)
         {
             return;
@@ -1565,10 +1632,14 @@ internal sealed class LogView : UserControl, IDisposable
 
         _previousOffsets.Clear();
         _hiddenOffset = 0;
-        _lineIndex.Clear();
-        _indexedTo = 0;
-        _indexedLineCount = 0;
-        _indexLabel.Text = "";
+        lock (_lineIndexGate)
+        {
+            _lineIndex.Clear();
+            _indexedTo = 0;
+            _indexedLineCount = 0;
+        }
+        _totalLineCount = null;
+        RefreshLineCount();
         _skippedSearchLines.Clear();
         _searchResults.Clear();
         _searchResultButtons.Children.Clear();
@@ -1614,6 +1685,7 @@ internal sealed class LogView : UserControl, IDisposable
             if (appended)
             {
                 _fileStamp = now;
+                _totalLineCount = null;
                 _observedDigest = TryReadObservedDigest(now.Length);
                 var offset = _followEnd ? _reader.GetEndOffset(_closing.Token) : _page?.StartOffset ?? _hiddenOffset;
                 await LoadPageAsync(offset, saveHistory: false);
@@ -1677,10 +1749,20 @@ internal sealed class LogView : UserControl, IDisposable
         _indexCancellation = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
         var token = _indexCancellation.Token;
         _indexBuilding = true;
-        var startOffset = _indexedTo;
-        var startLine = _indexedLineCount;
+        var reader = _reader;
+        var start = new LogLineCheckpoint(_indexedTo, _indexedLineCount);
+        var length = _file.Length;
+        var batchEnd = start.Offset + Math.Min(IndexBatchBytes, length - start.Offset);
         var generation = _dataGeneration;
-        _ = Task.Run(() => BuildIndex(startOffset, startLine, token), token).ContinueWith(task => Dispatcher.UIThread.Post(() =>
+        _ = Task.Run(() =>
+        {
+            var points = new List<LogLineCheckpoint>();
+            var end = reader.ScanLineBreaks(start, batchEnd, points.Add, token);
+            long? total = end.Offset == length
+                ? end.Lines + (length > reader.PreambleLength && !reader.IsNewlineBefore(length) ? 1 : 0)
+                : null;
+            return (End: end, Points: points, Total: total);
+        }, token).ContinueWith(task => Dispatcher.UIThread.Post(() =>
         {
             _indexBuilding = false;
             if (_closed)
@@ -1698,15 +1780,21 @@ internal sealed class LogView : UserControl, IDisposable
             }
             if (task.Status == TaskStatus.RanToCompletion)
             {
-                _indexedTo = task.Result.EndOffset;
-                _indexedLineCount = task.Result.LineCount;
-                _lineIndex.AddRange(task.Result.Entries);
-                _indexLabel.Text = $"Индекс: {_indexedLineCount:N0} строк до {_indexedTo:N0} байт";
-                if (_page is { } page)
+                var result = task.Result;
+                lock (_lineIndexGate)
                 {
-                    UpdatePageLineNumbers(page);
+                    _indexedTo = result.End.Offset;
+                    _indexedLineCount = result.End.Lines;
+                    _lineIndex.AddRange(result.Points);
                 }
-                if (_indexedTo < _file.Length && !_indexPaused)
+                _totalLineCount = length == _file.Length ? result.Total : null;
+                RefreshLineCount();
+                if (_page is { Rows.Count: > 0 } page && !_displaySourceLineNumbers.Any(line => line.HasValue)
+                    && page.Rows[0].StartOffset <= _indexedTo)
+                {
+                    _ = RefreshCurrentPageNumbersAsync(reader, page, generation);
+                }
+                if (_indexedTo > start.Offset && _indexedTo < _file.Length && !_indexPaused)
                 {
                     StartIndexIfNeeded();
                 }
@@ -1720,125 +1808,94 @@ internal sealed class LogView : UserControl, IDisposable
         RefreshButtons();
     }
 
-    private IndexBuildResult BuildIndex(long startOffset, long startLineCount, CancellationToken token)
+    private long? FindLineNumber(LogDataReader reader, long offset, CancellationToken token)
     {
-        var entries = new List<IndexEntry>();
-        var cursor = startOffset;
-        var lineCount = startLineCount;
-        var batchEnd = startOffset + Math.Min(IndexBatchBytes, _file.Length - startOffset);
-        while (cursor < batchEnd)
-        {
-            token.ThrowIfCancellationRequested();
-            var page = _reader.ReadPage(cursor, cancellationToken: token);
-            if (page.Rows.Count == 0 || page.NextOffset <= cursor)
-            {
-                break;
-            }
-            foreach (var row in page.Rows)
-            {
-                if (IsContinuationAt(row.StartOffset))
-                {
-                    continue;
-                }
-                lineCount++;
-                if (lineCount % 4096 == 0)
-                {
-                    entries.Add(new IndexEntry(row.StartOffset, lineCount));
-                }
-            }
-            cursor = page.NextOffset;
-        }
-        return new IndexBuildResult(cursor, lineCount, entries);
-    }
+        if (offset < reader.PreambleLength) return null;
 
-    private long? FindLineNumber(long offset)
-    {
-        if (offset < 0 || (offset > 128 * 1024 && offset > _indexedTo))
+        LogLineCheckpoint closest;
+        lock (_lineIndexGate)
         {
-            return null;
-        }
-
-        var entry = _lineIndex.LastOrDefault(value => value.Offset <= offset);
-        if (entry is null && _hiddenOffset == 0 && offset <= 128 * 1024)
-        {
-            entry = new IndexEntry(_reader.PreambleLength, 1);
-        }
-        if (entry is null)
-        {
-            return null;
-        }
-
-        var lineNumber = entry.LineNumber;
-        if (offset == entry.Offset)
-        {
-            return lineNumber;
-        }
-        var cursor = entry.Offset;
-        // A sparse checkpoint may be far away in bytes when a log contains very long rows.
-        // Keep this UI lookup bounded even when the background index has already passed offset.
-        var scanLimit = Math.Min(offset, entry.Offset + 16L * 1024 * 1024);
-        while (cursor < offset)
-        {
-            if (cursor >= scanLimit && offset > scanLimit)
+            if (offset - reader.PreambleLength > 128 * 1024 && offset > _indexedTo)
             {
                 return null;
             }
-            var page = _reader.ReadPage(cursor, cancellationToken: _closing.Token);
-            if (page.Rows.Count == 0 || page.NextOffset <= cursor)
+
+            closest = new(reader.PreambleLength, 0);
+            var low = 0;
+            var high = _lineIndex.Count;
+            while (low < high)
             {
-                break;
+                var middle = low + (high - low) / 2;
+                if (_lineIndex[middle].Offset <= offset) low = middle + 1;
+                else high = middle;
             }
-            foreach (var row in page.Rows)
-            {
-                if (row.StartOffset > entry.Offset && row.StartOffset <= offset && !IsContinuationAt(row.StartOffset))
-                {
-                    lineNumber++;
-                }
-            }
-            cursor = page.NextOffset;
+            if (low > 0) closest = _lineIndex[low - 1];
         }
-        if (cursor == offset && offset < _file.Length && !IsContinuationAt(offset))
-        {
-            lineNumber++;
-        }
-        return cursor >= offset ? lineNumber : null;
+
+        var result = reader.ScanLineBreaks(closest, offset, null, token);
+        return result.Offset == offset ? result.Lines + 1 : null;
     }
 
-    private void UpdatePageLineNumbers(LogPage page)
+    private async Task RefreshCurrentPageNumbersAsync(LogDataReader reader, LogPage page, long generation)
     {
-        _displayRowStarts = new int[page.Rows.Count];
-        _displaySourceLineNumbers = new long?[page.Rows.Count];
+        var token = _closing.Token;
+        try
+        {
+            var line = await Task.Run(() => FindLineNumber(reader, page.Rows[0].StartOffset, token), token);
+            if (!_closed && _dataGeneration == generation && ReferenceEquals(_page, page))
+            {
+                UpdatePageLineNumbers(page, line);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (_closed || generation != _dataGeneration) { }
+        catch (IOException error)
+        {
+            if (!_closed && generation == _dataGeneration) SetStatus($"Не удалось уточнить номера строк. {error.Message}");
+        }
+    }
+
+    private void UpdatePageLineNumbers(LogPage page, long? lineNumber)
+    {
+        var rowStarts = new List<int>(page.Rows.Count);
+        var lineNumbers = new List<long?>(page.Rows.Count);
         var textOffset = 0;
         for (var index = 0; index < page.Rows.Count; index++)
         {
-            _displayRowStarts[index] = textOffset;
-            textOffset += page.Rows[index].Text.Length;
-            if (index + 1 < page.Rows.Count && !page.Rows[index + 1].ContinuesLine)
+            var row = page.Rows[index];
+            if (index == 0 || !row.StartsWithinLine)
             {
-                textOffset += Environment.NewLine.Length;
-            }
-        }
-
-        if (page.Rows.Count > 0)
-        {
-            var lineNumber = FindLineNumber(page.Rows[0].StartOffset);
-            for (var index = 0; index < page.Rows.Count; index++)
-            {
-                var isContinuation = index > 0 && IsContinuationAt(page.Rows[index].StartOffset);
-                if (index > 0 && !isContinuation && lineNumber.HasValue)
+                if (index > 0)
                 {
+                    textOffset += Environment.NewLine.Length;
                     lineNumber++;
                 }
-                _displaySourceLineNumbers[index] = isContinuation ? null : lineNumber;
+                rowStarts.Add(textOffset);
+                lineNumbers.Add(lineNumber);
             }
+            textOffset += row.Text.Length;
         }
+        _displayRowStarts = [.. rowStarts];
+        _displaySourceLineNumbers = [.. lineNumbers];
 
-        var firstLine = _displaySourceLineNumbers.FirstOrDefault(value => value.HasValue);
-        var lastLine = _displaySourceLineNumbers.LastOrDefault(value => value.HasValue);
-        _lineNumberLabel.Text = firstLine is { } first && lastLine is { } last
-            ? $"Строки {first:N0}–{last:N0}"
-            : "Строки индексируются";
+        var first = _displaySourceLineNumbers.FirstOrDefault(value => value.HasValue);
+        var last = _displaySourceLineNumbers.LastOrDefault(value => value.HasValue);
+        _lineNumberLabel.Text = first is { } firstLine && last is { } lastLine
+            ? $"Строки {LineNumbers.Format(firstLine)}–{LineNumbers.Format(lastLine)}"
+            : page.Rows.Count == 0 ? "" : "Позиция · " + (_indexPaused ? "нет индекса строк" : "считаются строки");
+        RefreshLineCount();
         UpdateLineGutterText();
+    }
+
+    private void RefreshLineCount()
+    {
+        _positionLabel.Text = KnownLineCount is { } count ? $"Всего строк · {LineNumbers.Format(count)}" : "";
+        _indexLabel.Text = KnownLineCount is null && _indexedLineCount > 0
+            ? $"Посчитано · {LineNumbers.Format(_indexedLineCount)}"
+            : "";
+        var last = _displaySourceLineNumbers.LastOrDefault(value => value.HasValue);
+        var max = Math.Max(KnownLineCount ?? 0, last ?? 0);
+        _lineGutterScrollViewer.Width = Math.Max(54, 18 + _lineGutterText.FontSize * 0.64 * LineNumbers.Format(max).Length);
     }
 
     private void OnLogTextLayoutUpdated(object? sender, EventArgs e)
@@ -1898,13 +1955,13 @@ internal sealed class LogView : UserControl, IDisposable
 
                 var startsLogicalRow = start == _displayRowStarts[rowIndex];
                 values.Add(startsLogicalRow
-                    ? _displaySourceLineNumbers[rowIndex]?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"
+                    ? _displaySourceLineNumbers[rowIndex] is { } line ? LineNumbers.Format(line) : "?"
                     : string.Empty);
             }
         }
         else
         {
-            values.AddRange(_displaySourceLineNumbers.Select(value => value?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"));
+            values.AddRange(_displaySourceLineNumbers.Select(value => value is { } line ? LineNumbers.Format(line) : "?"));
         }
 
         _lineGutterText.Text = string.Join(Environment.NewLine, values);
@@ -1976,7 +2033,7 @@ internal sealed class LogView : UserControl, IDisposable
         var enabled = !_busy && !_closed;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
         _followButton.Content = _followEnd ? "К концу" : "Следовать";
-        _liveLabel.Text = _autoRefresh ? "● Обновляется" : "● На паузе";
+        _liveLabel.Text = _isDraft ? "" : _autoRefresh ? "● Обновляется" : "● На паузе";
         _liveLabel.Foreground = _autoRefresh ? FocusTheme.Success : FocusTheme.Muted;
         _followButton.Background = _followEnd ? FocusTheme.Hover : Brushes.Transparent;
         _followButton.Foreground = _followEnd ? FocusTheme.Accent : FocusTheme.Text;
@@ -1992,16 +2049,21 @@ internal sealed class LogView : UserControl, IDisposable
         _wrapButton.Content = _wordWrap ? "Перенос: вкл." : "Перенос: выкл.";
         _wrapButton.Background = _wordWrap ? FocusTheme.Hover : Brushes.Transparent;
         _wrapButton.Foreground = _wordWrap ? FocusTheme.Accent : FocusTheme.Text;
-        _previousButton.IsEnabled = enabled && _previousOffsets.Count > 0;
+        _previousButton.IsEnabled = enabled && (_previousOffsets.Count > 0 || _page?.StartOffset > _hiddenOffset);
         _nextButton.IsEnabled = enabled && _page?.HasMore == true;
         _startButton.IsEnabled = enabled && _page is not null;
         _endButton.IsEnabled = enabled && _page is not null;
         _middleButton.IsEnabled = enabled && _file.Length > 0;
+        _pauseButton.IsVisible = !_isDraft;
+        _followButton.IsVisible = !_isDraft;
         _pauseButton.IsEnabled = !_closed;
         _followButton.IsEnabled = !_closed;
         _indexButton.IsEnabled = !_closed && (!_indexBuilding || _indexCancellation is not null);
         _cancelIndexButton.IsVisible = _indexBuilding;
         _cancelTrimButton.IsVisible = _trimCancellation is not null;
+        _hideButton.IsVisible = !_isDraft;
+        _revealButton.IsVisible = !_isDraft;
+        _trimButton.IsVisible = !_isDraft;
         _hideButton.IsEnabled = enabled && _page?.Rows.Count > 0;
         _revealButton.IsEnabled = enabled && _hiddenOffset > 0;
         _trimButton.IsEnabled = enabled && _hiddenOffset > 0;
@@ -2124,7 +2186,5 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly record struct MatchSpan(int Index, int Length);
     private sealed record SearchResult(long Offset, long? LineNumber, string Preview, int MatchIndex, int MatchLength);
     private sealed record SearchPage(IReadOnlyList<SearchResult> Results, long NextOffset, bool HasMore, string? Message);
-    private sealed record IndexEntry(long Offset, long LineNumber);
-    private sealed record IndexBuildResult(long EndOffset, long LineCount, IReadOnlyList<IndexEntry> Entries);
     private sealed record MiniSample(long Offset, string Preview);
 }

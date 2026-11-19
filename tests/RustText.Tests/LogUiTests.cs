@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Input;
+using Avalonia.VisualTree;
 using RustText.Demo;
 using RustText.Demo.Logs;
 using Xunit;
@@ -19,6 +20,31 @@ public sealed class LogUiTests
     public LogUiTests(ITestOutputHelper output) => _output = output;
 
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    [Fact]
+    public Task LongLineFragmentsKeepOneGutterNumberAndPreserveFollowingLines() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "long-line.log");
+        var longLine = new string('x', 20_000);
+        await File.WriteAllTextAsync(path, longLine + "\r\nsecond\r\nthird\r\n");
+        var window = new MainWindow();
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+            await InvokeTask(window, "OpenPathAsync", path, true, null);
+            var log = ActiveLog(window);
+            await HeadlessTests.WaitForAsync(() => Page(log) is not null && !(bool)Field(log, "_busy"));
+            var gutter = (TextBlock)Field(log, "_lineGutterText");
+            Assert.Equal(string.Join(Environment.NewLine, "1", "2", "3"), gutter.Text);
+            Assert.Equal("Строки 1–3", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
+            Assert.Equal(string.Join(Environment.NewLine, longLine, "second", "third"), ((TextBox)Field(log, "_logText")).Text);
+        }
+        finally
+        {
+            await CloseMainWindowAsync(window);
+        }
+    });
 
     [Fact]
     public async Task CompactLogKeepsThreeRowsVisibleWithSearchResultsAt760By360()
@@ -110,8 +136,8 @@ public sealed class LogUiTests
             await InvokeTask(log, "NavigateAsync", endOffset, true);
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));
             Assert.Equal(1921, FirstRowNumber(text.Text));
-            Assert.Equal($"Строки {1921:N0}–{2000:N0}", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
-            Assert.StartsWith(1921.ToString("N0", System.Globalization.CultureInfo.InvariantCulture), gutter.Text);
+            Assert.Equal("Строки 1.921–2.000", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
+            Assert.StartsWith("1.921", gutter.Text);
             window.MouseMove(At(0.02));
             window.MouseDown(At(0.02), MouseButton.Left, RawInputModifiers.None);
             window.MouseUp(At(0.02), MouseButton.Left, RawInputModifiers.None);
@@ -120,6 +146,55 @@ public sealed class LogUiTests
             await CloseMainWindowAsync(window);
         });
     }
+
+    [Fact]
+    public Task RestoredDraftShowsGroupedSourceLinesAndScrollsBackToTheStart() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string row = "line-data\n";
+        const int count = 81_000;
+        const int startLine = 60_001;
+        var original = new SessionTab(5, null, TextEncodingKind.Utf8, LineCount: count)
+        {
+            UntitledName = "Большой черновик",
+            DraftOffset = (startLine - 1L) * row.Length
+        };
+        var storage = StorageService.OpenForTesting(profile);
+        await storage.SaveSessionAsync(new SessionState([original]),
+            new Dictionary<long, string> { [original.Id] = string.Concat(Enumerable.Repeat(row, count)) });
+        var window = new MainWindow { Width = 850, Height = 480 };
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+            var log = ActiveLog(window);
+            var lineLabel = (TextBlock)Field(log, "_lineNumberLabel");
+            var countLabel = (TextBlock)Field(log, "_positionLabel");
+            await HeadlessTests.WaitForAsync(() => lineLabel.Text == "Строки 60.001–60.080");
+            Assert.Equal("Всего строк · 81.000", countLabel.Text);
+            Assert.Equal("Большой черновик", ((TextBlock)Field(log, "_fileLabel")).Text);
+            Assert.StartsWith("60.001", ((TextBlock)Field(log, "_lineGutterText")).Text);
+
+            var text = (TextBox)Field(log, "_logText");
+            text.Focus();
+            window.KeyPress(Key.PageUp, RawInputModifiers.None, PhysicalKey.PageUp, "");
+            window.KeyRelease(Key.PageUp, RawInputModifiers.None, PhysicalKey.PageUp, "");
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == (startLine - 81L) * row.Length);
+
+            window.KeyPress(Key.Home, RawInputModifiers.Control, PhysicalKey.Home, "");
+            window.KeyRelease(Key.Home, RawInputModifiers.Control, PhysicalKey.Home, "");
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 0 && lineLabel.Text == "Строки 1–80");
+            await HeadlessTests.WaitForAsync(() => text.GetVisualDescendants().OfType<ScrollViewer>().Any());
+            var scroll = text.GetVisualDescendants().OfType<ScrollViewer>().First();
+            scroll.Offset = new Vector(0, scroll.Extent.Height);
+            var pointer = text.TranslatePoint(new Point(145, 60), window)!.Value;
+            window.MouseWheel(pointer, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 80L * row.Length);
+        }
+        finally
+        {
+            await CloseMainWindowAsync(window);
+        }
+    });
 
     [Fact]
     public async Task SearchNavigatesAndHighlightsLongLineHitsWithF3InBothDirections()

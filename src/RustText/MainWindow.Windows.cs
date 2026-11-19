@@ -16,6 +16,7 @@ public partial class MainWindow
     {
         public StorageService Storage { get; } = StorageService.OpenDefault();
         public SemaphoreSlim SaveGate { get; } = new(1, 1);
+        public SemaphoreSlim CloseGate { get; } = new(1, 1);
         public List<MainWindow> Windows { get; } = [];
         public List<SessionTab> ClosedTabs { get; } = [];
         public HashSet<long> RestoringClosedTabs { get; } = [];
@@ -124,7 +125,6 @@ public partial class MainWindow
             throw;
         }
 
-        if (_tabs.Count == 0 && !_closing) Run(ShowHomeAsync);
         window.Activate();
     }
 
@@ -163,15 +163,9 @@ public partial class MainWindow
 
         RemoveTab(tab);
         destination.MoveTab(copy, group, before);
-    }
-
-    private void ReturnTabsToOtherWindow()
-    {
-        if (FindOtherWindow() is not { } destination) return;
-
-        foreach (var tab in TabsInVisualOrder().ToArray())
+        if (_tabs.Count == 0 && !_closing && destination.IsVisible)
         {
-            TransferTab(tab, destination, destination._active, null);
+            Close();
         }
     }
 

@@ -69,6 +69,29 @@ public sealed class LogTests
         Assert.False(page.HasMore);
     }
 
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8, false, 1)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, true, 2)]
+    [InlineData(TextEncodingKind.Utf16BigEndian, true, 2)]
+    public void SparseScanCountsCrLfAcrossBlocksAndCanResume(TextEncodingKind encoding, bool preamble, int unit)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "index.log");
+        const int block = 256 * 1024;
+        File.WriteAllBytes(path, Encode(new string('a', block / unit - 1) + "\r\nsecond\rthird\nfourth", encoding, preamble));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        var points = new List<LogLineCheckpoint>();
+
+        var complete = reader.ScanLineBreaks(default, file.Length, points.Add, CancellationToken.None);
+        Assert.Equal(file.Length, complete.Offset);
+        Assert.Equal(3L, complete.Lines);
+        var first = points[0];
+        Assert.Equal(reader.PreambleLength + block, first.Offset);
+        Assert.Equal(1L, first.Lines);
+        Assert.Equal(complete, reader.ScanLineBreaks(first, file.Length, null, CancellationToken.None));
+    }
+
     private static byte[] Encode(string text, TextEncodingKind encoding, bool preamble)
     {
         Encoding codec = encoding switch

@@ -67,6 +67,36 @@ public sealed class MainWindowTabDoubleClickTests
             }
         });
 
+    [Fact]
+    public Task DoubleClickOnTabPaddingClosesThatTab() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = new MainWindow([]) { Width = 1100, Height = 760 };
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_restoreFinished"));
+        try
+        {
+            Invoke(window, "NewTab", "first tab");
+            Invoke(window, "NewTab", "second tab");
+            var group = Field<object>(window, "_active");
+            var tabs = (WorkspaceTabs)group.GetType().GetProperty("Tabs")!.GetValue(group)!;
+            await HeadlessTests.WaitForAsync(() => tabs.Items.OfType<TabItem>().Count() == 2
+                && tabs.Items.OfType<TabItem>().All(item => item.Bounds.Width > 0));
+
+            var tab = tabs.Items.OfType<TabItem>().First();
+            var surface = Assert.Single(tab.GetVisualDescendants().OfType<Border>(), border => border.Name == "TabSurface");
+            var point = surface.TranslatePoint(new Point(surface.Bounds.Width / 2, 1), window)!.Value;
+            Assert.Equal(2, TabCount(window));
+
+            DoubleClick(window, point);
+            await HeadlessTests.WaitForAsync(() => TabCount(window) == 1);
+        }
+        finally
+        {
+            window.Close();
+            await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_closed"));
+        }
+    });
+
     private static void DoubleClick(Window window, Point point)
     {
         window.MouseMove(point);

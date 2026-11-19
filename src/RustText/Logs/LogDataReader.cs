@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
@@ -13,6 +14,7 @@ internal sealed class LogDataReader
     private const int MaximumFrameBytes = 64 * 1024;
     private const int DefaultPageSize = 80;
     private const int DefaultFrameBytes = 16 * 1024;
+    private const int IndexBufferBytes = 256 * 1024;
     internal const int DefaultPageBytes = 128 * 1024;
 
     private readonly FileStream _file;
@@ -54,6 +56,83 @@ internal sealed class LogDataReader
     }
 
     public bool IsNewlineBefore(long offset) => IsNewlineBefore(_file.SafeFileHandle, offset);
+
+    public LogLineCheckpoint ScanLineBreaks(LogLineCheckpoint start, long end,
+        Action<LogLineCheckpoint>? checkpoint, CancellationToken token)
+    {
+        var length = _file.Length;
+        if (length < _bomLength) return new(length, 0);
+        var offset = Math.Clamp(start.Offset, _bomLength, length);
+        if (_codeUnitBytes == 2) offset -= (offset - _bomLength) % 2;
+        end = Math.Clamp(end, offset, length);
+        var lines = start.Lines;
+        var handle = _file.SafeFileHandle;
+        var lastCr = long.MinValue;
+        if (offset >= _bomLength + _codeUnitBytes)
+        {
+            Span<byte> preceding = stackalloc byte[2];
+            var unit = preceding[.._codeUnitBytes];
+            if (RandomAccess.Read(handle, unit, offset - _codeUnitBytes) == _codeUnitBytes && IsCarriageReturn(unit))
+            {
+                lastCr = offset - _codeUnitBytes;
+            }
+        }
+
+        var buffer = ArrayPool<byte>.Shared.Rent(IndexBufferBytes);
+        try
+        {
+            while (offset < end)
+            {
+                token.ThrowIfCancellationRequested();
+                var request = (int)Math.Min(IndexBufferBytes, end - offset);
+                var read = 0;
+                while (read < request)
+                {
+                    var next = RandomAccess.Read(handle, buffer.AsSpan(read, request - read), offset + read);
+                    if (next == 0) break;
+                    read += next;
+                }
+                if (read == 0) break;
+
+                var bytes = buffer.AsSpan(0, read);
+                if (_codeUnitBytes == 1)
+                {
+                    var i = 0;
+                    while (i < bytes.Length)
+                    {
+                        var next = bytes[i..].IndexOfAny((byte)'\r', (byte)'\n');
+                        if (next < 0) break;
+                        i += next;
+                        CountEnding(bytes[i] == '\r', offset + i);
+                        i++;
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i + 2 <= bytes.Length; i += 2)
+                    {
+                        var unit = bytes.Slice(i, 2);
+                        if (IsCarriageReturn(unit)) CountEnding(true, offset + i);
+                        else if (IsLineFeed(unit)) CountEnding(false, offset + i);
+                    }
+                }
+
+                offset += read;
+                checkpoint?.Invoke(new(offset, lines));
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+        return new(offset, lines);
+
+        void CountEnding(bool isCr, long position)
+        {
+            if (isCr || lastCr != position - _codeUnitBytes) lines++;
+            if (isCr) lastCr = position;
+        }
+    }
 
     public static TextEncodingKind DetectEncoding(FileStream file, TextEncodingKind? requested)
     {
@@ -181,7 +260,8 @@ internal sealed class LogDataReader
                     readOffset + rowEnd,
                     text,
                     startsWithinLine || wasTruncated,
-                    wasTruncated));
+                    wasTruncated,
+                    startsWithinLine));
             }
 
             position = rowEnd;
@@ -235,16 +315,19 @@ internal sealed class LogDataReader
         if (lineEnding.Index >= 0)
         {
             var afterLine = aligned + lineEnding.Index + lineEnding.Length;
-            return afterLine < length ? afterLine : 0;
+            return afterLine < length ? afterLine : GetPreviousPageOffset(length, cancellationToken);
         }
 
-        return length - aligned <= MidpointScanBytes ? 0 : aligned;
+        return aligned;
     }
 
-    public long GetEndOffset(CancellationToken cancellationToken = default)
+    public long GetEndOffset(CancellationToken cancellationToken = default) =>
+        GetPreviousPageOffset(_file.Length, cancellationToken);
+
+    public long GetPreviousPageOffset(long endOffset, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var length = _file.Length;
+        var length = Math.Clamp(endOffset, 0, _file.Length);
         if (length <= _bomLength + 1)
         {
             return 0;
@@ -569,4 +652,7 @@ internal sealed record LogRow(
     long EndOffset,
     string Text,
     bool ContinuesLine,
-    bool IsTruncated);
+    bool IsTruncated,
+    bool StartsWithinLine = false);
+
+internal readonly record struct LogLineCheckpoint(long Offset, long Lines);
