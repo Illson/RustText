@@ -183,99 +183,108 @@ internal sealed class LogDataReader
             : requestedOffset;
         var readOffset = Math.Min(requestedOffset, alignedOffset);
         var readLength = (int)Math.Min((long)maxPageBytes + LookaheadBytes, observedLength - readOffset);
-        var bytes = ReadWindow(_file.SafeFileHandle, readOffset, readLength, cancellationToken);
-        var firstPosition = (int)Math.Min(Math.Max(_bomLength, alignedOffset) - readOffset, bytes.Length);
-        var position = firstPosition;
-
-        var pageEnd = Math.Min(bytes.Length, maxPageBytes);
-        var rows = new List<LogRow>(Math.Min(pageSize, maxPageBytes / maxFrameBytes));
-        var inputStartsWithinLine = alignedOffset > _bomLength
-            && !IsNewlineBefore(_file.SafeFileHandle, alignedOffset);
-
-        while (rows.Count < pageSize && position < pageEnd)
+        var buffer = ArrayPool<byte>.Shared.Rent(readLength);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var rowStart = position;
-            var frameLimit = Math.Min(maxFrameBytes, pageEnd - position);
-            frameLimit -= frameLimit % _codeUnitBytes;
-            if (frameLimit == 0)
-            {
-                break;
-            }
+            var read = ReadWindowInto(_file.SafeFileHandle, readOffset, buffer.AsSpan(0, readLength), cancellationToken);
+            ReadOnlySpan<byte> bytes = buffer.AsSpan(0, read);
+            var firstPosition = (int)Math.Min(Math.Max(_bomLength, alignedOffset) - readOffset, bytes.Length);
+            var position = firstPosition;
 
-            var frame = bytes.AsSpan(position, frameLimit);
-            var lineEnding = FindLineEnding(frame);
-            var terminated = lineEnding.Index >= 0;
-            var textByteCount = terminated ? lineEnding.Index : frameLimit;
-            var consumedBytes = terminated ? lineEnding.Index + lineEnding.Length : frameLimit;
-            var wasTruncated = false;
+            var pageEnd = Math.Min(bytes.Length, maxPageBytes);
+            var rows = new List<LogRow>(Math.Min(pageSize, maxPageBytes / maxFrameBytes));
+            var inputStartsWithinLine = alignedOffset > _bomLength
+                && !IsNewlineBefore(_file.SafeFileHandle, alignedOffset);
 
-            // A CR at the final code unit of a frame is already a valid
-            // terminator, but when its LF lies in lookahead, consume both so
-            // CRLF is never split across pages.
-            if (terminated && lineEnding.Length == _codeUnitBytes
-                && IsCarriageReturn(frame.Slice(lineEnding.Index, _codeUnitBytes))
-                && TryGetLineEndingAt(bytes, position + frameLimit, bytes.Length, out var followingEnding)
-                && followingEnding == _codeUnitBytes
-                && IsLineFeed(bytes.AsSpan(position + frameLimit, _codeUnitBytes)))
+            while (rows.Count < pageSize && position < pageEnd)
             {
-                consumedBytes += _codeUnitBytes;
-            }
-
-            if (!terminated)
-            {
-                var followingIsLineEnd = TryGetLineEndingAt(bytes, position + frameLimit, bytes.Length, out var followingEndingBytes);
-                var hasFollowingContent = position + frameLimit < observedLength - readOffset
-                    && !followingIsLineEnd;
-                if (hasFollowingContent)
+                cancellationToken.ThrowIfCancellationRequested();
+                var rowStart = position;
+                var frameLimit = Math.Min(maxFrameBytes, pageEnd - position);
+                frameLimit -= frameLimit % _codeUnitBytes;
+                if (frameLimit == 0)
                 {
-                    var safeByteCount = _codeUnitBytes == 1
-                        ? CompleteUtf8PrefixLength(frame)
-                        : CompleteUtf16PrefixLength(frame);
-                    textByteCount = safeByteCount;
-                    consumedBytes = safeByteCount;
-                    wasTruncated = true;
+                    break;
                 }
-                else if (followingIsLineEnd)
+
+                var frame = bytes.Slice(position, frameLimit);
+                var lineEnding = FindLineEnding(frame);
+                var terminated = lineEnding.Index >= 0;
+                var textByteCount = terminated ? lineEnding.Index : frameLimit;
+                var consumedBytes = terminated ? lineEnding.Index + lineEnding.Length : frameLimit;
+                var wasTruncated = false;
+
+                // A CR at the final code unit of a frame is already a valid
+                // terminator, but when its LF lies in lookahead, consume both so
+                // CRLF is never split across pages.
+                if (terminated && lineEnding.Length == _codeUnitBytes
+                    && IsCarriageReturn(frame.Slice(lineEnding.Index, _codeUnitBytes))
+                    && TryGetLineEndingAt(bytes, position + frameLimit, out var followingEnding)
+                    && followingEnding == _codeUnitBytes
+                    && IsLineFeed(bytes.Slice(position + frameLimit, _codeUnitBytes)))
                 {
-                    terminated = true;
-                    consumedBytes += followingEndingBytes;
+                    consumedBytes += _codeUnitBytes;
                 }
+
+                if (!terminated)
+                {
+                    var followingIsLineEnd = TryGetLineEndingAt(bytes, position + frameLimit, out var followingEndingBytes);
+                    var hasFollowingContent = position + frameLimit < observedLength - readOffset
+                        && !followingIsLineEnd;
+                    if (hasFollowingContent)
+                    {
+                        var safeByteCount = _codeUnitBytes == 1
+                            ? CompleteUtf8PrefixLength(frame)
+                            : CompleteUtf16PrefixLength(frame);
+                        textByteCount = safeByteCount;
+                        consumedBytes = safeByteCount;
+                        wasTruncated = true;
+                    }
+                    else if (followingIsLineEnd)
+                    {
+                        terminated = true;
+                        consumedBytes += followingEndingBytes;
+                    }
+                }
+
+                if (consumedBytes <= 0)
+                {
+                    break;
+                }
+
+                var startsWithinLine = rowStart == firstPosition
+                    ? inputStartsWithinLine
+                    : !IsNewlineBefore(bytes, rowStart);
+                var text = _decoder.GetString(bytes.Slice(position, textByteCount));
+                var rowEnd = position + consumedBytes;
+                if (!(startsWithinLine && terminated && text.Length == 0))
+                {
+                    rows.Add(new LogRow(
+                        readOffset + rowStart,
+                        readOffset + rowEnd,
+                        text,
+                        startsWithinLine || wasTruncated,
+                        wasTruncated,
+                        startsWithinLine));
+                }
+
+                position = rowEnd;
             }
 
-            if (consumedBytes <= 0)
-            {
-                break;
-            }
-
-            var startsWithinLine = rowStart == firstPosition
-                ? inputStartsWithinLine
-                : !IsNewlineBefore(bytes, rowStart);
-            var text = _decoder.GetString(bytes.AsSpan(position, textByteCount));
-            var rowEnd = position + consumedBytes;
-            if (!(startsWithinLine && terminated && text.Length == 0))
-            {
-                rows.Add(new LogRow(
-                    readOffset + rowStart,
-                    readOffset + rowEnd,
-                    text,
-                    startsWithinLine || wasTruncated,
-                    wasTruncated,
-                    startsWithinLine));
-            }
-
-            position = rowEnd;
+            var nextOffset = readOffset + position;
+            var currentLength = _file.Length;
+            return new LogPage(
+                rows,
+                readOffset,
+                nextOffset,
+                observedLength,
+                nextOffset < currentLength,
+                currentLength < observedLength);
         }
-
-        var nextOffset = readOffset + position;
-        var currentLength = _file.Length;
-        return new LogPage(
-            rows,
-            readOffset,
-            nextOffset,
-            observedLength,
-            nextOffset < currentLength,
-            currentLength < observedLength);
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     public long GetMidpointOffset(CancellationToken cancellationToken = default)
@@ -429,15 +438,15 @@ internal sealed class LogDataReader
         return (-1, 0);
     }
 
-    private bool TryGetLineEndingAt(byte[] bytes, int offset, int availableLength, out int endingLength)
+    private bool TryGetLineEndingAt(ReadOnlySpan<byte> bytes, int offset, out int endingLength)
     {
         endingLength = 0;
-        if (offset < 0 || offset + _codeUnitBytes > availableLength)
+        if (offset < 0 || offset + _codeUnitBytes > bytes.Length)
         {
             return false;
         }
 
-        var codeUnit = bytes.AsSpan(offset, _codeUnitBytes);
+        var codeUnit = bytes.Slice(offset, _codeUnitBytes);
         if (IsLineFeed(codeUnit))
         {
             endingLength = _codeUnitBytes;
@@ -449,8 +458,8 @@ internal sealed class LogDataReader
         }
 
         endingLength = _codeUnitBytes;
-        if (offset + _codeUnitBytes * 2 <= availableLength
-            && IsLineFeed(bytes.AsSpan(offset + _codeUnitBytes, _codeUnitBytes)))
+        if (offset + _codeUnitBytes * 2 <= bytes.Length
+            && IsLineFeed(bytes.Slice(offset + _codeUnitBytes, _codeUnitBytes)))
         {
             endingLength += _codeUnitBytes;
         }
@@ -530,20 +539,20 @@ internal sealed class LogDataReader
         return aligned;
     }
 
-    private bool IsNewlineBefore(byte[] bytes, int localOffset)
+    private bool IsNewlineBefore(ReadOnlySpan<byte> bytes, int localOffset)
     {
         if (localOffset < _codeUnitBytes)
         {
             return false;
         }
-        var previous = bytes.AsSpan(localOffset - _codeUnitBytes, _codeUnitBytes);
+        var previous = bytes.Slice(localOffset - _codeUnitBytes, _codeUnitBytes);
         if (IsLineFeed(previous))
         {
             return true;
         }
         return IsCarriageReturn(previous)
             && (localOffset + _codeUnitBytes > bytes.Length
-                || !IsLineFeed(bytes.AsSpan(localOffset, _codeUnitBytes)));
+                || !IsLineFeed(bytes.Slice(localOffset, _codeUnitBytes)));
     }
 
     private bool IsNewlineBefore(SafeFileHandle handle, long offset)
@@ -591,22 +600,28 @@ internal sealed class LogDataReader
     private static byte[] ReadWindow(SafeFileHandle handle, long offset, int length, CancellationToken cancellationToken)
     {
         var bytes = new byte[length];
+        var read = ReadWindowInto(handle, offset, bytes, cancellationToken);
+        if (read != bytes.Length)
+        {
+            Array.Resize(ref bytes, read);
+        }
+        return bytes;
+    }
+
+    private static int ReadWindowInto(SafeFileHandle handle, long offset, Span<byte> buffer, CancellationToken cancellationToken)
+    {
         var totalRead = 0;
-        while (totalRead < length)
+        while (totalRead < buffer.Length)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var read = RandomAccess.Read(handle, bytes.AsSpan(totalRead), offset + totalRead);
+            var read = RandomAccess.Read(handle, buffer[totalRead..], offset + totalRead);
             if (read == 0)
             {
                 break;
             }
             totalRead += read;
         }
-        if (totalRead != bytes.Length)
-        {
-            Array.Resize(ref bytes, totalRead);
-        }
-        return bytes;
+        return totalRead;
     }
 
     private static (Encoding Encoding, int CodeUnitBytes) CreateEncoding(TextEncodingKind encoding)

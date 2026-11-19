@@ -53,6 +53,32 @@ public sealed class LogTests
     }
 
     [Fact]
+    public void ReadPage_StopsAtEndAfterConsumingCrLfAcrossPageBoundary()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "page-boundary.log");
+        const int pageBytes = 32;
+        var prefix = new string('a', pageBytes - 1);
+        const string tail = "tail";
+        File.WriteAllText(path, prefix + "\r\n" + tail, new UTF8Encoding(false));
+
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        var page = reader.ReadPage(0, maxFrameBytes: pageBytes, maxPageBytes: pageBytes);
+        var last = reader.ReadPage(page.NextOffset, maxFrameBytes: pageBytes, maxPageBytes: pageBytes);
+        var eof = reader.ReadPage(last.NextOffset);
+
+        Assert.Equal(prefix, Assert.Single(page.Rows).Text);
+        Assert.Equal((long)pageBytes + 1, page.NextOffset);
+        Assert.True(page.HasMore);
+        Assert.Equal(tail, Assert.Single(last.Rows).Text);
+        Assert.Equal(file.Length, last.NextOffset);
+        Assert.False(last.HasMore);
+        Assert.Empty(eof.Rows);
+        Assert.Equal(file.Length, eof.NextOffset);
+    }
+
+    [Fact]
     public void GetEndOffset_1000CrDelimitedRowsReturnsLastEighty()
     {
         using var directory = new TempDirectory();
