@@ -117,6 +117,128 @@ public sealed class UpdaterTests
     }
 
     [Fact]
+    public void LegacyRustCleanupRemovesOnlyKnownFilesAndLeavesUnrelatedContents()
+    {
+        using var install = new TempDirectory();
+        var stage = Path.Combine(install.Path, ".rusttext-update-test");
+        Directory.CreateDirectory(stage);
+        foreach (var name in new[] { "replacement.exe", ".rusttext-previous.exe", ".helper-ready", "rusttext-updater.exe" })
+            File.WriteAllText(Path.Combine(stage, name), name);
+        var unrelated = Path.Combine(stage, "user-data.bin");
+        File.WriteAllText(unrelated, "keep");
+
+        UpdateService.CleanupLegacyRustStagingDirectory(install.Path, stage);
+
+        Assert.True(Directory.Exists(stage));
+        Assert.Equal("keep", File.ReadAllText(unrelated));
+        Assert.Equal("user-data.bin", Path.GetFileName(Assert.Single(Directory.GetFiles(stage))));
+    }
+
+    [Fact]
+    public void LegacyRustCleanupRemovesOwnedStageWhenItContainsOnlyKnownFiles()
+    {
+        using var install = new TempDirectory();
+        var stage = Path.Combine(install.Path, ".rusttext-update-test");
+        Directory.CreateDirectory(stage);
+        foreach (var name in new[] { "replacement.exe", ".rusttext-previous.exe", ".helper-ready", "rusttext-updater.exe" })
+            File.WriteAllText(Path.Combine(stage, name), name);
+
+        UpdateService.CleanupLegacyRustStagingDirectory(install.Path, stage);
+
+        Assert.False(Directory.Exists(stage));
+    }
+
+    [Fact]
+    public void LegacyRustCleanupAcceptsExtendedWin32Paths()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using var install = new TempDirectory();
+        var normalStage = Path.Combine(install.Path, ".rusttext-update-test");
+        Directory.CreateDirectory(normalStage);
+        File.WriteAllText(Path.Combine(normalStage, "replacement.exe"), "temporary");
+        var extendedInstall = @"\\?\" + Path.GetFullPath(install.Path);
+        var extendedStage = @"\\?\" + Path.GetFullPath(normalStage);
+
+        Assert.True(UpdateService.IsLegacyRustStagingDirectory(extendedInstall, extendedStage));
+        UpdateService.CleanupLegacyRustStagingDirectory(extendedInstall, extendedStage);
+
+        Assert.False(Directory.Exists(normalStage));
+    }
+
+    [Fact]
+    public void LegacyRustCleanupRejectsOutsideAndUnexpectedDirectories()
+    {
+        using var install = new TempDirectory();
+        using var outside = new TempDirectory();
+        var outsideStage = Path.Combine(outside.Path, ".rusttext-update-outside");
+        var unexpectedStage = Path.Combine(install.Path, "unrelated-update");
+        Directory.CreateDirectory(outsideStage);
+        Directory.CreateDirectory(unexpectedStage);
+        var outsideFile = Path.Combine(outsideStage, "replacement.exe");
+        var unexpectedFile = Path.Combine(unexpectedStage, "replacement.exe");
+        File.WriteAllText(outsideFile, "keep");
+        File.WriteAllText(unexpectedFile, "keep");
+
+        UpdateService.CleanupLegacyRustStagingDirectory(install.Path, outsideStage);
+        UpdateService.CleanupLegacyRustStagingDirectory(install.Path, unexpectedStage);
+        Assert.False(UpdateService.IsLegacyRustStagingDirectory(install.Path, Path.GetFileName(unexpectedStage)));
+
+        Assert.Equal("keep", File.ReadAllText(outsideFile));
+        Assert.Equal("keep", File.ReadAllText(unexpectedFile));
+    }
+
+    [Fact]
+    public void LegacyRustCleanupDoesNotFollowFileLinks()
+    {
+        using var install = new TempDirectory();
+        using var destination = new TempDirectory();
+        var stage = Path.Combine(install.Path, ".rusttext-update-test");
+        Directory.CreateDirectory(stage);
+        var destinationFile = Path.Combine(destination.Path, "preserve.bin");
+        File.WriteAllText(destinationFile, "preserve");
+        var link = Path.Combine(stage, "replacement.exe");
+        try
+        {
+            File.CreateSymbolicLink(link, destinationFile);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        UpdateService.CleanupLegacyRustStagingDirectory(install.Path, stage);
+
+        Assert.True(File.Exists(link));
+        Assert.Equal("preserve", File.ReadAllText(destinationFile));
+        Assert.True(Directory.Exists(stage));
+    }
+
+    [Fact]
+    public void LegacyRustCleanupRejectsReparsePointStagingDirectory()
+    {
+        using var install = new TempDirectory();
+        using var destination = new TempDirectory();
+        var destinationFile = Path.Combine(destination.Path, "replacement.exe");
+        File.WriteAllText(destinationFile, "preserve");
+        var link = Path.Combine(install.Path, ".rusttext-update-link");
+        try
+        {
+            Directory.CreateSymbolicLink(link, destination.Path);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        UpdateService.CleanupLegacyRustStagingDirectory(install.Path, link);
+
+        Assert.True(Directory.Exists(link));
+        Assert.Equal("preserve", File.ReadAllText(destinationFile));
+    }
+
+    [Fact]
     public async Task SingleExeBundleStagesAndUpdatesWithoutDeletingLegacySidecars()
     {
         using var directory = new TempDirectory();
