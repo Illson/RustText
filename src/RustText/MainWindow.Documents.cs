@@ -525,7 +525,7 @@ public partial class MainWindow
                     DraftOffset = 0,
                     UntitledName = title
                 };
-                saved = await _storage.SaveClosedDraftAsync(saved, openReader, source.Token);
+                saved = await SessionStorage.SaveClosedDraftAsync(saved, openReader, source.Token);
                 long? byteCaret = editor is null
                     ? null
                     : await Task.Run(() => (long)Encoding.UTF8.GetByteCount(prefix) + Encoding.UTF8.GetByteCount(insertedText), source.Token);
@@ -544,7 +544,7 @@ public partial class MainWindow
                 {
                     _ = DetachEditor(tab);
                 }
-                AttachPagedDraftEditor(tab, saved, _storage.GetDraftPath(saved)!, focus: hadFocus, byteCaret: byteCaret);
+                AttachPagedDraftEditor(tab, saved, SessionStorage.GetDraftPath(saved)!, focus: hadFocus, byteCaret: byteCaret);
                 UpdateTab(tab);
             }
             finally

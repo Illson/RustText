@@ -16,6 +16,7 @@ public partial class MainWindow
     {
         _home = true;
         SetCaption(null);
+        _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
         if (!_home || _closed) return;
 
@@ -42,6 +43,30 @@ public partial class MainWindow
         head.Children.Add(new TextBlock { Text = "История файлов", FontSize = 20, VerticalAlignment = VerticalAlignment.Center });
         head.Children.Add(FocusButton(Button("Открыть…", () => Run(() => OpenDialogAsync())), primary: true));
         head.Children.Add(FocusButton(Button("Новый документ", () => { ShowGroups(); NewTab(); })));
+        var workspaceButtons = new WrapPanel { ItemSpacing = 5, LineSpacing = 4 };
+        foreach (var workspace in _workspace.Catalog.Workspaces)
+        {
+            var label = workspace.Id == _workspaceId ? workspace.Name + " · открыто" : workspace.Name;
+            workspaceButtons.Children.Add(FocusButton(Button(label,
+                () => Run(() => SwitchWorkspaceAsync(workspace.Id)))));
+        }
+        workspaceButtons.Children.Add(FocusButton(Button("Управление…", () => Run(ShowWorkspacesAsync))));
+        head.Children.Add(new Border
+        {
+            Background = FocusTheme.Deep,
+            BorderBrush = FocusTheme.Border,
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(8),
+            Child = new StackPanel
+            {
+                Spacing = 6,
+                Children =
+                {
+                    new TextBlock { Text = "Рабочие пространства", FontWeight = FontWeight.SemiBold },
+                    workspaceButtons
+                }
+            }
+        });
         if (_tabs.Count > 0) head.Children.Add(FocusButton(Button("К вкладкам", ShowGroups)));
 
         var surface = new Grid
@@ -93,7 +118,7 @@ public partial class MainWindow
         Task<long?> FileSize(string path) => CachedSize(fileSizes, path, () => path);
 
         Task<long?> DraftSize(SessionTab item) => item.DraftRef is { } reference
-            ? CachedSize(draftSizes, reference, () => _storage.GetDraftPath(item)) : Task.FromResult<long?>(0);
+            ? CachedSize(draftSizes, reference, () => SessionStorage.GetDraftPath(item)) : Task.FromResult<long?>(0);
 
         async Task UpdateGhostSizeAsync(int requestedRevision, Task<long?>[] sizes, int count)
         {
@@ -247,8 +272,8 @@ public partial class MainWindow
             {
                 await SaveWorkspaceSessionAsync(excludeWindow: null, forgetClosedTab: saved);
                 var stillPresent = saved.DraftRef is { } reference && !reference.StartsWith("legacy/", StringComparison.Ordinal)
-                    && File.Exists(_storage.GetDraftPath(saved));
-                if (stillPresent) _workspace.LastCheckpoint = null;
+                    && File.Exists(SessionStorage.GetDraftPath(saved));
+                if (stillPresent) _workspace.SetLastCheckpoint(WorkspaceCacheKey, null);
                 SetStatus(stillPresent ? "Запись удалена. Файл черновика пока остаётся в профиле." : "Запись удалена.");
             }
             finally { RefreshHistoryMenus(); }

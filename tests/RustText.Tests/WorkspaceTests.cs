@@ -27,6 +27,129 @@ namespace RustText.Tests;
 public sealed class WorkspaceTests
 {
     [Fact]
+    public Task SavedWorkspaceCopiesTabsAndLayoutAndReusesTheLiveViewAfterSwitching() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "workspace-file.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var window = await OpenWorkspaceAsync(path);
+        MainWindow? reopened = null;
+        try
+        {
+            var fileTab = Assert.Single(Tabs(window));
+            var originalEditor = Read<TextEditor>(fileTab, "Editor");
+            originalEditor.Document.Insert(originalEditor.Document.TextLength, " + edited");
+            Assert.True(Read<bool>(fileTab, "Dirty"));
+            Invoke(window, "SplitGroup", Assert.Single(Groups(window)), Orientation.Horizontal);
+            Invoke(window, "NewTab", "editable scratch text");
+            var originalDocument = originalEditor.Document;
+            var originalGroupCount = Groups(window).Length;
+
+            var create = CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Project copy");
+            await KeepDraftsDialogAsync(window);
+            await create;
+            var createdId = (string)Field(window, "_workspaceId");
+            Assert.NotEqual(WorkspaceCatalogStore.DefaultWorkspaceId, createdId);
+            Assert.Equal(originalGroupCount, Groups(window).Length);
+            Assert.Equal(3, Tabs(window).Count());
+            foreach (var tab in Tabs(window).Where(tab => Property(tab, "Deferred") is not null).ToArray())
+                await CallAsync(window, "ActivateDeferredAsync", tab);
+            Assert.Contains(Tabs(window), tab => Property(tab, "Path")?.Equals(path) == true
+                && Read<TextEditor>(tab, "Editor").Text == "before + edited");
+            Assert.Contains(Tabs(window), tab => Property(tab, "Path") is null
+                && Read<TextEditor>(tab, "Editor").Text == "editable scratch text");
+
+            await SwitchKeepingDraftsAsync(window, WorkspaceCatalogStore.DefaultWorkspaceId);
+            var restoredOldFile = Tabs(window).Single(tab => Equals(Property(tab, "Path"), path));
+            Assert.Same(originalDocument, Read<TextEditor>(restoredOldFile, "Editor").Document);
+            Assert.Equal(originalGroupCount, Groups(window).Length);
+            await SwitchKeepingDraftsAsync(window, createdId);
+            Assert.Equal(originalGroupCount, Groups(window).Length);
+
+            await CloseAsync(window);
+            reopened = await OpenWorkspaceAsync();
+            Assert.Equal(createdId, Field(reopened, "_workspaceId"));
+            Assert.Equal(3, Tabs(reopened).Count());
+            foreach (var tab in Tabs(reopened).Where(tab => Property(tab, "Deferred") is not null).ToArray())
+                await CallAsync(reopened, "ActivateDeferredAsync", tab);
+            Assert.Contains(Tabs(reopened), tab => Property(tab, "Path")?.Equals(path) == true
+                && Read<TextEditor>(tab, "Editor").Text == "before + edited");
+            Assert.Contains(Tabs(reopened), tab => Property(tab, "Path") is null
+                && Read<TextEditor>(tab, "Editor").Text == "editable scratch text");
+        }
+        finally
+        {
+            if (window.IsVisible) await CloseAsync(window);
+            if (reopened is { IsVisible: true }) await CloseAsync(reopened);
+        }
+    });
+
+    [Fact]
+    public Task EmptyStartupLeavesTheLastSavedWorkspaceAvailable() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "kept-session.txt");
+        await File.WriteAllTextAsync(path, "saved document");
+        var window = await OpenWorkspaceAsync(path);
+        MainWindow? empty = null;
+        try
+        {
+            await CallAsync(window, "SaveSessionAsync");
+            var storage = StorageService.OpenForTesting(profile);
+            await storage.SaveSettingsAsync(new UserSettings { WorkspaceStartupMode = WorkspaceStartupMode.Empty });
+            await CloseAsync(window);
+
+            empty = await OpenWorkspaceAsync();
+            Assert.Empty(Tabs(empty));
+            Assert.True((bool)Field(empty, "_startEmpty"));
+            await CloseAsync(empty);
+
+            var session = await storage.LoadSessionAsync();
+            Assert.Equal(path, Assert.Single(session!.Tabs).Path);
+        }
+        finally
+        {
+            if (window.IsVisible) await CloseAsync(window);
+            if (empty is { IsVisible: true }) await CloseAsync(empty);
+        }
+    });
+
+    [Fact]
+    public Task CorruptNamedWorkspaceIsReportedAndItsFilesAreNotOverwritten() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "default-session.txt");
+        await File.WriteAllTextAsync(path, "default remains");
+        var window = await OpenWorkspaceAsync(path);
+        MainWindow? reopened = null;
+        try
+        {
+            await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Project");
+            var workspaceId = (string)Field(window, "_workspaceId");
+            await CloseAsync(window);
+
+            var workspaceStorage = StorageService.OpenWorkspace(profile, workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+            var pointer = Path.Combine(workspaceStorage.RootDirectory, "session", "latest.json");
+            var backupPointer = Path.Combine(workspaceStorage.RootDirectory, "session", "previous.json");
+            await File.WriteAllTextAsync(pointer, "missing-checkpoint");
+            await File.WriteAllTextAsync(backupPointer, "missing-backup");
+
+            reopened = await OpenWorkspaceAsync();
+            Assert.Empty(Tabs(reopened));
+            Assert.Contains("не удалось прочитать", reopened.FindControl<TextBlock>("StatusText")!.Text,
+                StringComparison.OrdinalIgnoreCase);
+            await CloseAsync(reopened);
+
+            Assert.Equal("missing-checkpoint", await File.ReadAllTextAsync(pointer));
+            Assert.Equal("missing-backup", await File.ReadAllTextAsync(backupPointer));
+            var defaultState = await StorageService.OpenForTesting(profile).LoadSessionAsync();
+            Assert.Equal(path, Assert.Single(defaultState!.Tabs).Path);
+        }
+        finally
+        {
+            if (window.IsVisible) await CloseAsync(window);
+            if (reopened is { IsVisible: true }) await CloseAsync(reopened);
+        }
+    });
+
+    [Fact]
     public Task UpdateNoticeKeepsEditorActiveAndOpensReleaseNotesOnDemand() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "editor.txt");
@@ -1395,6 +1518,24 @@ public sealed class WorkspaceTests
         window.Show();
         await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
         return window;
+    }
+
+    private static async Task KeepDraftsDialogAsync(MainWindow window)
+    {
+        await HeadlessTests.WaitForAsync(() => window.OwnedWindows.OfType<Window>()
+            .Any(dialog => dialog.Title == "Переключить рабочее пространство?"));
+        var dialog = window.OwnedWindows.OfType<Window>()
+            .Single(item => item.Title == "Переключить рабочее пространство?");
+        var keep = dialog.GetVisualDescendants().OfType<Button>()
+            .Single(button => Equals(button.Content, "Оставить черновики"));
+        Click(keep);
+    }
+
+    private static async Task SwitchKeepingDraftsAsync(MainWindow window, string workspaceId)
+    {
+        var switching = CallAsync(window, "SwitchWorkspaceAsync", workspaceId);
+        await KeepDraftsDialogAsync(window);
+        await switching;
     }
 
     private static async Task CloseAsync(MainWindow window)

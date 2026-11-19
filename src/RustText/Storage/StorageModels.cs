@@ -19,6 +19,11 @@ public sealed record UserSettings(int UntitledTabLimit = 10, int RecentFileLimit
 {
     public bool AutoCheckUpdates { get; init; }
     public bool? OpenLargeFilesAsLog { get; init; }
+    public bool? WordWrap { get; init; }
+    public double? FontSize { get; init; }
+    public WorkspaceStartupMode WorkspaceStartupMode { get; init; } = WorkspaceStartupMode.LastUsed;
+    public string? StartupWorkspaceId { get; init; }
+    public int WorkspaceHistoryLimit { get; init; } = 10;
 }
 internal sealed record RecentFileEntry(
     string Path,

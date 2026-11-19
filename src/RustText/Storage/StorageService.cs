@@ -24,10 +24,10 @@ internal sealed class StorageService
     private string? _cachedPreviousPointer;
     private Dictionary<string, (long Length, long LastWriteTicks)> _cachedFiles = new(StringComparer.OrdinalIgnoreCase);
 
-    private StorageService(string profileBaseDirectory, bool hasProfileOverride)
+    private StorageService(string profileBaseDirectory, bool hasProfileOverride, string? storageRoot = null)
     {
         _profileBaseDirectory = Path.GetFullPath(profileBaseDirectory);
-        _root = Path.Combine(_profileBaseDirectory, "dotnet-demo");
+        _root = storageRoot is null ? Path.Combine(_profileBaseDirectory, "dotnet-demo") : Path.GetFullPath(storageRoot);
         _hasProfileOverride = hasProfileOverride;
         _checkpoints = Path.Combine(_root, "session");
         _drafts = Path.Combine(_root, "drafts");
@@ -54,7 +54,25 @@ internal sealed class StorageService
     internal static StorageService OpenForTesting(string profileBaseDirectory) =>
         new(profileBaseDirectory, hasProfileOverride: false);
 
+    internal static StorageService OpenWorkspace(string profileBaseDirectory, string workspaceId, string windowId)
+    {
+        var catalog = new WorkspaceCatalogStore(profileBaseDirectory);
+        if (workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId && windowId == WorkspaceCatalogStore.PrimaryWindowId)
+            return new StorageService(profileBaseDirectory, hasProfileOverride: false);
+        var workspaceDirectory = catalog.GetWorkspaceDirectory(workspaceId);
+        var windowDirectory = windowId == WorkspaceCatalogStore.PrimaryWindowId ? "primary"
+            : windowId.StartsWith("window:", StringComparison.Ordinal)
+                && Guid.TryParseExact(windowId.AsSpan("window:".Length), "N", out var windowGuid)
+                ? windowGuid.ToString("N")
+                : throw new InvalidDataException("Идентификатор окна некорректен.");
+        return new StorageService(profileBaseDirectory, hasProfileOverride: true,
+            Path.Combine(workspaceDirectory, "windows", windowDirectory, "dotnet-demo"));
+    }
+
     public string RootDirectory => _root;
+    internal string ProfileBaseDirectory => _profileBaseDirectory;
+    internal bool HasSessionCheckpoint => File.Exists(Path.Combine(_checkpoints, "latest.json"))
+        || File.Exists(Path.Combine(_checkpoints, "previous.json"));
     public static string GetProfileBaseDirectory()
     {
         var overridePath = Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR");
@@ -1080,6 +1098,10 @@ internal static class SettingsExtensions
         UntitledTabLimit = Math.Clamp(settings.UntitledTabLimit, 1, 200),
         RecentFileLimit = Math.Clamp(settings.RecentFileLimit, 1, 100),
         VersionFileLimitBytes = Math.Clamp(settings.VersionFileLimitBytes, 0, 50 * 1024 * 1024),
-        VersionTotalLimitBytes = Math.Clamp(settings.VersionTotalLimitBytes, 0, 1024L * 1024 * 1024)
+        VersionTotalLimitBytes = Math.Clamp(settings.VersionTotalLimitBytes, 0, 1024L * 1024 * 1024),
+        FontSize = settings.FontSize is { } fontSize ? Math.Clamp(fontSize, 8, 48) : null,
+        WorkspaceStartupMode = Enum.IsDefined(settings.WorkspaceStartupMode) ? settings.WorkspaceStartupMode : WorkspaceStartupMode.LastUsed,
+        WorkspaceHistoryLimit = settings.WorkspaceHistoryLimit < -1 ? 10 : Math.Clamp(settings.WorkspaceHistoryLimit, -1, 200),
+        StartupWorkspaceId = string.IsNullOrWhiteSpace(settings.StartupWorkspaceId) ? null : settings.StartupWorkspaceId
     };
 }
