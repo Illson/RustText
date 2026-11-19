@@ -241,6 +241,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     }
 
     public event Action<string>? StatusChanged;
+    internal event Action? TextPositionChanged;
 
     public string Path => _path;
     public Task InitialPageLoad { get; }
@@ -765,6 +766,14 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
         };
         _logText.AddHandler(KeyDownEvent, OnLogKeyDown, RoutingStrategies.Tunnel);
+        _logText.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == TextBox.CaretIndexProperty || e.Property == TextBox.SelectionStartProperty
+                || e.Property == TextBox.SelectionEndProperty || e.Property == TextBox.TextProperty)
+            {
+                TextPositionChanged?.Invoke();
+            }
+        };
         AddHandler(PointerWheelChangedEvent, OnLogPointerWheel, RoutingStrategies.Tunnel, handledEventsToo: true);
         _minimap.PointerPressed += OnMinimapPointerPressed;
         _minimap.PointerMoved += OnMinimapPointerMoved;
@@ -1876,6 +1885,50 @@ internal sealed partial class LogView : UserControl, IDisposable
             : page.Rows.Count == 0 ? "" : "Позиция · " + (_indexPaused ? "нет индекса строк" : "считаются строки");
         RefreshLineCount();
         UpdateLineGutterText();
+        TextPositionChanged?.Invoke();
+    }
+
+    internal (long Line, int Selected, bool IsPageLine)? TextPosition
+    {
+        get
+        {
+            if (_page is null) return null;
+            var text = _logText.Text.AsSpan();
+            var caret = Math.Clamp(_logText.CaretIndex, 0, text.Length);
+            var start = Math.Clamp(_logText.SelectionStart, 0, text.Length);
+            var end = Math.Clamp(_logText.SelectionEnd, 0, text.Length);
+            var selected = Math.Abs(end - start);
+            int pageLine;
+            long? fileLine;
+            if (_pageEdit is not null)
+            {
+                pageLine = EditedPageLine(text, caret);
+                fileLine = _displaySourceLineNumbers.FirstOrDefault() + pageLine;
+            }
+            else
+            {
+                // The rows used by the gutter follow source lines, including when a line wraps.
+                var index = Array.BinarySearch(_displayRowStarts, caret);
+                pageLine = index < 0 ? Math.Max(0, ~index - 1) : index;
+                fileLine = _displaySourceLineNumbers.ElementAtOrDefault(pageLine);
+            }
+            return (fileLine ?? pageLine + 1, selected, fileLine is null);
+        }
+    }
+
+    private static int EditedPageLine(ReadOnlySpan<char> text, int caret)
+    {
+        var line = 0;
+        for (var offset = 0; offset < caret;)
+        {
+            var newline = text[offset..caret].IndexOfAny('\r', '\n');
+            if (newline < 0) break;
+            var delimiter = offset + newline;
+            offset = delimiter + 1;
+            if (text[delimiter] == '\r' && offset < text.Length && text[offset] == '\n') offset++;
+            if (offset <= caret) line++;
+        }
+        return line;
     }
 
     private void RefreshLineCount()

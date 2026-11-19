@@ -368,7 +368,7 @@ public partial class MainWindow
         {
             if (ReferenceEquals(tab, ActiveTab))
             {
-                UpdateStatus(tab);
+                UpdateEditorPosition(tab, editor);
             }
         };
         editor.TextArea.Caret.PositionChanged += caretHandler;
@@ -809,9 +809,16 @@ public partial class MainWindow
         }
         log.StatusChanged += status =>
         {
-            if (ReferenceEquals(tab, ActiveTab))
+            if (ReferenceEquals(tab, ActiveTab) && ReferenceEquals(tab.Log, log))
             {
                 SetStatus(status.Length == 0 ? tab.Path : status);
+            }
+        };
+        log.TextPositionChanged += () =>
+        {
+            if (ReferenceEquals(tab, ActiveTab) && ReferenceEquals(tab.Log, log))
+            {
+                UpdateLogPosition(tab);
             }
         };
         tab.Item.Content = log;
@@ -1122,18 +1129,36 @@ public partial class MainWindow
         {
             var status = tab.Dirty ? "Изменено" : "Сохранено";
             SetStatus($"{status} · {tab.Path ?? "Без имени"}{(tab.DiskStatus is { } disk ? $" · {disk}" : "")}");
-            var count = MultiCaretEditing.Count(editor.TextArea);
-            var carets = count > 1 ? $" · Курсоры: {LineNumbers.Format(count)}" : "";
-            FormatText.Text = $"Стр. {LineNumbers.Format(editor.TextArea.Caret.Line)}, стлб. {LineNumbers.Format(editor.TextArea.Caret.Column)} · {EncodingName(tab.Encoding)} · {tab.Ending}{carets}";
+            UpdateEditorPosition(tab, editor);
         }
         else
         {
             SetStatus(tab.Log?.StatusText is { Length: > 0 } message ? message : tab.Path);
-            FormatText.Text = tab.Log is { EditsPagesByDefault: true }
-                ? tab.Recovery is null ? "Редактор по страницам" : "Редактирование черновика"
-                : tab.IsLog ? "Просмотр лога" : "";
+            UpdateLogPosition(tab);
         }
     }
+
+    private void UpdateEditorPosition(WorkTab tab, TextEditor editor)
+    {
+        var area = editor.TextArea;
+        var count = MultiCaretEditing.Count(area);
+        var carets = count > 1 ? $" · Курсоры: {LineNumbers.Format(count)}" : "";
+        var position = FormatCaretStatus(area.Caret.Line, area.Selection.Length);
+        FormatText.Text = $"{position} · Стлб. {LineNumbers.Format(area.Caret.Column)} · {EncodingName(tab.Encoding)} · {tab.Ending}{carets}";
+    }
+
+    private void UpdateLogPosition(WorkTab tab)
+    {
+        var mode = tab.Log is { EditsPagesByDefault: true }
+            ? tab.Recovery is null ? "Редактор по страницам" : "Редактирование черновика"
+            : tab.IsLog ? "Просмотр лога" : "";
+        FormatText.Text = tab.Log?.TextPosition is { } position
+            ? $"{FormatCaretStatus(position.Line, position.Selected, position.IsPageLine)} · {mode}"
+            : mode;
+    }
+
+    private static string FormatCaretStatus(long line, int selected, bool isPageLine = false) =>
+        $"Строка {LineNumbers.Format(line)}{(isPageLine ? " на странице" : "")} · Выделено {LineNumbers.Format(selected)} симв.";
 
     private static void SetSyntax(TextEditor editor, string? path)
     {

@@ -143,6 +143,76 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task StatusBarShowsTheCaretLineAndSelectionLengthWithoutMovingTheCaret() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "position.txt");
+        const int line = 12_345;
+        const int selected = 1_234;
+        await File.WriteAllTextAsync(path, new string('\n', line - 1) + new string('я', selected));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var status = window.FindControl<TextBlock>("FormatText")!;
+            editor.CaretOffset = editor.Document.TextLength;
+            Assert.StartsWith("Строка 12.345 · Выделено 0 симв.", status.Text);
+            editor.Select(editor.CaretOffset - selected, selected);
+            Assert.StartsWith("Строка 12.345 · Выделено 1.234 симв.", status.Text);
+            editor.TextArea.ClearSelection();
+            Assert.StartsWith("Строка 12.345 · Выделено 0 симв.", status.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task StatusBarTracksTheCurrentFileLineInPagedTabs(bool editable) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "paged-position.log");
+        const string row = "row with text\r\n";
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat(row, 170)));
+        var window = await OpenWorkspaceAsync();
+        TextBox? pageText = null;
+        string? original = null;
+        try
+        {
+            if (editable) await CallAsync(window, "OpenSinglePathAsync", path, false, null, true);
+            else await CallAsync(window, "OpenPathAsync", path, true, null);
+            var log = Read<LogView>(ActiveTab(window), "Log");
+            await log.InitialPageLoad;
+            await (Task)typeof(LogView).GetMethod("NavigateAsync", Private)!.Invoke(log, [80L * row.Length, true])!;
+            pageText = LogText(log);
+            original = pageText.Text;
+            var status = window.FindControl<TextBlock>("FormatText")!;
+            if (editable)
+            {
+                const string previousLines = "первая\rвторая\nтретья\r\n";
+                pageText.Text = previousLines + "четвёртая";
+                pageText.CaretIndex = previousLines.Length + 4;
+                pageText.SelectionStart = previousLines.Length;
+                pageText.SelectionEnd = previousLines.Length + 4;
+                Assert.StartsWith("Строка 84 · Выделено 4 симв.", status.Text);
+            }
+            else
+            {
+                pageText.CaretIndex = row.Length + 3;
+                pageText.SelectionStart = row.Length;
+                pageText.SelectionEnd = row.Length + 3;
+                Assert.StartsWith("Строка 82 · Выделено 3 симв.", status.Text);
+            }
+
+            pageText.SelectionStart = pageText.SelectionEnd;
+            Assert.Contains("Выделено 0 симв.", status.Text);
+        }
+        finally
+        {
+            if (editable && pageText is not null) pageText.Text = original;
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
     public Task FindAllSelectsBeyondThePreviewListAndTheListCanBeCollapsed() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "find-all.txt");
@@ -174,8 +244,11 @@ public sealed class WorkspaceTests
             Click(findAll);
             await HeadlessTests.WaitForAsync(() => MultiCaretEditing.Count(editor.TextArea) == 140);
             Assert.True(editor.TextArea.IsKeyboardFocusWithin);
+            var status = window.FindControl<TextBlock>("FormatText")!;
+            Assert.Contains("Выделено 560 симв.", status.Text);
             window.KeyTextInput("X");
             Assert.Equal(string.Join('\n', Enumerable.Repeat("X keep", 140)), editor.Text);
+            Assert.Contains("Выделено 0 симв.", status.Text);
             editor.Undo();
             Assert.StartsWith("v001 keep", editor.Text);
             Assert.EndsWith("v140 keep", editor.Text);
