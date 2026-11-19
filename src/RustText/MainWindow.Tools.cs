@@ -55,7 +55,8 @@ public partial class MainWindow
             Command("Версии файла…", () => Run(ShowVersionsAsync)),
             _closedDraftsMenu,
             Command("Вывести окно на передний план…", () => Run(ShowWindowFinderAsync)),
-            Command("Проверить обновления…", () => Run(CheckUpdatesAsync)),
+            Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),
+            Command("История выпусков…", () => Run(ShowReleaseHistoryAsync)),
             Command("Настройки…", () => Run(ShowSettingsAsync))));
         TopMenu.Items.Add(MenuGroup("_Поиск",
             Command("Найти   Ctrl+F", () => OpenSearchPanel()),

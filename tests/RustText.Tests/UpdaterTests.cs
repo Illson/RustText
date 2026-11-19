@@ -34,6 +34,89 @@ public sealed class UpdaterTests
     }
 
     [Fact]
+    public async Task CheckLatestReturnsGitHubReleaseDescription()
+    {
+        const string json = """
+            {"draft":false,"prerelease":false,"tag_name":"v1.2.3","html_url":"https://github.com/Illson/RustText/releases/tag/v1.2.3","body":"## Исправлено\n\n- Улучшено обновление.","assets":[{"name":"RustText.NET-win-x64.zip","browser_download_url":"https://github.com/Illson/RustText/releases/download/v1.2.3/RustText.NET-win-x64.zip","size":123},{"name":"RustText.NET-win-x64.zip.sha256","browser_download_url":"https://github.com/Illson/RustText/releases/download/v1.2.3/RustText.NET-win-x64.zip.sha256","size":64}]}
+            """;
+        using var client = new HttpClient(new FixtureHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(Encoding.UTF8.GetBytes(json))
+        }));
+
+        var release = await UpdateService.CheckLatestAsync("1.0.0", client);
+
+        Assert.NotNull(release);
+        Assert.Equal("## Исправлено\n\n- Улучшено обновление.", release.Notes);
+    }
+
+    [Fact]
+    public async Task GetReleaseHistoryIncludesStableRustAndDotNetReleasesAcrossPages()
+    {
+        var requestedPages = new List<int>();
+        using var client = new HttpClient(new FixtureHandler(uri =>
+        {
+            var pageParameter = uri.Query.TrimStart('?').Split('&')
+                .Single(part => part.StartsWith("page=", StringComparison.Ordinal));
+            var page = int.Parse(pageParameter["page=".Length..], System.Globalization.CultureInfo.InvariantCulture);
+            requestedPages.Add(page);
+            var json = page == 1
+                ? """
+                    [
+                      {"draft":false,"prerelease":false,"tag_name":"v2.0.0","html_url":"https://github.com/Illson/RustText/releases/tag/v2.0.0","body":"Первый выпуск .NET."},
+                      {"draft":false,"prerelease":false,"tag_name":"v1.0.0","html_url":"https://github.com/Illson/RustText/releases/tag/v1.0.0","body":"Первый выпуск Rust."},
+                      {"draft":true,"prerelease":false,"tag_name":"v9.0.0","html_url":"https://github.com/Illson/RustText/releases/tag/v9.0.0","body":"Черновик."},
+                      {"draft":false,"prerelease":true,"tag_name":"v8.0.0","html_url":"https://github.com/Illson/RustText/releases/tag/v8.0.0","body":"Предварительная версия."},
+                      {"draft":false,"prerelease":false,"tag_name":"v3.0.0-rc.1","html_url":"https://github.com/Illson/RustText/releases/tag/v3.0.0-rc.1","body":"Не стабильная версия."},
+                      {"draft":false,"prerelease":false,"tag_name":"nightly","html_url":"https://github.com/Illson/RustText/releases/tag/nightly","body":"Сборка разработки."}
+                    ]
+                    """
+                : "[]";
+            if (page == 1)
+            {
+                var ignoredReleases = string.Join(",", Enumerable.Repeat(
+                    """{"draft":true,"prerelease":false,"tag_name":"v9.0.0","html_url":"https://github.com/Illson/RustText/releases/tag/v9.0.0","body":"Черновик."}""",
+                    100 - 6));
+                json = json.Insert(json.LastIndexOf(']'), "," + ignoredReleases);
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(Encoding.UTF8.GetBytes(json))
+            };
+        }));
+
+        var history = await UpdateService.GetReleaseHistoryAsync(client);
+
+        Assert.Equal(new[] { 1, 2 }, requestedPages);
+        Assert.Collection(history,
+            release =>
+            {
+                Assert.Equal("2.0.0", release.Version);
+                Assert.Equal("Первый выпуск .NET.", release.Body);
+                Assert.Equal("https://github.com/Illson/RustText/releases/tag/v2.0.0", release.PageUri.AbsoluteUri);
+            },
+            release =>
+            {
+                Assert.Equal("1.0.0", release.Version);
+                Assert.Equal("Первый выпуск Rust.", release.Body);
+            });
+    }
+
+    [Fact]
+    public async Task GetReleaseHistoryRejectsReleasePageOutsideRustTextRepository()
+    {
+        const string json = """
+            [{"draft":false,"prerelease":false,"tag_name":"v1.0.0","html_url":"https://example.com/releases/v1.0.0","body":"Notes"}]
+            """;
+        using var client = new HttpClient(new FixtureHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(Encoding.UTF8.GetBytes(json))
+        }));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => UpdateService.GetReleaseHistoryAsync(client));
+    }
+
+    [Fact]
     public async Task SingleExeBundleStagesAndUpdatesWithoutDeletingLegacySidecars()
     {
         using var directory = new TempDirectory();

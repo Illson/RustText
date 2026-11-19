@@ -7,7 +7,10 @@ public sealed record UpdateRelease(
     Uri ArchiveUri,
     Uri ChecksumUri,
     long ArchiveSize,
-    string? ApiSha256);
+    string? ApiSha256,
+    string? Notes = null);
+
+public sealed record ReleaseNotes(string Version, Uri PageUri, string? Body);
 
 internal sealed record BundleFile(string Name, long Length, string Sha256);
 

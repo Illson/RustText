@@ -16,6 +16,7 @@ namespace RustText.Demo.Platform;
 public static class UpdateService
 {
     private const string ApiUrl = "https://api.github.com/repos/Illson/RustText/releases/latest";
+    private const string ReleaseHistoryApiUrl = "https://api.github.com/repos/Illson/RustText/releases";
     private const string ReleasePagePrefix = "https://github.com/Illson/RustText/releases/tag/";
     private const string AssetPrefix = "https://github.com/Illson/RustText/releases/download/";
     private const string ArchiveName = "RustText.NET-win-x64.zip";
@@ -25,6 +26,9 @@ public static class UpdateService
     private const string CleanupPidVariable = "RUSTTEXT_DOTNET_UPDATE_HELPER_PID";
     private const string CleanupDirectoryVariable = "RUSTTEXT_DOTNET_UPDATE_STAGE_DIRECTORY";
     private const int MaximumReleaseJsonBytes = 256 * 1024;
+    private const int MaximumReleaseHistoryPageBytes = 2 * 1024 * 1024;
+    private const int ReleaseHistoryPageSize = 100;
+    private const int MaximumReleaseHistoryPages = 100;
     private const int MaximumArchiveBytes = 128 * 1024 * 1024;
     private const int MaximumChecksumBytes = 512;
     private const int MaximumArchiveEntries = 64;
@@ -108,7 +112,96 @@ public static class UpdateService
         }
 
         var apiDigest = archiveInfo.Digest is null ? null : ParseApiDigest(archiveInfo.Digest);
-        return new UpdateRelease(version, tag, pageUri, archiveInfo.Uri, checksum.Uri, archiveInfo.Size, apiDigest);
+        var notes = GetOptionalString(root, "body");
+        return new UpdateRelease(version, tag, pageUri, archiveInfo.Uri, checksum.Uri, archiveInfo.Size, apiDigest, notes);
+    }
+
+    /// <summary>Loads stable release notes from GitHub, newest first.</summary>
+    public static async Task<IReadOnlyList<ReleaseNotes>> GetReleaseHistoryAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var client = CreateClient(TimeSpan.FromSeconds(30));
+        return await GetReleaseHistoryAsync(client, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Uses a caller-owned HTTP client so release-feed parsing can be tested without network access.</summary>
+    internal static async Task<IReadOnlyList<ReleaseNotes>> GetReleaseHistoryAsync(
+        HttpClient client,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        var releases = new List<ReleaseNotes>();
+        for (var page = 1; page <= MaximumReleaseHistoryPages; page++)
+        {
+            var uri = new Uri($"{ReleaseHistoryApiUrl}?per_page={ReleaseHistoryPageSize}&page={page}");
+            var jsonBytes = await GetLimitedBytesAsync(client, uri, MaximumReleaseHistoryPageBytes, cancellationToken)
+                .ConfigureAwait(false);
+            using var document = JsonDocument.Parse(jsonBytes, new JsonDocumentOptions { MaxDepth = 24 });
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidDataException("GitHub returned an invalid release history.");
+            }
+
+            var pageCount = 0;
+            foreach (var release in document.RootElement.EnumerateArray())
+            {
+                pageCount++;
+                if (release.ValueKind != JsonValueKind.Object ||
+                    release.GetProperty("draft").GetBoolean() ||
+                    release.GetProperty("prerelease").GetBoolean())
+                {
+                    continue;
+                }
+
+                var tag = GetOptionalString(release, "tag_name");
+                if (tag is null)
+                {
+                    continue;
+                }
+
+                string version;
+                try
+                {
+                    version = ParseVersion(tag, allowTag: true);
+                }
+                catch (InvalidDataException)
+                {
+                    continue;
+                }
+
+                var pageUrl = new Uri(GetOptionalString(release, "html_url")
+                    ?? throw new InvalidDataException("A stable GitHub release has no release page."));
+                if (pageUrl.AbsoluteUri != ReleasePagePrefix + tag)
+                {
+                    throw new InvalidDataException("A GitHub release page points outside the RustText repository.");
+                }
+
+                releases.Add(new ReleaseNotes(version, pageUrl, GetOptionalString(release, "body")));
+            }
+
+            if (pageCount < ReleaseHistoryPageSize)
+            {
+                return releases;
+            }
+        }
+
+        throw new InvalidDataException("GitHub release history exceeds the supported pagination limit.");
+    }
+
+    private static string? GetOptionalString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException($"GitHub returned a non-string {propertyName} release field.");
+        }
+
+        return property.GetString();
     }
 
     /// <summary>Downloads and stages a verified single-executable or legacy four-file .NET bundle.</summary>
@@ -689,9 +782,30 @@ public static class UpdateService
 
     private static bool IsAllowedInitialUri(Uri uri) =>
         uri.AbsoluteUri == ApiUrl ||
+        IsReleaseHistoryApiUri(uri) ||
         uri.AbsoluteUri.StartsWith(AssetPrefix, StringComparison.Ordinal) &&
         (uri.AbsoluteUri.EndsWith("/" + ArchiveName, StringComparison.Ordinal) ||
          uri.AbsoluteUri.EndsWith("/" + ChecksumName, StringComparison.Ordinal));
+
+    private static bool IsReleaseHistoryApiUri(Uri uri)
+    {
+        if (uri.Scheme != Uri.UriSchemeHttps ||
+            uri.Host != "api.github.com" ||
+            uri.AbsolutePath != "/repos/Illson/RustText/releases")
+        {
+            return false;
+        }
+
+        var query = uri.Query;
+        var pagePrefix = $"?per_page={ReleaseHistoryPageSize}&page=";
+        if (!query.StartsWith(pagePrefix, StringComparison.Ordinal) ||
+            !int.TryParse(query[pagePrefix.Length..], System.Globalization.CultureInfo.InvariantCulture, out var page))
+        {
+            return false;
+        }
+
+        return page is >= 1 and <= MaximumReleaseHistoryPages;
+    }
 
     private static bool IsAllowedRedirect(Uri uri) =>
         uri.Scheme == Uri.UriSchemeHttps && uri.Port == 443 &&

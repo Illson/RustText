@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using RustText.Demo.Platform;
@@ -11,6 +12,11 @@ namespace RustText.Demo;
 
 public partial class MainWindow
 {
+    private UpdateRelease? _availableUpdate;
+    private bool _checkingForUpdates;
+    private bool _handlingUpdate;
+
+    private static string CurrentUpdateVersion => typeof(MainWindow).Assembly.GetName().Version!.ToString(3);
     private static string ExecutablePath => Environment.ProcessPath ?? throw new IOException("Путь программы недоступен.");
 
     private Task RegisterAssociationsAsync()
@@ -254,30 +260,82 @@ public partial class MainWindow
         }
     }
 
-    private async Task CheckUpdatesAsync()
+    private async Task CheckUpdatesAsync(bool manual)
     {
-
-        var version = typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "0.2.2";
-        SetStatus("Проверка обновлений…");
-        var release = await UpdateService.CheckLatestAsync(version, _lifetime.Token);
-        if (release is null)
-        {
-            SetStatus("Обновление Avalonia-сборки не найдено.");
-            return;
-        }
-
-        var body = DialogPanel(new TextBlock { Text = $"Доступна версия {release.Version}.", Foreground = FocusTheme.Text });
-        var dialog = Dialog("Обновление RustText", body);
-        body.Children.Add(Row(FocusButton(Button("Скачать и перезапустить", () => dialog.Close(true)), primary: true),
-            FocusButton(Button("Позже", () => dialog.Close(false)))));
-        if (!await dialog.ShowDialog<bool>(this))
+        if (_checkingForUpdates || _handlingUpdate)
         {
             return;
         }
 
-        SetStatus("Скачивание и проверка архива…");
-        await using var stage = await UpdateService.StageAsync(release, ExecutablePath, _lifetime.Token);
-        await RestartForUpdateAsync(() => UpdateService.ApplyStagedAsync(stage, ExecutablePath, _lifetime.Token));
+        const string checking = "Проверка обновлений…";
+        _checkingForUpdates = true;
+        if (manual)
+        {
+            SetStatus(checking);
+        }
+
+        try
+        {
+            var release = await UpdateService.CheckLatestAsync(CurrentUpdateVersion, _lifetime.Token);
+            if (_closed || _closing)
+            {
+                return;
+            }
+
+            PresentUpdate(release);
+            if (manual && StatusText.Text == checking)
+            {
+                SetStatus(release is null ? "Обновление Avalonia-сборки не найдено." : null);
+            }
+        }
+        finally
+        {
+            _checkingForUpdates = false;
+        }
+    }
+
+    private void PresentUpdate(UpdateRelease? release)
+    {
+        _availableUpdate = release;
+        UpdateNoticeText.Text = release is null ? null : $"Доступна версия {release.Version}";
+        UpdateNotice.IsVisible = release is not null;
+    }
+
+    private void UpdateNoticeDismissClicked(object? sender, RoutedEventArgs e) => PresentUpdate(null);
+
+    private void UpdateNoticeDetailsClicked(object? sender, RoutedEventArgs e) => Run(OpenUpdateNoticeAsync);
+
+    private async Task ShowReleaseHistoryAsync() => await ShowUpdateDialogAsync(null);
+
+    private async Task OpenUpdateNoticeAsync()
+    {
+        if (_availableUpdate is not { } release || _handlingUpdate)
+        {
+            return;
+        }
+
+        _handlingUpdate = true;
+        try
+        {
+            if (!await ShowUpdateDialogAsync(release))
+            {
+                PresentUpdate(null);
+                return;
+            }
+
+            UpdateNotice.IsVisible = false;
+            SetStatus("Скачивание и проверка архива…");
+            await using var stage = await UpdateService.StageAsync(release, ExecutablePath, _lifetime.Token);
+            await RestartForUpdateAsync(() => UpdateService.ApplyStagedAsync(stage, ExecutablePath, _lifetime.Token));
+        }
+        finally
+        {
+            _handlingUpdate = false;
+            if (!_closed && !_closing)
+            {
+                UpdateNotice.IsVisible = _availableUpdate is not null;
+            }
+        }
     }
 
     private async Task RestartForUpdateAsync(Func<Task> startHelper)

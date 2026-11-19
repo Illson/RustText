@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
@@ -17,6 +18,7 @@ using AvaloniaEdit.Editing;
 using RustText.Demo;
 using RustText.Demo.Editor;
 using RustText.Demo.Logs;
+using RustText.Demo.Platform;
 using Xunit;
 
 namespace RustText.Tests;
@@ -24,6 +26,84 @@ namespace RustText.Tests;
 [Collection(HeadlessCollection.Name)]
 public sealed class WorkspaceTests
 {
+    [Fact]
+    public Task UpdateNoticeKeepsEditorActiveAndOpensReleaseNotesOnDemand() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "editor.txt");
+        await File.WriteAllTextAsync(path, "text");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.TextArea.Focus();
+            editor.CaretOffset = editor.Text.Length;
+            var banner = window.FindControl<Border>("UpdateNotice")!;
+            Assert.False(banner.IsVisible);
+            var release = new UpdateRelease("2.1.0", "v2.1.0",
+                new Uri("https://github.com/Illson/RustText/releases/tag/v2.1.0"),
+                new Uri("https://github.com/Illson/RustText/releases/download/v2.1.0/RustText.NET-win-x64.zip"),
+                new Uri("https://github.com/Illson/RustText/releases/download/v2.1.0/RustText.NET-win-x64.zip.sha256"),
+                123, null, "## Исправлено\n\n- Текст из GitHub.");
+            Invoke(window, "PresentUpdate", release);
+            Assert.True(banner.IsVisible);
+            Assert.Equal("Доступна версия 2.1.0", window.FindControl<TextBlock>("UpdateNoticeText")!.Text);
+            Assert.Empty(window.OwnedWindows);
+            window.KeyTextInput("!");
+            Assert.Equal("text!", editor.Text);
+
+            window.FindControl<Button>("UpdateNoticeDismiss")!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.False(banner.IsVisible);
+            Invoke(window, "PresentUpdate", release);
+            window.FindControl<Button>("UpdateNoticeDetails")!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            var dialog = Assert.IsType<Window>(Assert.Single(window.OwnedWindows));
+            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<TextBlock>()
+                .Any(block => block.Text?.Contains("Текст из GitHub.", StringComparison.Ordinal) == true ||
+                    block.Inlines?.OfType<Avalonia.Controls.Documents.Run>().Any(run =>
+                        run.Text?.Contains("Текст из GitHub.", StringComparison.Ordinal) == true) == true));
+            dialog.Close(false);
+            await HeadlessTests.WaitForAsync(() => !banner.IsVisible);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task UpdateHistoryOpensWithoutAvailableUpdateAndRetriesGitHubFailure() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            var requests = 0;
+            Func<CancellationToken, Task<IReadOnlyList<ReleaseNotes>>> fetch = _ =>
+            {
+                if (++requests == 1)
+                    throw new HttpRequestException("GitHub недоступен");
+                return Task.FromResult<IReadOnlyList<ReleaseNotes>>([
+                    new("0.2.2", new Uri("https://github.com/Illson/RustText/releases/tag/v0.2.2"), "## Исправлены черновики"),
+                    new("0.2.1", new Uri("https://github.com/Illson/RustText/releases/tag/v0.2.1"), null)
+                ]);
+            };
+            var pending = (Task<bool>)Invoke(window, "ShowUpdateDialogAsync", null, fetch)!;
+            var dialog = Assert.IsType<Window>(Assert.Single(window.OwnedWindows));
+            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<Button>()
+                .Any(button => Equals(button.Content, "Повторить")));
+            var retry = dialog.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "Повторить"));
+            retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<Expander>().Count() == 2);
+            var versions = dialog.GetVisualDescendants().OfType<Expander>().ToArray();
+            Assert.StartsWith("0.2.2", Assert.IsType<TextBlock>(versions[0].Header).Text);
+            Assert.StartsWith("0.2.1", Assert.IsType<TextBlock>(versions[1].Header).Text);
+            Assert.DoesNotContain(dialog.GetVisualDescendants().OfType<Button>(),
+                button => Equals(button.Content, "Скачать и перезапустить"));
+            versions[1].IsExpanded = true;
+            await HeadlessTests.WaitForAsync(() => versions[1].GetVisualDescendants().OfType<TextBlock>()
+                .Any(text => text.Text == "Описание изменений пока не опубликовано."));
+            dialog.Close(false);
+            Assert.False(await pending);
+            Assert.Equal(2, requests);
+        }
+        finally { await CloseAsync(window); }
+    });
+
     [Fact]
     public Task RecentLogKeepsItsTargetWhenSelectionChanges() => HeadlessTests.RunAsync(async profile =>
     {
@@ -570,6 +650,44 @@ public sealed class WorkspaceTests
         }
         finally { await CloseAsync(window); }
     });
+
+    [Theory]
+    [InlineData("\r\n")]
+    [InlineData("\n")]
+    public Task MultiCaretPasteKeepsJsonStringsValidWithoutInsertingLineBreaks(string separator) =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            const string original = """
+                [
+                  { "name": "old1", "type": "A" },
+                  { "name": "old2", "type": "B" },
+                  { "name": "old3", "type": "C" }
+                ]
+                """;
+            var path = Path.Combine(profile, "multiple.json");
+            await File.WriteAllTextAsync(path, original);
+            var window = await OpenWorkspaceAsync(path);
+            try
+            {
+                var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+                editor.TextArea.Focus();
+                var before = editor.Text;
+                editor.CaretOffset = before.IndexOf("old1", StringComparison.Ordinal);
+                for (var index = 0; index < 2; index++)
+                    Press(window, Key.Down, RawInputModifiers.Control | RawInputModifiers.Alt, PhysicalKey.ArrowDown);
+                for (var index = 0; index < 4; index++)
+                    Press(window, Key.Right, RawInputModifiers.Shift, PhysicalKey.ArrowRight);
+                Assert.Equal(new[] { 4, 4, 4 }, editor.TextArea.Selection.Segments.Select(segment => segment.Length));
+                await window.Clipboard!.SetTextAsync(string.Join(separator, ["new1", "new2", "new3"]));
+                Press(window, Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+                var expected = before.Replace("old", "new", StringComparison.Ordinal);
+                await HeadlessTests.WaitForAsync(() => editor.Text == expected);
+                using var parsed = JsonDocument.Parse(editor.Text);
+                Assert.Equal(new[] { "new1", "new2", "new3" },
+                    parsed.RootElement.EnumerateArray().Select(item => item.GetProperty("name").GetString()));
+            }
+            finally { await CloseAsync(window); }
+        });
 
     [Fact]
     public Task VerticalCaretsEditUnicodeAndUndoAsOneOperation() => HeadlessTests.RunAsync(async profile =>

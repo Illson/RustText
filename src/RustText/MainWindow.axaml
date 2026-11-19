@@ -6,7 +6,7 @@
         WindowStartupLocation="CenterScreen"
         WindowDecorations="BorderOnly"
         Background="{x:Static local:FocusTheme.Editor}" Foreground="{x:Static local:FocusTheme.Text}" FontSize="13">
-    <Grid RowDefinitions="Auto,*,Auto,Auto">
+    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto">
         <Border Background="{x:Static local:FocusTheme.Chrome}" BorderBrush="{x:Static local:FocusTheme.Border}"
                 BorderThickness="0,0,0,1" MinHeight="36">
             <Grid ColumnDefinitions="Auto,Auto,*,Auto" Margin="8,0,0,0">
@@ -41,11 +41,31 @@
                 </StackPanel>
             </Grid>
         </Border>
-        <ContentControl Grid.Row="1" x:Name="WorkspaceHost"
+        <Border Grid.Row="1" x:Name="UpdateNotice" IsVisible="False"
+                Background="#342E28" BorderBrush="#6B5742" BorderThickness="0,0,0,1" Padding="12,6">
+            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="7">
+                <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
+                    <Border Width="25" Height="25" CornerRadius="5" Background="#47392C">
+                        <Path Width="12" Height="12" Data="M 6,1 L 6,8 M 2.5,4.5 L 6,8 L 9.5,4.5 M 2,11 L 10,11"
+                              HorizontalAlignment="Center" VerticalAlignment="Center"
+                              Stroke="{x:Static local:FocusTheme.Warning}" StrokeThickness="1.35" />
+                    </Border>
+                    <TextBlock x:Name="UpdateNoticeText" Foreground="#F3E4D2" FontWeight="SemiBold"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+                <Button Grid.Column="1" x:Name="UpdateNoticeDetails" Classes="focus-quiet" Padding="9,3"
+                        Background="#47392C" Foreground="{x:Static local:FocusTheme.Warning}"
+                        Content="Подробнее" Click="UpdateNoticeDetailsClicked" />
+                <Button Grid.Column="2" x:Name="UpdateNoticeDismiss" Classes="focus-quiet" Padding="6,2"
+                        Foreground="#F3E4D2" FontSize="17" Content="×"
+                        AutomationProperties.Name="Закрыть уведомление об обновлении" Click="UpdateNoticeDismissClicked" />
+            </Grid>
+        </Border>
+        <ContentControl Grid.Row="2" x:Name="WorkspaceHost"
                         HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
-        <ContentControl Grid.Row="2" x:Name="PanelHost" IsVisible="False"
+        <ContentControl Grid.Row="3" x:Name="PanelHost" IsVisible="False"
                         HorizontalContentAlignment="Stretch" />
-        <Border Grid.Row="3" Padding="12,3" MinHeight="26" BorderBrush="{x:Static local:FocusTheme.Border}"
+        <Border Grid.Row="4" Padding="12,3" MinHeight="26" BorderBrush="{x:Static local:FocusTheme.Border}"
                 BorderThickness="0,1,0,0" Background="{x:Static local:FocusTheme.Deep}">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                 <TextBlock x:Name="StatusText" TextTrimming="CharacterEllipsis" FontSize="12"

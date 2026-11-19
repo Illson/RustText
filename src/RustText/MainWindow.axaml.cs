@@ -115,7 +115,7 @@ public partial class MainWindow : Window
         _checkpoint.Start();
         if (_settings.AutoCheckUpdates && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
         {
-            Run(CheckUpdatesAsync);
+            Run(() => CheckUpdatesAsync(manual: false));
         }
     }
 
