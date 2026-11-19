@@ -489,6 +489,25 @@ internal sealed partial class LogView : UserControl, IDisposable
         _logText.LayoutUpdated -= OnLogTextLayoutUpdated;
         AttachLogScrollbar(null);
         _file.Dispose();
+        _logText.Text = string.Empty;
+        _lineGutterText.Text = string.Empty;
+        _fileLabel.Text = string.Empty;
+        _indexLabel.Text = string.Empty;
+        _statusLabel.Text = string.Empty;
+        _countLabel.Text = string.Empty;
+        _lineNumberLabel.Text = string.Empty;
+        _positionLabel.Text = string.Empty;
+        _searchStatusText.Text = string.Empty;
+        _searchResults.Clear();
+        _searchResultButtons.Children.Clear();
+        _miniSamples.Clear();
+        _previousOffsets.Clear();
+        _skippedSearchLines.Clear();
+        _displayRowStarts = [];
+        _displaySourceLineNumbers = [];
+        _page = null;
+        _pageEdit = null;
+        lock (_lineIndexGate) _lineIndex.Clear();
         _closing.Dispose();
     }
 

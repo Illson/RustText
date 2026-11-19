@@ -1112,11 +1112,13 @@ public partial class MainWindow
 
     private void RemoveTab(WorkTab tab)
     {
+        ForgetSearchTab(tab);
         tab.LoadCancellation?.Cancel();
         tab.JsonCancellation?.Cancel();
         tab.Log?.Close();
         tab.Log = null;
         _ = DetachEditor(tab);
+        tab.Item.Content = null;
         _tabs.Remove(tab.Id);
         tab.Group.Tabs.Items.Remove(tab.Item);
         if (ReferenceEquals(_active, tab.Group) && SelectedIn(_active) is { } next)

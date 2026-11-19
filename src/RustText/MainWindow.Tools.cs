@@ -55,9 +55,11 @@ public partial class MainWindow
             Command("Сравнить списки…", () => Run(ShowListComparisonAsync)),
             Command("Версии файла…", () => Run(ShowVersionsAsync)),
             _closedDraftsMenu,
+            Command("Архив черновиков…", () => Run(ShowDraftArchiveAsync)),
             Command("Вывести окно на передний план…", () => Run(ShowWindowFinderAsync)),
             Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),
             Command("История выпусков…", () => Run(ShowReleaseHistoryAsync)),
+            Command("Черновики и архив…", () => Run(ShowDraftArchiveSettingsAsync)),
             Command("Настройки…", () => Run(ShowSettingsAsync))));
         TopMenu.Items.Add(MenuGroup("_Поиск",
             Command("Найти   Ctrl+F", () => OpenSearchPanel()),
@@ -401,6 +403,11 @@ public partial class MainWindow
             new TextBlock { Text = "Общий лимит снимков, МиБ" }, total,
             new TextBlock { Text = "Файлы больше 100 МиБ" }, largeFiles, draftLines, autoUpdate);
         var dialog = Dialog("Настройки", body);
+        body.Children.Add(FocusButton(Button("Черновики и архив…", () =>
+        {
+            dialog.Close(false);
+            Dispatcher.UIThread.Post(() => Run(ShowDraftArchiveSettingsAsync));
+        })));
         var warning = new TextBlock { Foreground = FocusTheme.Danger };
         body.Children.Add(warning);
         body.Children.Add(FocusButton(Button("Сохранить", () =>
