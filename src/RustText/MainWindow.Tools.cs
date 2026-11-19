@@ -1,6 +1,7 @@
 using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -417,7 +418,7 @@ public partial class MainWindow
         var startupWorkspace = new ComboBox
         {
             ItemsSource = catalog.Workspaces,
-            DisplayMemberBinding = new Avalonia.Data.Binding(nameof(WorkspaceEntry.Name)),
+            ItemTemplate = new FuncDataTemplate<WorkspaceEntry>((entry, _) => new TextBlock { Text = entry?.Name }),
             SelectedItem = catalog.Workspaces.FirstOrDefault(item => item.Id == _settings.StartupWorkspaceId)
                 ?? catalog.Workspaces.FirstOrDefault(item => item.Id == _workspaceId)
         };

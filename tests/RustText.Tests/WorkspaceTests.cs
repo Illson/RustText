@@ -1536,6 +1536,43 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task SettingsOpensTheSelectedNamedWorkspaceOnRestart() => HeadlessTests.RunAsync(async profile =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "project notes");
+            await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Logs");
+            var expected = (string)Field(window, "_workspaceId");
+            await CallAsync(window, "SwitchWorkspaceAsync", WorkspaceCatalogStore.DefaultWorkspaceId);
+            var show = CallAsync(window, "ShowSettingsAsync");
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any());
+            var dialog = Assert.Single(window.OwnedWindows);
+            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<ComboBox>().Any());
+            var boxes = dialog.GetVisualDescendants().OfType<ComboBox>().ToArray();
+            var mode = boxes.Single(box => box.Items.Cast<object>().Contains("Выбранное пространство"));
+            mode.SelectedIndex = 1;
+            var spaces = boxes.Single(box => box.Items.OfType<WorkspaceEntry>().Any());
+            Assert.True(spaces.IsEnabled);
+            spaces.SelectedItem = spaces.Items.OfType<WorkspaceEntry>().Single(entry => entry.Name == "Logs");
+            await HeadlessTests.WaitForAsync(() => spaces.GetVisualDescendants().OfType<TextBlock>().Any(label => label.Text == "Logs"));
+            Click(dialog.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "Сохранить")));
+            await show;
+            var persisted = await StorageService.OpenForTesting(profile).LoadSettingsAsync();
+            Assert.Equal(WorkspaceStartupMode.Specific, persisted.WorkspaceStartupMode);
+            Assert.Equal(expected, persisted.StartupWorkspaceId);
+            await CloseAsync(window);
+            window = await OpenWorkspaceAsync();
+            Assert.Equal(expected, Field(window, "_workspaceId"));
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
     public Task ClosedDraftArchiveFollowsItsWorkspaceAcrossSwitchAndRestore() => HeadlessTests.RunAsync(async profile =>
     {
         var window = await OpenWorkspaceAsync();
