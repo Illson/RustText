@@ -317,7 +317,7 @@ public partial class MainWindow
             var fingerprint = CheckpointFingerprint(session, tabs);
             if (forgetClosedId is null && !_closing && _workspace.GetLastCheckpoint(cacheKey) == fingerprint)
             {
-                await SaveCachedWorkspaceViewsAsync();
+                await SaveCachedWorkspaceViewsAsync(excludeWindow);
                 return;
             }
 
@@ -374,7 +374,7 @@ public partial class MainWindow
                 await storage.RemoveHistoryFromPreviousCheckpointAsync(removed.Id, removeBackupDraft);
                 _workspace.SetLastCheckpoint(cacheKey, fingerprint);
             }
-            await SaveCachedWorkspaceViewsAsync();
+            await SaveCachedWorkspaceViewsAsync(excludeWindow);
         }
         finally
         {
@@ -382,12 +382,13 @@ public partial class MainWindow
         }
     }
 
-    private async Task SaveCachedWorkspaceViewsAsync()
+    private async Task SaveCachedWorkspaceViewsAsync(MainWindow? excludeWindow)
     {
         foreach (var (workspaceId, view) in _workspaceViews.ToArray())
         {
             var storage = _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession);
             var cacheKey = StorageCacheKey(storage);
+            if (ReferenceEquals(storage, _workspace.Storage)) continue;
             if (_workspace.UnavailableSessions.Contains(cacheKey)) continue;
 
             var byItem = view.Tabs.Values.ToDictionary(tab => tab.Item);
@@ -449,6 +450,103 @@ public partial class MainWindow
             }
             _workspace.SetLastCheckpoint(cacheKey, fingerprint);
         }
+
+        await SaveSharedDefaultWorkspaceAsync(excludeWindow);
+    }
+
+    private async Task SaveSharedDefaultWorkspaceAsync(MainWindow? excludeWindow)
+    {
+        var storage = _workspace.Storage;
+        var cacheKey = StorageCacheKey(storage);
+        var views = new List<SessionViewSnapshot>();
+        var hasCachedDefaultView = false;
+        foreach (var window in _workspace.Windows.Where(window => !window._closed))
+        {
+            if (ReferenceEquals(window, excludeWindow)) continue;
+            if (window._workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
+                && ReferenceEquals(window.SessionStorage, storage))
+            {
+                views.Add(new SessionViewSnapshot(window, window._tabs, window._root, window._active,
+                    window.TabsInVisualOrder().ToArray(), window.Width, window.Height,
+                    window.WindowState == WindowState.Maximized, window._wordWrap, window._fontSize));
+            }
+
+            if (window._workspaceViews.TryGetValue(WorkspaceCatalogStore.DefaultWorkspaceId, out var cached)
+                && ReferenceEquals(window._workspace.GetStorage(WorkspaceCatalogStore.DefaultWorkspaceId,
+                    window._windowId, window._shareDefaultSession), storage))
+            {
+                hasCachedDefaultView = true;
+                var byItem = cached.Tabs.Values.ToDictionary(tab => tab.Item);
+                var ordered = Groups(cached.Root).SelectMany(group => group.Tabs.Items.OfType<TabItem>())
+                    .Select(item => byItem[item]).ToArray();
+                views.Add(new SessionViewSnapshot(window, cached.Tabs, cached.Root, cached.Active, ordered,
+                    cached.Width, cached.Height, cached.Maximized, cached.WordWrap, cached.FontSize));
+            }
+        }
+
+        if (views.Count == 0 || !hasCachedDefaultView) return;
+        var home = views.FirstOrDefault(view => view.Owner._workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
+                && view.Owner._windowId == WorkspaceCatalogStore.PrimaryWindowId)
+            ?? views.FirstOrDefault(view => view.Owner._workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId)
+            ?? views.FirstOrDefault(view => view.Owner._windowId == WorkspaceCatalogStore.PrimaryWindowId)
+            ?? views[0];
+        var entries = views.SelectMany(view => view.OrderedTabs.Select(tab => (View: view, Tab: tab))).ToArray();
+        var tabs = entries.Select(entry => entry.Tab).ToArray();
+        var recoveries = tabs.Select(tab => tab.Recovery).ToArray();
+        var stateTabs = entries.Select(entry => entry.View.Owner.CaptureTab(entry.Tab)).ToList();
+        var selected = home.Active.Tabs.SelectedItem is TabItem activeItem
+            ? home.Tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, activeItem)) : null;
+        var index = Array.IndexOf(tabs, selected);
+        if (index < 0) index = 0;
+        var closedTabs = _workspace.GetClosedTabs(storage);
+        var capturedClosedTabs = closedTabs.ToArray();
+        var session = new SessionState(stateTabs, capturedClosedTabs.Take(100).ToList(), index,
+            double.IsFinite(home.Width) ? home.Width : 1080, double.IsFinite(home.Height) ? home.Height : 700,
+            home.Maximized, home.WordWrap, home.FontSize, home.Owner.CaptureLayout(home.Root, home.Tabs), home.Active.Id);
+        var fingerprint = CheckpointFingerprint(session, tabs);
+        if (_workspace.GetLastCheckpoint(cacheKey) == fingerprint) return;
+
+        var draftReaders = new Dictionary<long, Func<TextReader>>();
+        var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
+        var existingDrafts = _workspace.GetLiveDrafts(cacheKey);
+        for (var i = 0; i < tabs.Length; i++)
+        {
+            var tab = tabs[i];
+            if (tab.Editor is not { } editor || !(tab.Dirty || tab.Path is null)) continue;
+            var document = editor.Document;
+            liveDrafts[tab.Id] = (document, tab.Revision);
+            if (existingDrafts.TryGetValue(tab.Id, out var previous)
+                && previous.Revision == tab.Revision && previous.Document.TryGetTarget(out var previousDocument)
+                && ReferenceEquals(previousDocument, document))
+            {
+                stateTabs[i] = stateTabs[i] with { DraftRef = previous.Saved.DraftRef, DraftSha256 = previous.Saved.DraftSha256 };
+            }
+            else
+            {
+                var snapshot = document.CreateSnapshot();
+                draftReaders.TryAdd(tab.Id, snapshot.CreateReader);
+            }
+        }
+
+        var committed = await storage.SaveSessionWithDraftReadersAsync(session, draftReaders, _lifetime.Token);
+        existingDrafts.Clear();
+        for (var i = 0; i < tabs.Length; i++)
+        {
+            var captured = stateTabs[i];
+            var saved = committed.Tabs[i];
+            if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = saved;
+            if (recoveries[i] is { } recovery && ReferenceEquals(tabs[i].Recovery, recovery)) tabs[i].Recovery = saved;
+            if (saved.DraftRef is not null && liveDrafts.TryGetValue(saved.Id, out var live))
+                existingDrafts[saved.Id] = new(new(live.Document), live.Revision, saved);
+        }
+        for (var i = 0; i < Math.Min(capturedClosedTabs.Length, committed.ClosedTabs?.Count ?? 0); i++)
+        {
+            var closedIndex = closedTabs.FindIndex(tab => ReferenceEquals(tab, capturedClosedTabs[i]));
+            if (closedIndex >= 0 && closedIndex < closedTabs.Count
+                && ReferenceEquals(closedTabs[closedIndex], capturedClosedTabs[i]))
+                closedTabs[closedIndex] = committed.ClosedTabs![i];
+        }
+        _workspace.SetLastCheckpoint(cacheKey, fingerprint);
     }
 
     private SessionTab? FindSavedLiveDraft(WorkTab tab) =>

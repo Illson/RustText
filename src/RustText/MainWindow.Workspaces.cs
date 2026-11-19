@@ -198,6 +198,7 @@ public partial class MainWindow
             else ShowGroups();
             ApplyTextAppearance();
             RefreshHistoryMenus();
+            _workspaceViews.Remove(workspaceId);
             return;
         }
 
