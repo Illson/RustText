@@ -174,9 +174,8 @@ public partial class MainWindow
         await SaveWorkspaceSessionAsync(excludeWindow: null);
         await _workspace.CatalogStore.SetWindowWorkspaceAsync(_windowId, workspaceId, _lifetime.Token);
         _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-        var currentContent = WorkspaceHost.Content;
         _workspaceViews[_workspaceId] = new WorkspaceViewState(_tabs, _root, _active, _home,
-            _home ? currentContent as Control : null, Width, Height, WindowState == WindowState.Maximized, SessionStorage, _closedTabs);
+            Width, Height, WindowState == WindowState.Maximized, _wordWrap, _fontSize, SessionStorage, _closedTabs);
         CloseSearchPanel();
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids) grid.Children.Clear();
@@ -335,9 +334,36 @@ public partial class MainWindow
             FocusButton(Button("Отмена", () => confirm.Close(false))),
             FocusButton(Button("Удалить", () => confirm.Close(true)))));
         if (!await confirm.ShowDialog<bool>(this)) return;
-        _workspace.Catalog = await _workspace.CatalogStore.DeleteAsync(workspace.Id,
+        var deletedCatalog = await _workspace.CatalogStore.DeleteAsync(workspace.Id,
             _settings.WorkspaceHistoryLimit, _lifetime.Token);
+        ForgetCachedWorkspaceViews(workspace.Id);
+        _workspace.Catalog = deletedCatalog;
         dialog.Close();
         await ShowWorkspacesAsync();
+    }
+
+    private void ForgetCachedWorkspaceViews(string workspaceId)
+    {
+        foreach (var window in _workspace.Windows)
+        {
+            if (!window._workspaceViews.Remove(workspaceId, out var view)) continue;
+            foreach (var tab in view.Tabs.Values)
+            {
+                window.DetachEditor(tab);
+                tab.Log?.Close();
+                tab.Log = null;
+            }
+        }
+
+        foreach (var key in _workspace.SessionStores.Keys.Where(key => key.WorkspaceId == workspaceId).ToArray())
+        {
+            var storage = _workspace.SessionStores[key];
+            var cacheKey = StorageCacheKey(storage);
+            _workspace.LiveDrafts.Remove(cacheKey);
+            _workspace.LastCheckpoints.Remove(cacheKey);
+            _workspace.UnavailableSessions.Remove(cacheKey);
+            _workspace.ClosedTabs.Remove(cacheKey);
+            _workspace.SessionStores.Remove(key);
+        }
     }
 }
