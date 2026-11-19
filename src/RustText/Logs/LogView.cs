@@ -83,6 +83,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         SelectionForegroundBrush = FocusTheme.Text,
         TextWrapping = TextWrapping.NoWrap,
     };
+    private readonly LogLevelBands _levelBands;
+    private readonly Button _levelFilterButton = new() { Content = "Уровни…" };
     private readonly TextBox _percentBox = new()
     {
         Width = 76,
@@ -221,6 +223,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _refreshTimer = new DispatcherTimer { Interval = RefreshInterval };
         _refreshTimer.Tick += OnRefreshTimerTick;
 
+        _levelBands = new LogLevelBands(_logText) { IsHitTestVisible = false, ClipToBounds = true };
         Content = BuildLayout();
         ScrollViewer.SetHorizontalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
         ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
@@ -488,6 +491,30 @@ internal sealed partial class LogView : UserControl, IDisposable
         _closing.Dispose();
     }
 
+    internal bool CanFilterLevels => !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path)) && !HasPendingEdit;
+
+    internal async Task ShowLevelFilterAsync()
+    {
+        if (_closed || !CanFilterLevels || TopLevel.GetTopLevel(this) is not Window owner) return;
+        var stamp = _fileStamp;
+        var originalDigest = _observedDigest;
+        var encoding = _reader.Encoding;
+        var filter = new LogLevelFilterWindow(System.IO.Path.GetFileName(_path), _logText.FontSize, _hiddenOffset, ReadRows);
+        await filter.ShowDialog(owner);
+
+        IEnumerable<LogRow> ReadRows(long offset, CancellationToken token)
+        {
+            using var file = LogDataReader.Open(_path);
+            var reader = new LogDataReader(file, encoding);
+            var now = FileStamp.Read(_path, file);
+            if (now != stamp && !(now.Identity == stamp.Identity && now.Length > stamp.Length && originalDigest is not null
+                && originalDigest.AsSpan().SequenceEqual(reader.ComputeBookmarkDigest(stamp.Length))))
+                throw new IOException("Файл изменился. Откройте фильтр заново.");
+            foreach (var row in LogLevelFilter.FileRows(reader, offset, stamp.Length, token))
+                yield return row;
+        }
+    }
+
     public void Dispose() => Close();
 
     private Control BuildLayout()
@@ -564,6 +591,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         Grid.SetColumn(_logText, 1);
         AutomationProperties.SetAutomationId(_logText, "LogText");
         content.Children.Add(_logText);
+        Grid.SetColumn(_levelBands, 1);
+        content.Children.Add(_levelBands);
         _minimap.Samples = _miniSamples;
         AutomationProperties.SetName(_minimap, "Прокрутка лога");
         AutomationProperties.SetAutomationId(_minimap, "LogMinimap");
@@ -646,6 +675,10 @@ internal sealed partial class LogView : UserControl, IDisposable
         var actions = new Button { Content = "Действия ▾", Flyout = actionsFlyout };
         SetButtonStyle(actions, "focus-quiet");
         navigation.Children.Add(_openSearchButton);
+        SetButtonStyle(_levelFilterButton, "focus-quiet");
+        ToolTip.SetTip(_levelFilterButton, "Фильтр строк по уровням во всём логе");
+        _levelFilterButton.Click += async (_, _) => await ShowLevelFilterAsync();
+        navigation.Children.Add(_levelFilterButton);
         navigation.Children.Add(actions);
         navigation.Children.Add(_cancelIndexButton);
         navigation.Children.Add(_cancelTrimButton);
@@ -932,6 +965,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                     displayText.Append(row.Text);
                 }
                 _logText.Text = displayText.ToString();
+                _levelBands.SetPage(page);
             }
             if (editCaretBytes is null)
             {
@@ -1947,7 +1981,11 @@ internal sealed partial class LogView : UserControl, IDisposable
     private void OnLogTextLayoutUpdated(object? sender, EventArgs e)
     {
         AttachLogScrollViewer();
-        if (_pageEdit is null) UpdateLineGutterText();
+        if (_pageEdit is null)
+        {
+            UpdateLineGutterText();
+            _levelBands.InvalidateVisual();
+        }
     }
 
     private void AttachLogScrollViewer()
@@ -1981,6 +2019,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
             UpdateMinimapViewport();
+            _levelBands.InvalidateVisual();
         }
     }
 
@@ -2092,6 +2131,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_closed) return;
         var enabled = !_busy && !PageNavigationBlocked;
         UpdatePageModeControls();
+        _levelBands.IsVisible = !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path));
+        _levelFilterButton.IsVisible = _levelBands.IsVisible;
+        _levelFilterButton.IsEnabled = CanFilterLevels;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
         _followButton.Content = _followEnd ? "К концу" : "Следовать";
         _liveLabel.Text = _isDraft ? "" : _autoRefresh ? "● Обновляется" : "● На паузе";

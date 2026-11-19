@@ -164,7 +164,8 @@ internal sealed class LogDataReader
         int pageSize = DefaultPageSize,
         int maxFrameBytes = DefaultFrameBytes,
         int maxPageBytes = DefaultPageBytes,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long endOffset = long.MaxValue)
     {
         if (pageSize is < 1 or > 100)
         {
@@ -176,7 +177,7 @@ internal sealed class LogDataReader
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var observedLength = _file.Length;
+        var observedLength = Math.Min(_file.Length, endOffset);
         var requestedOffset = Math.Clamp(offset, 0, observedLength);
         var alignedOffset = requestedOffset < observedLength
             ? AlignOffset(requestedOffset, observedLength)
@@ -272,7 +273,7 @@ internal sealed class LogDataReader
             }
 
             var nextOffset = readOffset + position;
-            var currentLength = _file.Length;
+            var currentLength = Math.Min(_file.Length, endOffset);
             return new LogPage(
                 rows,
                 readOffset,

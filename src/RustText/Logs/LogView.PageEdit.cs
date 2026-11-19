@@ -46,8 +46,9 @@ internal sealed partial class LogView
         };
         _logText.TextChanged += (_, _) =>
         {
+            if (_pageEdit is not null && _levelBands.IsVisible) _levelBands.SetEditedText(_logText.Text ?? "");
             if (EditsPagesByDefault) RefreshButtons();
-            else UpdatePageModeControls();
+            else { UpdatePageModeControls(); _levelFilterButton.IsEnabled = CanFilterLevels; }
         };
         panel.Children.Add(_readModeLabel);
         panel.Children.Add(_editPageButton);

@@ -9,6 +9,7 @@ internal sealed record SessionTab(long Id, string? Path, TextEncodingKind Encodi
     public bool JsonValidationDisabled { get; init; }
     public LegacyFileStamp? LegacyStamp { get; init; }
     public bool SelectionUsesUtf8 { get; init; }
+    public string? CustomTitle { get; init; }
     public string? UntitledName { get; init; }
     public long? DraftOffset { get; init; }
     public bool? AutoRefresh { get; init; }
@@ -17,6 +18,7 @@ internal sealed record LegacyFileStamp(long Length, DateTime LastWriteUtc, DateT
 internal sealed record SessionState(List<SessionTab> Tabs, List<SessionTab>? ClosedTabs = null, int Active = 0, double WindowWidth = 1100, double WindowHeight = 760, bool Maximized = false, bool Wrap = false, double FontSize = FocusTheme.EditorFontSize, WorkspaceLayout? Layout = null, long? ActiveGroupId = null);
 public sealed record UserSettings(int UntitledTabLimit = 10, int RecentFileLimit = 100, int VersionFileLimitBytes = 5 * 1024 * 1024, long VersionTotalLimitBytes = 100L * 1024 * 1024)
 {
+    public bool ShowDraftLineCount { get; init; } = true;
     public bool AutoCheckUpdates { get; init; }
     public bool? OpenLargeFilesAsLog { get; init; }
 }

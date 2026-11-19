@@ -226,7 +226,7 @@ public partial class MainWindow : Window
         close.Classes.Add("focus-icon");
         AutomationProperties.SetName(close, "Закрыть вкладку");
         ToolTip.SetTip(close, "Закрыть вкладку");
-        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 5 };
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 5 };
         header.Children.Add(label);
         var loadMark = new TextBlock
         {
@@ -238,9 +238,11 @@ public partial class MainWindow : Window
         dirtyMark.HorizontalAlignment = HorizontalAlignment.Center;
         marks.Children.Add(dirtyMark);
         marks.Children.Add(loadMark);
-        Grid.SetColumn(marks, 1);
+        Grid.SetColumn(tab.LineCountLabel, 1);
+        header.Children.Add(tab.LineCountLabel);
+        Grid.SetColumn(marks, 2);
         header.Children.Add(marks);
-        Grid.SetColumn(close, 2);
+        Grid.SetColumn(close, 3);
         header.Children.Add(close);
         tab.Label = label;
         tab.DirtyMark = dirtyMark;
@@ -248,6 +250,15 @@ public partial class MainWindow : Window
         tab.HeaderMarks = marks;
         tab.Item.Classes.Add("focus-tab");
         tab.Item.Header = header;
+        var filter = Command("Фильтр по уровням лога…", () => Run(async () =>
+        {
+            if (tab.Log is { } log) { await log.ShowLevelFilterAsync(); return; }
+            if (tab.Editor is not { } editor) return;
+            var text = editor.Text;
+            var dialog = new LogLevelFilterWindow(tab.Label.Text ?? "Без имени", _fontSize, 0,
+                (offset, token) => LogLevelFilter.EditorRows(text, offset, token));
+            await dialog.ShowDialog(this);
+        }));
         var saveCopy = Command("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab)));
         var autoRefresh = Command("Автообновление с диска", () => SetTabAutoRefresh(tab, !TabAutoRefresh(tab)));
         autoRefresh.ToggleType = MenuItemToggleType.CheckBox;
@@ -255,8 +266,10 @@ public partial class MainWindow : Window
         {
             Items =
             {
+                Command("Переименовать вкладку…", () => Run(() => RenameTabAsync(tab))),
                 Command("Показать в Проводнике", () => RevealTab(tab)),
                 Command("Скопировать путь", () => Run(() => CopyTextAsync(tab.Path))),
+                filter,
                 saveCopy,
                 autoRefresh,
                 Command("Переместить в новое окно", () => OpenTabWindow(tab)),
@@ -265,6 +278,7 @@ public partial class MainWindow : Window
         };
         context.Opening += (_, _) =>
         {
+            filter.IsVisible = tab.Editor is not null || tab.Log is { CanFilterLevels: true };
             saveCopy.IsVisible = tab.Recovery is not null;
             saveCopy.IsEnabled = tab.Log?.HasPendingEdit != true;
             autoRefresh.IsVisible = tab.Path is not null && tab.Recovery is null;

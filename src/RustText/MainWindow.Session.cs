@@ -217,6 +217,7 @@ public partial class MainWindow
         {
             JsonValidationDisabled = tab.JsonDisabled,
             AutoRefresh = tab.AutoRefresh,
+            CustomTitle = tab.CustomTitle,
             UntitledName = tab.Path is null ? UntitledName(tab) : null
         };
     }
@@ -360,6 +361,7 @@ public partial class MainWindow
 
     private void SetDeferred(WorkTab tab, SessionTab saved)
     {
+        tab.CustomTitle = saved.CustomTitle;
         tab.Path = saved.Path;
         tab.Encoding = saved.Encoding;
         tab.Ending = saved.LineEnding;
@@ -654,6 +656,7 @@ public partial class MainWindow
 
                 if (!existing.Dirty && existing.Log?.HasPendingEdit != true && existing.Deferred?.DraftRef is null)
                 {
+                    existing.CustomTitle = saved.CustomTitle ?? existing.CustomTitle;
                     if (existing.Deferred is not null)
                     {
                         SetDeferred(existing, saved with { Id = existing.Id });
@@ -825,7 +828,7 @@ public partial class MainWindow
             foreach (var item in _closedTabs.Where(item => item.Path is null))
             {
                 var name = ClosedTabDisplayName(item);
-                closedDrafts.Items.Add(Command(name + DescribeWork(item.LineCount, item.LastWorkedMs),
+                closedDrafts.Items.Add(Command(name + DescribeWork(_settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs),
                     () => Run(() => RestoreClosedAsync(item))));
             }
         }
@@ -833,6 +836,7 @@ public partial class MainWindow
 
     private string ClosedTabDisplayName(SessionTab tab)
     {
+        if (tab.CustomTitle is { Length: > 0 } title) return title;
         if (tab.Path is { } path)
         {
             return Path.GetFileName(path);

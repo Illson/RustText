@@ -65,7 +65,7 @@ public partial class MainWindow
         {
             var term = search.Text?.Trim() ?? "";
             var recentFiles = _recent.Where(item => Matches(item.Path)).ToArray();
-            var closedFiles = _closedTabs.Where(item => item.Path is { } path && Matches(path)).ToArray();
+            var closedFiles = _closedTabs.Where(item => item.Path is { } path && (Matches(path) || Matches(ClosedTabDisplayName(item)))).ToArray();
             var closedDrafts = _closedTabs.Where(item => item.Path is null)
                 .Select(item => (Saved: item, Name: ClosedTabDisplayName(item)))
                 .Where(item => Matches(item.Name)).ToArray();
@@ -76,7 +76,7 @@ public partial class MainWindow
                 return HistoryRow(name, item.Path, DescribeWork(item.LineCount, item.LastWorkedMs), FileSize(item.Path),
                     () => Run(() => OpenRecentAsync(item)), "Удалить из недавних", () => Run(() => ForgetRecentFileAsync(item.Path)));
             });
-            FillHistory(closed, closedFiles, item => ClosedRow(item, Path.GetFileName(item.Path!), FileSize(item.Path!)));
+            FillHistory(closed, closedFiles, item => ClosedRow(item, ClosedTabDisplayName(item), FileSize(item.Path!)));
             FillHistory(ghosts, closedDrafts, item => ClosedRow(item.Saved, item.Name, DraftSize(item.Saved)));
 
             var allDraftSizes = _closedTabs.Where(item => item.Path is null && item.DraftRef is not null)
@@ -86,7 +86,7 @@ public partial class MainWindow
         }
 
         Control ClosedRow(SessionTab item, string name, Task<long?> size) => HistoryRow(name, item.Path,
-            DescribeWork(item.LineCount, item.LastWorkedMs), size, () => Run(() => RestoreClosedAsync(item)),
+            DescribeWork(item.Path is not null || _settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs), size, () => Run(() => RestoreClosedAsync(item)),
             item.DraftRef is null ? "Удалить из истории" : "Удалить сохранённый черновик",
             () => Run(() => ForgetClosedTabAsync(item)));
 

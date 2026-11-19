@@ -1380,6 +1380,116 @@ public sealed class WorkspaceTests
         }
     });
 
+    [Fact]
+    public Task SearchFlagsShareCheckedStyleAndInitiallyHighlightAllHits() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search.txt");
+        await File.WriteAllTextAsync(path, "term term");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            Invoke(window, "OpenSearchPanel", false);
+            await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<ToggleButton>()
+                .Any(button => button.Classes.Contains("search-option")));
+            var flags = window.GetVisualDescendants().OfType<ToggleButton>()
+                .Where(button => button.Classes.Contains("search-option")).ToArray();
+            Assert.Equal(new[] { ".*", "Aa", "«»", "Все вкладки", "Только текущее", "Замена" },
+                flags.Select(button => (string)button.Content!));
+            var current = Assert.Single(flags, flag => Equals(flag.Content, "Только текущее"));
+            Assert.False(current.IsChecked);
+            ((TextBox)Field(window, "_searchInput")).Text = "term";
+            await CallAsync(window, "FindAsync");
+            var highlights = Read<SearchHighlights>(ActiveTab(window), "Highlights");
+            Assert.Equal(2, highlights.Pattern!.Matches("term term").Count);
+            Assert.False(highlights.OnlyCurrent);
+            current.IsChecked = true;
+            Assert.True(highlights.OnlyCurrent);
+            current.IsChecked = false;
+            Assert.False(highlights.OnlyCurrent);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public Task TabAliasAndOptionalDraftCountSurviveCloseAndRestore(bool file) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "original.txt");
+        const string content = "one\ntwo";
+        await File.WriteAllTextAsync(path, content);
+        var window = file ? await OpenWorkspaceAsync(path) : await OpenWorkspaceAsync();
+        try
+        {
+            if (!file)
+            {
+                Invoke(window, "ShowGroups");
+                Invoke(window, "NewTab", content);
+            }
+            var tab = ActiveTab(window);
+            var count = Read<TextBlock>(tab, "LineCountLabel");
+            Assert.Equal(!file, count.IsVisible);
+            if (!file)
+            {
+                Assert.Equal("2 стр.", count.Text);
+                Read<TextEditor>(tab, "Editor").Document.Insert(0, "zero\n");
+                Assert.Equal("3 стр.", count.Text);
+            }
+            var menu = Read<TabItem>(tab, "Item").ContextMenu!;
+            menu.Items.OfType<MenuItem>().Single(i => Equals(i.Header, "Переименовать вкладку…"))
+                .RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            var dialog = Assert.Single(window.OwnedWindows);
+            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<TextBox>().Any());
+            dialog.GetVisualDescendants().OfType<TextBox>().Single().Text = "Моя вкладка";
+            Click(dialog.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "OK")));
+            await HeadlessTests.WaitForAsync(() => Read<TextBlock>(tab, "Label").Text == "Моя вкладка");
+            var settingsTask = CallAsync(window, "ShowSettingsAsync");
+            var settings = Assert.Single(window.OwnedWindows);
+            await HeadlessTests.WaitForAsync(() => settings.GetVisualDescendants().OfType<CheckBox>().Any());
+            settings.GetVisualDescendants().OfType<CheckBox>().Single(box => Equals(box.Content, "Число строк у вкладок без имени")).IsChecked = false;
+            Click(settings.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Сохранить")));
+            await settingsTask;
+            Assert.False(count.IsVisible);
+            await CallAsync(window, "CloseTabAsync", tab);
+            await CloseAsync(window);
+            window = await OpenWorkspaceAsync();
+            var saved = Assert.Single((List<SessionTab>)Field(window, "_closedTabs"));
+            Assert.Equal("Моя вкладка", saved.CustomTitle);
+            Assert.Equal(file ? path : null, saved.Path);
+            await CallAsync(window, "RestoreClosedAsync", saved);
+            var reopened = ActiveTab(window);
+            Assert.Equal("Моя вкладка", Read<TextBlock>(reopened, "Label").Text);
+            Assert.False(Read<TextBlock>(reopened, "LineCountLabel").IsVisible);
+            Assert.Equal(file ? content : "zero\n" + content, Read<TextEditor>(reopened, "Editor").Text);
+            Assert.Equal(content, await File.ReadAllTextAsync(path));
+        }
+        finally { if (window.IsVisible) await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task LevelFilterInEditorUsesUnsavedContent() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "editing.log");
+        await File.WriteAllTextAsync(path, "INFO on disk");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            Assert.True(Assert.Single(editor.TextArea.TextView.LineTransformers.OfType<LogLevelColorizer>()).Enabled);
+            editor.Document.Insert(0, "ERR unsaved\n");
+            var command = Read<TabItem>(tab, "Item").ContextMenu!.Items.OfType<MenuItem>()
+                .Single(item => Equals(item.Header, "Фильтр по уровням лога…"));
+            command.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            var filter = Assert.Single(window.OwnedWindows);
+            await HeadlessTests.WaitForAsync(() => filter.GetVisualDescendants().OfType<SelectableTextBlock>()
+                .SingleOrDefault()?.Inlines?.OfType<Avalonia.Controls.Documents.Run>().SingleOrDefault()?.Text == "ERR unsaved");
+            filter.Close();
+            Assert.Equal("INFO on disk", await File.ReadAllTextAsync(path));
+        }
+        finally { await CloseAsync(window); }
+    });
+
     private static Border TabSurface(TabItem item) => Assert.Single(item.GetVisualDescendants().OfType<Border>(), border => border.Name == "TabSurface");
     private static void Press(MainWindow window, Key key, RawInputModifiers modifiers, PhysicalKey physicalKey, string? symbol = null)
     {

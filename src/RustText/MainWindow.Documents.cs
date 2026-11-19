@@ -283,6 +283,7 @@ public partial class MainWindow
         editor.TextArea.SelectionBrush = FocusTheme.Selection;
         editor.Options.ShowBoxForControlCharacters = true;
         editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
+        editor.TextArea.TextView.LineTransformers.Add(new LogLevelColorizer());
         tab.Editor = editor;
         SetSyntax(editor, tab.Path);
         if (resetDirtyState)
@@ -816,6 +817,7 @@ public partial class MainWindow
         };
         log.TextPositionChanged += () =>
         {
+            if (tab.Path is null && ReferenceEquals(tab.Log, log)) UpdateDraftLineCount(tab);
             if (ReferenceEquals(tab, ActiveTab) && ReferenceEquals(tab.Log, log))
             {
                 UpdateLogPosition(tab);
@@ -1088,7 +1090,8 @@ public partial class MainWindow
 
     private void UpdateTab(WorkTab tab)
     {
-        var title = tab.Path is { } path ? Path.GetFileName(path) : UntitledName(tab);
+        var title = tab.CustomTitle ?? (tab.Path is { } path ? Path.GetFileName(path) : UntitledName(tab));
+        UpdateDraftLineCount(tab);
         tab.Label.Text = title;
         tab.RefreshHeaderMark();
         AutomationProperties.SetName(tab.Item, title + (tab.Dirty ? ", изменено" : ""));
@@ -1097,6 +1100,26 @@ public partial class MainWindow
         {
             UpdateStatus(tab);
         }
+    }
+
+    private void UpdateDraftLineCount(WorkTab tab)
+    {
+        var count = tab.Editor?.Document.LineCount ?? tab.Log?.KnownLineCount ?? tab.Deferred?.LineCount;
+        tab.LineCountLabel.IsVisible = _settings.ShowDraftLineCount && tab.Path is null && count.HasValue;
+        if (tab.LineCountLabel.IsVisible)
+            tab.LineCountLabel.Text = $"{LineNumbers.Format(count!.Value)} стр.";
+    }
+
+    private async Task RenameTabAsync(WorkTab tab)
+    {
+        var name = await PromptAsync("Переименовать вкладку", "Название вкладки. Оставьте поле пустым для автоматического названия.",
+            tab.CustomTitle ?? tab.Label.Text ?? "");
+        if (name is null || _closing || !_tabs.ContainsKey(tab.Id)) return;
+        tab.CustomTitle = string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+        if (tab.Deferred is { } pending) tab.Deferred = pending with { CustomTitle = tab.CustomTitle };
+        if (tab.Recovery is { } recovery) tab.Recovery = recovery with { CustomTitle = tab.CustomTitle };
+        UpdateTab(tab);
+        await SaveSessionAsync();
     }
 
     private string UntitledName(WorkTab tab)
@@ -1164,9 +1187,12 @@ public partial class MainWindow
     {
         var colorizer = editor.TextArea.TextView.LineTransformers.OfType<JsonColorizer>().Single();
         var enabled = JsonColorizer.Applies(path, editor.Document);
-        if (colorizer.Enabled != enabled)
+        var levels = editor.TextArea.TextView.LineTransformers.OfType<LogLevelColorizer>().Single();
+        var logFile = LogLevels.IsLogPath(path);
+        if (colorizer.Enabled != enabled || levels.Enabled != logFile)
         {
             colorizer.Enabled = enabled;
+            levels.Enabled = logFile;
             editor.TextArea.TextView.Redraw();
         }
 
@@ -1248,6 +1274,11 @@ public partial class MainWindow
         public long Id { get; } = id;
         public Group Group { get; set; } = group;
         public TabItem Item { get; } = new();
+        public string? CustomTitle { get; set; }
+        public TextBlock LineCountLabel { get; } = new()
+        {
+            FontSize = 11, Foreground = FocusTheme.Muted, VerticalAlignment = VerticalAlignment.Center, IsVisible = false
+        };
         public TextBlock Label { get; set; } = null!;
         public TextBlock DirtyMark { get; set; } = null!;
         public TextBlock LoadMark { get; set; } = null!;

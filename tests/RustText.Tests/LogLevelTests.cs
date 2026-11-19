@@ -1,0 +1,129 @@
+using System.Runtime.InteropServices;
+using System.Text;
+using Avalonia;
+using Avalonia.Controls.Presenters;
+using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
+using Avalonia.Controls;
+using Avalonia.Controls.Documents;
+using Avalonia.Controls.Primitives;
+using Avalonia.Interactivity;
+using Avalonia.VisualTree;
+using RustText.Demo;
+using RustText.Demo.Logs;
+using Xunit;
+
+namespace RustText.Tests;
+
+[Collection(HeadlessCollection.Name)]
+public sealed class LogLevelTests
+{
+    [Theory]
+    [InlineData("[ERR] диск заполнен", "Error")]
+    [InlineData("2026-11-19 12:58:42.001 [worker] WARN request", "Warning")]
+    [InlineData("[12:10:50 INF] found an error", "Info")]
+    [InlineData("logger | DEBUG | retry", "Debug")]
+    [InlineData("""{"msg":"[ERR] was recovered","severityText":"Information"}""", "Info")]
+    [InlineData("time=t1 level=critical message=exit", "Fatal")]
+    [InlineData("""{"msg":"error message"}""", "Other")]
+    [InlineData("no error occurred", "Other")]
+    [InlineData("<131>1 2026-11-19T10:01:22Z app host - - - disk full", "Error")]
+    [InlineData("fail: Microsoft.Hosting[1]", "Error")]
+    public void ClassifiesLevelFromRecordHeader(string row, string expected) =>
+        Assert.Equal(expected, LogLevels.Classify(row).ToString());
+
+    [Fact]
+    public void FilterKeepsMultiFrameRowsAcrossPagesAndFileEncodings()
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "mixed.log");
+        var longError = "[ERR] " + new string('Ж', 150_000);
+        File.WriteAllText(path, "[INF] skip\r\n" + longError + "\r\nwarn: warning\r\nno error here", Encoding.Unicode);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf16LittleEndian);
+        var errors = new StringBuilder();
+        var warnings = new List<string>();
+        var pages = 0;
+        FilterCursor? cursor = new FilterCursor();
+        while (cursor is { } start)
+        {
+            var page = LogLevelFilter.Read((offset, token) => LogLevelFilter.FileRows(reader, offset, file.Length, token),
+                start, LogLevel.Error | LogLevel.Warning, default);
+            foreach (var row in page.Rows)
+            {
+                if (row.Level == LogLevel.Error) errors.Append(row.Text);
+                else { Assert.Equal(LogLevel.Warning, row.Level); warnings.Add(row.Text); }
+            }
+            pages++;
+            cursor = page.Next;
+        }
+        Assert.True(pages > 1);
+        Assert.Equal(longError, errors.ToString());
+        Assert.Equal(new[] { "warn: warning" }, warnings);
+    }
+
+    [Fact]
+    public Task FilterButtonsPageThroughWholeLogAndLeaveSourceUntouched() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "filter.log");
+        var lines = Enumerable.Range(1, 110).SelectMany(n => new[] { $"INFO info-{n}", $"[ERR] error-{n}" });
+        var original = string.Join('\n', lines);
+        await File.WriteAllTextAsync(path, original);
+        using var log = new LogView(path);
+        var owner = new Window { Content = log, Width = 850, Height = 600 };
+        owner.Show();
+        try
+        {
+            await log.InitialPageLoad;
+            await HeadlessTests.WaitForAsync(() => log.GetVisualDescendants().OfType<TextPresenter>()
+                .Any(presenter => presenter.Text?.StartsWith("INFO info-1", StringComparison.Ordinal) == true && presenter.Bounds.Height > 0));
+            var presenter = log.GetVisualDescendants().OfType<TextPresenter>().Single(p => p.Text?.StartsWith("INFO info-1") == true);
+            var origin = presenter.TranslatePoint(default, log)!.Value;
+            var width = (int)log.Bounds.Width;
+            var height = (int)log.Bounds.Height;
+            using (var bitmap = new RenderTargetBitmap(new PixelSize(width, height)))
+            using (var pixels = new WriteableBitmap(new PixelSize(width, height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul))
+            using (var frame = pixels.Lock())
+            {
+                bitmap.Render(log);
+                bitmap.CopyPixels(frame);
+                var x = (int)origin.X + 220; // Sample the band beyond the end of the short message.
+                var lineHeight = presenter.TextLayout.TextLines[0].Height;
+                var info = Pixel((int)(origin.Y + lineHeight * .5));
+                var error = Pixel((int)(origin.Y + lineHeight * 1.5));
+                Assert.True(error.R > info.R && error.G < info.G, $"Error band {error}, info band {info}");
+
+                Color Pixel(int y)
+                {
+                    var sample = frame.Address + y * frame.RowBytes + x * 4;
+                    return Color.FromRgb(Marshal.ReadByte(sample, 2), Marshal.ReadByte(sample, 1), Marshal.ReadByte(sample));
+                }
+            }
+            var open = log.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Уровни…"));
+            open.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
+            var dialog = Assert.Single(owner.OwnedWindows);
+            await HeadlessTests.WaitForAsync(() => Runs(dialog).Length == 100);
+            Assert.Equal("[ERR] error-1", Runs(dialog)[0].Text);
+            Assert.All(Runs(dialog), run => Assert.Same(FocusTheme.Danger, run.Foreground));
+            await File.AppendAllTextAsync(path, "\n[ERR] added after opening");
+            Button(dialog, "Дальше").RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => Runs(dialog).Length == 10);
+            Assert.Equal("[ERR] error-110", Runs(dialog)[^1].Text);
+            Button(dialog, "Назад").RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => Runs(dialog).Length == 100);
+            foreach (var option in dialog.GetVisualDescendants().OfType<ToggleButton>())
+                option.IsChecked = Equals(option.Content, "Info");
+            await HeadlessTests.WaitForAsync(() => Runs(dialog).FirstOrDefault()?.Text == "INFO info-1");
+            Assert.All(Runs(dialog), run => Assert.Same(FocusTheme.Success, run.Foreground));
+            dialog.Close();
+            Assert.Equal(original + "\n[ERR] added after opening", await File.ReadAllTextAsync(path));
+        }
+        finally { foreach (var dialog in owner.OwnedWindows.ToArray()) dialog.Close(); owner.Close(); }
+    });
+
+    private static Button Button(Window dialog, string caption) => dialog.GetVisualDescendants()
+        .OfType<Button>().Single(button => Equals(button.Content, caption));
+    private static Run[] Runs(Window dialog) => dialog.GetVisualDescendants().OfType<SelectableTextBlock>()
+        .SingleOrDefault()?.Inlines?.OfType<Run>().ToArray() ?? [];
+}
