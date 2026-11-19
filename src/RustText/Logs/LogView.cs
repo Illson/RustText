@@ -785,6 +785,14 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async void OnLogKeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.Key == Key.X && e.KeyModifiers == KeyModifiers.Control && _pageEdit is not null
+            && !_logText.IsReadOnly && _logText.SelectionStart == _logText.SelectionEnd)
+        {
+            e.Handled = true;
+            await CutCurrentPageLineAsync();
+            return;
+        }
+
         if (_closed || PageNavigationBlocked) return;
 
         if (e.Key == Key.Home && e.KeyModifiers.HasFlag(KeyModifiers.Control))

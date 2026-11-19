@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Avalonia.Controls;
+using Avalonia.Input.Platform;
 using Avalonia.Layout;
 
 namespace RustText.Demo.Logs;
@@ -133,6 +134,74 @@ internal sealed partial class LogView
     }
 
     internal void FocusPageEditor() => _logText.Focus();
+
+    private async Task CutCurrentPageLineAsync()
+    {
+        if (_closed || _pageWrite is not null || _pageEdit is not { } pageEdit
+            || _logText.IsReadOnly || _logText.SelectionStart != _logText.SelectionEnd
+            || TopLevel.GetTopLevel(_logText)?.Clipboard is not { } clipboard
+            || _logText.Text is not { } text)
+        {
+            return;
+        }
+
+        var caret = _logText.CaretIndex;
+        var previousLineBreak = caret == 0 ? -1 : LastLineBreak(text, caret - 1);
+        var lineStart = previousLineBreak + 1;
+        var lineEnd = NextLineBreak(text, caret);
+        var lineContentEnd = lineEnd < 0 ? text.Length : lineEnd;
+        if (lineContentEnd == lineStart)
+        {
+            return;
+        }
+
+        var lineTextEnd = lineEnd < 0 ? text.Length
+            : lineEnd + (text[lineEnd] == '\r' && lineEnd + 1 < text.Length && text[lineEnd + 1] == '\n' ? 2 : 1);
+        var deleteStart = lineStart;
+        if (lineEnd < 0 && lineStart > 0)
+        {
+            deleteStart--;
+            if (deleteStart > 0 && text[deleteStart - 1] == '\r')
+            {
+                deleteStart--;
+            }
+        }
+        var deleteLength = lineTextEnd - deleteStart;
+        var lineText = text[lineStart..lineTextEnd];
+        await clipboard.SetTextAsync(lineText.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n').Replace("\n", Environment.NewLine, StringComparison.Ordinal));
+
+        if (_closed || !ReferenceEquals(_pageEdit, pageEdit) || _pageWrite is not null
+            || _logText.IsReadOnly || _logText.Text != text || _logText.CaretIndex != caret
+            || _logText.SelectionStart != _logText.SelectionEnd)
+        {
+            return;
+        }
+
+        _logText.SelectionStart = deleteStart;
+        _logText.SelectionEnd = deleteStart + deleteLength;
+        _logText.SelectedText = "";
+        _logText.CaretIndex = deleteStart;
+        _logText.SelectionStart = _logText.SelectionEnd = deleteStart;
+    }
+
+    private static int LastLineBreak(string text, int start)
+    {
+        for (var index = start; index >= 0; index--)
+        {
+            if (text[index] is '\r' or '\n') return index;
+        }
+        return -1;
+    }
+
+    private static int NextLineBreak(string text, int start)
+    {
+        for (var index = start; index < text.Length; index++)
+        {
+            if (text[index] is '\r' or '\n') return index;
+        }
+        return -1;
+    }
 
     internal void RestorePageCaret(int caret, bool focus)
     {

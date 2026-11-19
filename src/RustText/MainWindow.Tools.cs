@@ -6,6 +6,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using RustText.Demo.Editor;
 using RustText.Demo.Platform;
 
@@ -131,6 +132,27 @@ public partial class MainWindow
             default: return;
         }
 
+        e.Handled = true;
+    }
+
+    private void OnWorkspacePointerWheel(object? sender, PointerWheelEventArgs e)
+    {
+        if (e.KeyModifiers != KeyModifiers.Control || e.Delta.Y == 0
+            || e.Source is not Visual source)
+        {
+            return;
+        }
+
+        var editor = ActiveTab?.Editor;
+        var log = ActiveTab?.Log;
+        var isInEditor = editor?.IsVisualAncestorOf(source) == true;
+        var isInLog = log?.IsVisualAncestorOf(source) == true;
+        if (!isInEditor && !isInLog)
+        {
+            return;
+        }
+
+        ResizeText(Math.Sign(e.Delta.Y));
         e.Handled = true;
     }
 

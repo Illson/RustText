@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -413,6 +414,23 @@ public partial class MainWindow
             Run(() => PasteSafelyAsync(tab, editor, multiCaret, pasteQueue));
         }
         editor.TextArea.AddHandler(KeyDownEvent, PasteKeyDown, RoutingStrategies.Tunnel);
+        void CutLineKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.X || e.KeyModifiers != KeyModifiers.Control
+                || editor.IsReadOnly || !editor.IsEnabled || !editor.TextArea.Selection.IsEmpty)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            if (MultiCaretEditing.Count(editor.TextArea) > 1)
+            {
+                return;
+            }
+
+            Run(() => CutCurrentLineAsync(tab, editor));
+        }
+        editor.TextArea.AddHandler(KeyDownEvent, CutLineKeyDown, RoutingStrategies.Tunnel);
         tab.EditorSubscriptions =
         [
             () => undoStack.PropertyChanged -= undoHandler,
@@ -422,6 +440,7 @@ public partial class MainWindow
             () => editor.TextArea.TextEntering -= textEnteringHandler,
             () => editor.TextArea.CommandBindings.Remove(pasteBinding),
             () => editor.TextArea.RemoveHandler(KeyDownEvent, PasteKeyDown),
+            () => editor.TextArea.RemoveHandler(KeyDownEvent, CutLineKeyDown),
             multiCaret.Dispose
         ];
         tab.Minimap = minimap;
@@ -429,6 +448,60 @@ public partial class MainWindow
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
         if (PanelHost.IsVisible && ReferenceEquals(tab, ActiveTab) && _searchCancellation is null) ScheduleSearch();
+    }
+
+    private async Task CutCurrentLineAsync(WorkTab tab, TextEditor editor)
+    {
+        if (TopLevel.GetTopLevel(editor)?.Clipboard is not { } clipboard
+            || _closing || tab.Closing || tab.Loading || editor.IsReadOnly || !editor.IsEnabled
+            || !ReferenceEquals(tab.Editor, editor) || !ReferenceEquals(tab, ActiveTab)
+            || !editor.TextArea.Selection.IsEmpty)
+        {
+            return;
+        }
+
+        var document = editor.Document;
+        var caretOffset = editor.CaretOffset;
+        var line = document.GetLineByOffset(caretOffset);
+        var length = line.TotalLength;
+        if (length == 0)
+        {
+            return;
+        }
+
+        var lineText = document.GetText(line.Offset, length);
+        var deleteStart = line.Offset;
+        var deleteLength = length;
+        if (line.DelimiterLength == 0 && line.PreviousLine is { } previousLine)
+        {
+            deleteStart = previousLine.EndOffset;
+            deleteLength = line.EndOffset - deleteStart;
+        }
+
+        var documentChanged = false;
+        EventHandler<DocumentChangeEventArgs> changed = (_, _) => documentChanged = true;
+        document.Changed += changed;
+        try
+        {
+            await clipboard.SetTextAsync(lineText.Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace('\r', '\n').Replace("\n", Environment.NewLine, StringComparison.Ordinal));
+        }
+        finally
+        {
+            document.Changed -= changed;
+        }
+
+        if (_closing || tab.Closing || tab.Loading || editor.IsReadOnly || !editor.IsEnabled
+            || !ReferenceEquals(tab.Editor, editor) || !ReferenceEquals(tab, ActiveTab)
+            || !ReferenceEquals(editor.Document, document) || editor.CaretOffset != caretOffset
+            || !editor.TextArea.Selection.IsEmpty || documentChanged)
+        {
+            return;
+        }
+
+        document.Remove(deleteStart, deleteLength);
+        editor.CaretOffset = Math.Min(deleteStart, document.TextLength);
+        editor.TextArea.ClearSelection();
     }
 
     private async Task PasteSafelyAsync(WorkTab tab, TextEditor editor, MultiCaretEditing multiCaret, SemaphoreSlim queue)
