@@ -47,7 +47,8 @@ public partial class MainWindow
 
     private async Task DragTabAsync(PointerPressedEventArgs start, WorkTab tab)
     {
-        if (_workspace.Drag is not null || tab.Loading || tab.Closing || !_tabs.ContainsKey(tab.Id)) return;
+        if (_workspace.Drag is not null || tab.Loading || tab.Closing || tab.Saving || tab.Log?.HasPendingEdit == true
+            || !_tabs.ContainsKey(tab.Id)) return;
 
         var drag = new TabTransfer(this, tab);
         _workspace.Drag = drag;
@@ -85,7 +86,8 @@ public partial class MainWindow
 
     private void OpenTabWindow(WorkTab tab, PixelPoint? dropPoint = null)
     {
-        if (_closing || tab.Loading || tab.Closing || !_tabs.ContainsKey(tab.Id)) return;
+        if (_closing || tab.Loading || tab.Closing || tab.Saving || tab.Log?.HasPendingEdit == true
+            || !_tabs.ContainsKey(tab.Id)) return;
 
         var window = new MainWindow([], _workspace)
         {
@@ -130,7 +132,7 @@ public partial class MainWindow
 
     private void TransferTab(WorkTab tab, MainWindow destination, Group group, WorkTab? before)
     {
-        if (tab.Closing || !_tabs.ContainsKey(tab.Id) || ReferenceEquals(tab, before)) return;
+        if (tab.Closing || tab.Saving || tab.Log?.HasPendingEdit == true || !_tabs.ContainsKey(tab.Id) || ReferenceEquals(tab, before)) return;
         if (ReferenceEquals(this, destination))
         {
             MoveTab(tab, group, before);

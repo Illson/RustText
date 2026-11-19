@@ -4,15 +4,14 @@
         x:Class="RustText.Demo.MainWindow"
         Icon="avares://rusttext/Assets/rusttext.ico" Title="RustText" Width="1080" Height="700" MinWidth="650" MinHeight="360"
         WindowStartupLocation="CenterScreen"
-        ExtendClientAreaToDecorationsHint="True" ExtendClientAreaTitleBarHeightHint="38" WindowDecorations="Full"
+        WindowDecorations="Full"
         Background="{x:Static local:FocusTheme.Editor}" Foreground="{x:Static local:FocusTheme.Text}" FontSize="13">
     <Grid RowDefinitions="Auto,*,Auto,Auto">
         <Border Background="{x:Static local:FocusTheme.Chrome}" BorderBrush="{x:Static local:FocusTheme.Border}"
-                BorderThickness="0,0,0,1" MinHeight="38" WindowDecorationProperties.ElementRole="TitleBar">
-            <Grid ColumnDefinitions="Auto,Auto,*,144" ColumnSpacing="6" Margin="8,0,0,0">
+                BorderThickness="0,0,0,1" MinHeight="36">
+            <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="6" Margin="8,0,0,0">
                 <Button Classes="focus-quiet" Foreground="{x:Static local:FocusTheme.Text}" Padding="5,3"
-                        AutomationProperties.Name="Главный экран RustText" Click="HomeClicked"
-                        WindowDecorationProperties.ElementRole="User">
+                        AutomationProperties.Name="Главный экран RustText" Click="HomeClicked">
                     <StackPanel Orientation="Horizontal" Spacing="7">
                         <Border Width="22" Height="21" CornerRadius="5" Background="#37302C" BorderBrush="#5E544A" BorderThickness="1">
                             <TextBlock Text="›_" FontFamily="Consolas" FontWeight="Bold"
@@ -22,11 +21,7 @@
                         <TextBlock Text="RustText" FontWeight="SemiBold" VerticalAlignment="Center" />
                     </StackPanel>
                 </Button>
-                <Menu Grid.Column="1" x:Name="TopMenu" Classes="focus-menu" VerticalAlignment="Center"
-                      WindowDecorationProperties.ElementRole="User" />
-                <TextBlock Grid.Column="2" x:Name="ActiveCaption" Foreground="{x:Static local:FocusTheme.Muted}"
-                           Margin="12,0" HorizontalAlignment="Right" VerticalAlignment="Center"
-                           TextTrimming="CharacterEllipsis" FontSize="12" />
+                <Menu Grid.Column="1" x:Name="TopMenu" Classes="focus-menu" VerticalAlignment="Center" />
             </Grid>
         </Border>
         <ContentControl Grid.Row="1" x:Name="WorkspaceHost"

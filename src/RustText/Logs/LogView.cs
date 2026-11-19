@@ -42,7 +42,7 @@ internal sealed record LogFileIdentity(ulong Volume, int[] Id);
 internal sealed record LogSystemTime(long SecsSinceEpoch, uint NanosSinceEpoch);
 internal sealed record LogFingerprint(LogSystemTime? Modified, int[] Digest);
 
-internal sealed class LogView : UserControl, IDisposable
+internal sealed partial class LogView : UserControl, IDisposable
 {
     private const int HistoryLimit = 100;
     private const int SearchResultsPerPage = 32;
@@ -62,7 +62,7 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly DispatcherTimer _refreshTimer;
     private readonly List<long> _previousOffsets = [];
     private readonly ObservableCollection<SearchResult> _searchResults = [];
-    private readonly ObservableCollection<MiniSample> _miniSamples = [];
+    private readonly List<string> _miniSamples = [];
     private readonly TextBlock _fileLabel = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBox _logText = new()
     {
@@ -134,13 +134,7 @@ internal sealed class LogView : UserControl, IDisposable
     };
     private ScrollViewer? _logScrollViewer;
     private readonly TextBlock _indexLabel = new();
-    private readonly ListBox _minimapList = new()
-    {
-        Width = 52,
-        Background = FocusTheme.Hover,
-        Foreground = FocusTheme.Muted,
-        BorderBrush = FocusTheme.Border,
-    };
+    private readonly LogMinimap _minimap = new() { Width = 54 };
     private readonly StackPanel _searchPanel = new()
     {
         Spacing = 7,
@@ -242,7 +236,8 @@ internal sealed class LogView : UserControl, IDisposable
     public event Action<string>? StatusChanged;
 
     public string Path => _path;
-    public bool IsReadOnly => true;
+    public bool IsReadOnly => _pageEdit is null;
+    public bool AutoRefresh => _autoRefresh;
     public long? CurrentOffset => _page?.StartOffset;
     public long? KnownLineCount => _totalLineCount ?? _savedLineCount;
     public string StatusText { get; private set; } = string.Empty;
@@ -466,6 +461,7 @@ internal sealed class LogView : UserControl, IDisposable
         _indexCancellation?.Cancel();
         _trimCancellation?.Cancel();
         _refreshTimer.Stop();
+        _logText.LayoutUpdated -= OnLogTextLayoutUpdated;
         _file.Dispose();
         _closing.Dispose();
     }
@@ -486,13 +482,7 @@ internal sealed class LogView : UserControl, IDisposable
         _fileLabel.HorizontalAlignment = HorizontalAlignment.Stretch;
         _fileLabel.VerticalAlignment = VerticalAlignment.Center;
         _fileLabel.Foreground = FocusTheme.Text;
-        var readOnlyLabel = new TextBlock
-        {
-            Text = "ТОЛЬКО ЧТЕНИЕ",
-            FontSize = 11,
-            Foreground = FocusTheme.Muted,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
+        var modeControls = BuildPageModeControls();
         var titleGroup = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto"),
@@ -500,8 +490,8 @@ internal sealed class LogView : UserControl, IDisposable
             MinWidth = 0,
         };
         titleGroup.Children.Add(_fileLabel);
-        Grid.SetColumn(readOnlyLabel, 1);
-        titleGroup.Children.Add(readOnlyLabel);
+        Grid.SetColumn(modeControls, 1);
+        titleGroup.Children.Add(modeControls);
 
         SetButtonStyle(_pauseButton, "focus-quiet");
         SetButtonStyle(_followButton, "focus-quiet");
@@ -541,7 +531,7 @@ internal sealed class LogView : UserControl, IDisposable
         Grid.SetRow(content, 1);
         _lineGutterScrollViewer.Content = new Border
         {
-            Padding = new Thickness(0, 6),
+            Padding = new Thickness(5, 6, 11, 6),
             Background = FocusTheme.Chrome,
             Child = _lineGutterText,
         };
@@ -550,42 +540,13 @@ internal sealed class LogView : UserControl, IDisposable
         Grid.SetColumn(_lineGutterScrollViewer, 0);
         content.Children.Add(_lineGutterScrollViewer);
         Grid.SetColumn(_logText, 1);
+        AutomationProperties.SetAutomationId(_logText, "LogText");
         content.Children.Add(_logText);
-        _minimapList.ItemsSource = _miniSamples;
-        AutomationProperties.SetName(_minimapList, "Прокрутка лога");
-        AutomationProperties.SetAutomationId(_minimapList, "LogMinimap");
-        _minimapList.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<MiniSample>((sample, _) =>
-        {
-            if (sample is null)
-            {
-                return null;
-            }
-
-            var button = new Button
-            {
-                Height = 5,
-                MinHeight = 5,
-                MaxHeight = 5,
-                Padding = new Thickness(0),
-                Margin = new Thickness(0),
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = HorizontalAlignment.Left,
-                Content = new Border
-                {
-                    Width = Math.Clamp(sample.Preview.Length * 1.35, 6, 46),
-                    Height = 2,
-                    HorizontalAlignment = HorizontalAlignment.Left,
-                    Background = FocusTheme.Muted,
-                },
-            };
-            SetButtonStyle(button, "focus-quiet");
-            button.Margin = new Thickness(0);
-            ToolTip.SetTip(button, sample.Preview);
-            button.Click += async (_, _) => await NavigateAsync(sample.Offset, true);
-            return button;
-        });
-        Grid.SetColumn(_minimapList, 2);
-        content.Children.Add(_minimapList);
+        _minimap.Samples = _miniSamples;
+        AutomationProperties.SetName(_minimap, "Прокрутка лога");
+        AutomationProperties.SetAutomationId(_minimap, "LogMinimap");
+        Grid.SetColumn(_minimap, 2);
+        content.Children.Add(_minimap);
         root.Children.Add(content);
 
         var searchRow = new WrapPanel
@@ -689,7 +650,6 @@ internal sealed class LogView : UserControl, IDisposable
         _countLabel.Foreground = FocusTheme.Muted;
         _lineNumberLabel.FontSize = 11;
         _lineNumberLabel.Foreground = FocusTheme.Muted;
-        _lineNumberLabel.MaxWidth = 110;
         _indexLabel.FontSize = 11;
         _indexLabel.Foreground = FocusTheme.Muted;
         _indexLabel.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -769,6 +729,7 @@ internal sealed class LogView : UserControl, IDisposable
         _revealButton.Click += async (_, _) =>
         {
             _hiddenOffset = 0;
+            LoadMinimapSamples();
             _previousOffsets.Clear();
             await NavigateAsync(0, false);
         };
@@ -789,17 +750,17 @@ internal sealed class LogView : UserControl, IDisposable
         };
         _logText.AddHandler(KeyDownEvent, OnLogKeyDown, RoutingStrategies.Tunnel);
         _logText.AddHandler(PointerWheelChangedEvent, OnLogPointerWheel, RoutingStrategies.Tunnel);
-        _minimapList.SelectionChanged += (_, _) => _minimapList.SelectedItem = null;
-        _minimapList.AddHandler(InputElement.PointerPressedEvent, OnMinimapPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
-        _minimapList.PointerMoved += OnMinimapPointerMoved;
-        _minimapList.PointerReleased += OnMinimapPointerReleased;
-        _minimapList.AddHandler(InputElement.PointerWheelChangedEvent, OnMinimapPointerWheelChanged, RoutingStrategies.Tunnel, handledEventsToo: true);
+        _minimap.PointerPressed += OnMinimapPointerPressed;
+        _minimap.PointerMoved += OnMinimapPointerMoved;
+        _minimap.PointerReleased += OnMinimapPointerReleased;
+        _minimap.PointerCaptureLost += (_, _) => _minimapDragging = false;
+        _minimap.PointerWheelChanged += OnMinimapPointerWheelChanged;
         WordWrap = _wordWrap;
     }
 
     private async void OnLogKeyDown(object? sender, KeyEventArgs e)
     {
-        if (_closed) return;
+        if (_closed || _pageEdit is not null) return;
 
         if (e.Key == Key.Home && e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
@@ -830,7 +791,7 @@ internal sealed class LogView : UserControl, IDisposable
 
     private async void OnLogPointerWheel(object? sender, PointerWheelEventArgs e)
     {
-        if (_busy || _closed || _page is not { } page || _logScrollViewer is not { } scroll
+        if (_busy || _closed || _pageEdit is not null || _page is not { } page || _logScrollViewer is not { } scroll
             || e.KeyModifiers != KeyModifiers.None || Math.Abs(e.Delta.Y) < Math.Abs(e.Delta.X)) return;
 
         if (e.Delta.Y < 0 && page.HasMore && scroll.Offset.Y >= scroll.Extent.Height - scroll.Viewport.Height - 1)
@@ -847,14 +808,14 @@ internal sealed class LogView : UserControl, IDisposable
 
     private void OnMinimapPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (!e.GetCurrentPoint(_minimapList).Properties.IsLeftButtonPressed)
+        if (!e.GetCurrentPoint(_minimap).Properties.IsLeftButtonPressed)
         {
             return;
         }
 
         _minimapDragging = true;
-        e.Pointer.Capture(_minimapList);
-        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimapList).Y));
+        e.Pointer.Capture(_minimap);
+        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimap).Y));
         e.Handled = true;
     }
 
@@ -865,7 +826,7 @@ internal sealed class LogView : UserControl, IDisposable
             return;
         }
 
-        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimapList).Y));
+        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimap).Y));
         e.Handled = true;
     }
 
@@ -878,7 +839,7 @@ internal sealed class LogView : UserControl, IDisposable
 
         _minimapDragging = false;
         e.Pointer.Capture(null);
-        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimapList).Y));
+        _ = NavigateMinimapToRatioAsync(MinimapRatioAt(e.GetPosition(_minimap).Y));
         e.Handled = true;
     }
 
@@ -899,7 +860,7 @@ internal sealed class LogView : UserControl, IDisposable
     private async Task LoadPageAsync(long offset, bool saveHistory = true, bool allowFollowEnd = true,
         int maxPageBytes = LogDataReader.DefaultPageBytes, bool scrollToEnd = false)
     {
-        if (_closed || _busy)
+        if (_closed || _busy || _pageEdit is not null)
         {
             return;
         }
@@ -933,6 +894,7 @@ internal sealed class LogView : UserControl, IDisposable
             }
 
             _page = page;
+            UpdateMinimapViewport();
             var displayText = new StringBuilder();
             for (var index = 0; index < page.Rows.Count; index++)
             {
@@ -976,6 +938,9 @@ internal sealed class LogView : UserControl, IDisposable
         catch (OperationCanceledException) when (_closing.IsCancellationRequested)
         {
         }
+        catch (ObjectDisposedException) when (_closed)
+        {
+        }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
         {
             SetStatus($"Не удалось прочитать лог. {error.Message}");
@@ -998,6 +963,7 @@ internal sealed class LogView : UserControl, IDisposable
 
     private async Task NavigateMinimapToRatioAsync(double ratio)
     {
+        if (_pageEdit is not null) return;
         ratio = Math.Clamp(ratio, 0, 1);
         if (_busy)
         {
@@ -1026,7 +992,7 @@ internal sealed class LogView : UserControl, IDisposable
 
     private double MinimapRatioAt(double y)
     {
-        var height = _minimapList.Bounds.Height;
+        var height = _minimap.Bounds.Height;
         return height <= 0 ? 0 : Math.Clamp(y / height, 0, 1);
     }
 
@@ -1407,6 +1373,8 @@ internal sealed class LogView : UserControl, IDisposable
         }
         var boundary = firstLine.StartOffset;
         _hiddenOffset = Math.Max(_hiddenOffset, boundary);
+        UpdateMinimapViewport();
+        LoadMinimapSamples();
         _previousOffsets.Clear();
         if (_page.StartOffset < _hiddenOffset)
         {
@@ -1601,12 +1569,14 @@ internal sealed class LogView : UserControl, IDisposable
         }
     }
 
-    private void SetAutoRefresh(bool enabled)
+    public void SetAutoRefresh(bool enabled)
     {
+        if (_isDraft || _closed) return;
         _autoRefresh = enabled;
         if (enabled)
         {
             _refreshTimer.Start();
+            OnRefreshTimerTick(null, EventArgs.Empty);
         }
         else
         {
@@ -1664,7 +1634,7 @@ internal sealed class LogView : UserControl, IDisposable
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
-        if (_closed || _busy || !_autoRefresh)
+        if (_closed || _busy || _pageEdit is not null || !_autoRefresh)
         {
             return;
         }
@@ -1895,13 +1865,15 @@ internal sealed class LogView : UserControl, IDisposable
             : "";
         var last = _displaySourceLineNumbers.LastOrDefault(value => value.HasValue);
         var max = Math.Max(KnownLineCount ?? 0, last ?? 0);
-        _lineGutterScrollViewer.Width = Math.Max(54, 18 + _lineGutterText.FontSize * 0.64 * LineNumbers.Format(max).Length);
+        var text = new FormattedText(LineNumbers.Format(max), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+            new Typeface(_lineGutterText.FontFamily), _lineGutterText.FontSize, _lineGutterText.Foreground);
+        _lineGutterScrollViewer.Width = Math.Max(32, Math.Ceiling(text.Width) + 16);
     }
 
     private void OnLogTextLayoutUpdated(object? sender, EventArgs e)
     {
         AttachLogScrollViewer();
-        UpdateLineGutterText();
+        if (_pageEdit is null) UpdateLineGutterText();
     }
 
     private void AttachLogScrollViewer()
@@ -1928,6 +1900,7 @@ internal sealed class LogView : UserControl, IDisposable
         if (_logScrollViewer is { } scrollViewer)
         {
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
+            UpdateMinimapViewport();
         }
     }
 
@@ -1973,25 +1946,31 @@ internal sealed class LogView : UserControl, IDisposable
 
     private async void LoadMinimapSamples()
     {
-        if (_closed || _file.Length == 0 || _minimapLoading)
+        if (_closed || _minimapLoading)
         {
             return;
         }
-        _minimapLoading = true;
         var length = _file.Length;
+        if (length == 0)
+        {
+            _miniSamples.Clear();
+            _minimap.InvalidateVisual();
+            return;
+        }
+        _minimapLoading = true;
         var generation = _dataGeneration;
+        var reader = _reader;
+        var start = _hiddenOffset;
         try
         {
-            var samples = await Task.Run(() => BuildMinimapSamples(length, _closing.Token), _closing.Token);
-            if (_closed || generation != _dataGeneration)
+            var samples = await Task.Run(() => BuildMinimapSamples(reader, start, length, _closing.Token), _closing.Token);
+            if (_closed || generation != _dataGeneration || start != _hiddenOffset)
             {
                 return;
             }
             _miniSamples.Clear();
-            foreach (var sample in samples)
-            {
-                _miniSamples.Add(sample);
-            }
+            _miniSamples.AddRange(samples);
+            _minimap.InvalidateVisual();
         }
         catch (OperationCanceledException) when (_closing.IsCancellationRequested)
         {
@@ -2006,31 +1985,33 @@ internal sealed class LogView : UserControl, IDisposable
         finally
         {
             _minimapLoading = false;
-            if (!_closed && generation != _dataGeneration)
+            if (!_closed && (generation != _dataGeneration || start != _hiddenOffset))
             {
                 Dispatcher.UIThread.Post(LoadMinimapSamples);
             }
         }
     }
 
-    private IReadOnlyList<MiniSample> BuildMinimapSamples(long fileLength, CancellationToken token)
+    private static IReadOnlyList<string> BuildMinimapSamples(LogDataReader reader, long start, long fileLength, CancellationToken token)
     {
-        var samples = new List<MiniSample>(64);
+        var samples = new List<string>(64);
+        var range = Math.Max(0, fileLength - start - 1);
         for (var index = 0; index < 64; index++)
         {
             token.ThrowIfCancellationRequested();
-            var offset = (long)((fileLength - 1) * (index / 63d));
-            var pageOffset = offset > _hiddenOffset ? offset : _hiddenOffset;
-            var page = _reader.ReadPage(pageOffset, pageSize: 1, maxFrameBytes: 256, maxPageBytes: 256, cancellationToken: token);
+            var pageOffset = start + (long)(range * (index / 63d));
+            var page = reader.ReadPage(pageOffset, pageSize: 1, maxFrameBytes: 256, maxPageBytes: 256, cancellationToken: token);
             var text = page.Rows.FirstOrDefault()?.Text ?? string.Empty;
-            samples.Add(new MiniSample(page.Rows.FirstOrDefault()?.StartOffset ?? pageOffset, ClipText(text, 32)));
+            samples.Add(ClipText(text, 32));
         }
         return samples;
     }
 
     private void RefreshButtons()
     {
-        var enabled = !_busy && !_closed;
+        if (_closed) return;
+        var enabled = !_busy && _pageEdit is null;
+        UpdatePageModeControls();
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
         _followButton.Content = _followEnd ? "К концу" : "Следовать";
         _liveLabel.Text = _isDraft ? "" : _autoRefresh ? "● Обновляется" : "● На паузе";
@@ -2054,8 +2035,9 @@ internal sealed class LogView : UserControl, IDisposable
         _startButton.IsEnabled = enabled && _page is not null;
         _endButton.IsEnabled = enabled && _page is not null;
         _middleButton.IsEnabled = enabled && _file.Length > 0;
-        _pauseButton.IsVisible = !_isDraft;
-        _followButton.IsVisible = !_isDraft;
+        _pauseButton.IsVisible = !_isDraft && _pageEdit is null;
+        _followButton.IsVisible = !_isDraft && _pageEdit is null;
+        _liveLabel.IsVisible = !_isDraft && _pageEdit is null;
         _pauseButton.IsEnabled = !_closed;
         _followButton.IsEnabled = !_closed;
         _indexButton.IsEnabled = !_closed && (!_indexBuilding || _indexCancellation is not null);
@@ -2067,7 +2049,9 @@ internal sealed class LogView : UserControl, IDisposable
         _hideButton.IsEnabled = enabled && _page?.Rows.Count > 0;
         _revealButton.IsEnabled = enabled && _hiddenOffset > 0;
         _trimButton.IsEnabled = enabled && _hiddenOffset > 0;
-        _searchButton.IsEnabled = !_closed;
+        _searchButton.IsEnabled = enabled;
+        _openSearchButton.IsEnabled = enabled;
+        _timeButton.IsEnabled = enabled;
     }
 
     private void SetStatus(string text)
@@ -2186,5 +2170,4 @@ internal sealed class LogView : UserControl, IDisposable
     private readonly record struct MatchSpan(int Index, int Length);
     private sealed record SearchResult(long Offset, long? LineNumber, string Preview, int MatchIndex, int MatchLength);
     private sealed record SearchPage(IReadOnlyList<SearchResult> Results, long NextOffset, bool HasMore, string? Message);
-    private sealed record MiniSample(long Offset, string Preview);
 }

@@ -167,6 +167,7 @@ public partial class MainWindow
     private void AttachEditor(WorkTab tab, TextDocument document, bool resetDirtyState)
     {
         EnsureIdleUnloadTimer();
+        _ = DetachEditor(tab);
         tab.Log?.Close();
         tab.Log = null;
         tab.LastWorked = DateTimeOffset.Now;
@@ -314,6 +315,7 @@ public partial class MainWindow
             () => editor.TextArea.CommandBindings.Remove(pasteBinding)
         ];
         tab.Minimap = minimap;
+        WatchEditorFile(tab);
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
     }
@@ -578,6 +580,8 @@ public partial class MainWindow
 
     private AvaloniaEdit.Document.TextDocument? DetachEditor(WorkTab tab)
     {
+        tab.FileWatch?.Dispose();
+        tab.FileWatch = null;
         if (tab.Editor is not { } editor)
         {
             return null;
@@ -613,10 +617,12 @@ public partial class MainWindow
         string? draftName = null,
         long? draftLineCount = null)
     {
+        var log = new LogView(path, encoding, state ?? new LogTabState(AutoRefresh: tab.AutoRefresh), draftName, draftLineCount)
+        {
+            WordWrap = state?.WordWrap ?? _wordWrap
+        };
         tab.Log?.Close();
         _ = DetachEditor(tab);
-        tab.Editor = null;
-        var log = new LogView(path, encoding, state, draftName, draftLineCount) { WordWrap = state?.WordWrap ?? _wordWrap };
         log.SetTextSize(_fontSize);
         tab.Log = log;
         log.StatusChanged += status =>
@@ -632,7 +638,7 @@ public partial class MainWindow
 
     private async Task ReloadAsync(WorkTab tab, TextEncodingKind? encoding = null)
     {
-        if (tab.Path is not { } path)
+        if (tab.Path is not { } path || tab.Saving)
         {
             return;
         }
@@ -642,9 +648,10 @@ public partial class MainWindow
             throw new InvalidOperationException("Сначала сохраните изменения.");
         }
 
-        if (tab.Log is not null)
+        if (tab.Log is { } log)
         {
-            AttachLog(tab, path, encoding);
+            if (log.HasPendingEdit) throw new IOException("Сохраните или отмените правки страницы.");
+            if (tab.Recovery is null) AttachLog(tab, path, encoding, log.CaptureState() with { Encoding = encoding });
             return;
         }
 
@@ -689,11 +696,23 @@ public partial class MainWindow
 
     private async Task SaveAsync(bool saveAs = false)
     {
-        if (ActiveTab is not { Editor: { } editor } tab)
+        if (ActiveTab is not { } tab || tab.Saving)
         {
             return;
         }
+        if (tab.Log is { IsReadOnly: false } log && !saveAs)
+        {
+            await log.SavePageEditAsync();
+            return;
+        }
+        if (tab.Editor is not { } editor) return;
+        tab.Saving = true;
+        try { await SaveEditorAsync(tab, editor, saveAs); }
+        finally { tab.Saving = false; }
+    }
 
+    private async Task SaveEditorAsync(WorkTab tab, TextEditor editor, bool saveAs)
+    {
         var path = tab.Path;
         FileStamp? expected = tab.Stamp;
         if (saveAs || path is null)
@@ -731,6 +750,7 @@ public partial class MainWindow
         tab.Path = path;
         SetSyntax(editor, path);
         tab.Stamp = stamp;
+        WatchEditorFile(tab);
         if (iconPosition is not null)
         {
             _ = iconPosition.RestoreAsync(path, stamp);
@@ -757,6 +777,13 @@ public partial class MainWindow
     {
         if (_closing || !_tabs.ContainsKey(tab.Id) || _confirmingTabClose || tab.Closing)
         {
+            return;
+        }
+
+        if (tab.Saving || tab.Log?.HasPendingEdit == true)
+        {
+            Select(tab);
+            SetStatus("Завершите сохранение или отмените правки страницы перед закрытием.");
             return;
         }
 
@@ -1016,6 +1043,9 @@ public partial class MainWindow
         public bool RestoredDirty { get; set; }
         public bool Loading { get; set; }
         public bool Closing { get; set; }
+        public bool Saving { get; set; }
+        public bool AutoRefresh { get; set; } = true;
+        public EditorFileWatch? FileWatch { get; set; }
         public bool JsonDisabled { get; set; }
         public long Revision { get; set; }
         public DateTimeOffset LastWorked { get; set; } = DateTimeOffset.Now;

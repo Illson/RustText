@@ -68,8 +68,6 @@ public partial class MainWindow : Window
             {
                 Run(SaveSessionAsync);
             }
-
-            Run(CheckActiveFileAsync);
         };
         DragDrop.SetAllowDrop(this, true);
         AddHandler(DragDrop.DragOverEvent, OnWindowDragOver);
@@ -246,16 +244,30 @@ public partial class MainWindow : Window
         tab.DirtyMark = dirtyMark;
         tab.Item.Classes.Add("focus-tab");
         tab.Item.Header = header;
-        tab.Item.ContextMenu = new ContextMenu
+        var saveCopy = Command("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab)));
+        var autoRefresh = Command("Автообновление с диска", () => SetTabAutoRefresh(tab, !TabAutoRefresh(tab)));
+        autoRefresh.ToggleType = MenuItemToggleType.CheckBox;
+        var context = new ContextMenu
         {
             Items =
             {
                 Command("Показать в Проводнике", () => RevealTab(tab)),
                 Command("Скопировать путь", () => Run(() => CopyTextAsync(tab.Path))),
+                saveCopy,
+                autoRefresh,
                 Command("Переместить в новое окно", () => OpenTabWindow(tab)),
                 Command("Закрыть", () => Run(() => CloseTabAsync(tab)))
             }
         };
+        context.Opening += (_, _) =>
+        {
+            saveCopy.IsVisible = tab.Recovery is not null;
+            saveCopy.IsEnabled = tab.Log?.HasPendingEdit != true;
+            autoRefresh.IsVisible = tab.Path is not null && tab.Recovery is null;
+            autoRefresh.IsEnabled = !tab.Loading;
+            autoRefresh.IsChecked = TabAutoRefresh(tab);
+        };
+        tab.Item.ContextMenu = context;
         PointerPressedEventArgs? pressed = null;
         Point origin = default;
         header.AddHandler(PointerPressedEvent, (_, e) =>
@@ -577,6 +589,12 @@ public partial class MainWindow : Window
             SetStatus("Дождитесь сохранения закрываемой вкладки.");
             return;
         }
+        if (_tabs.Values.FirstOrDefault(tab => tab.Saving || tab.Log?.HasPendingEdit == true) is { } pending)
+        {
+            Select(pending);
+            SetStatus("Завершите сохранение или отмените правки страницы перед закрытием окна.");
+            return;
+        }
 
         _closing = true;
         _checkpoint.Stop();
@@ -690,7 +708,6 @@ public partial class MainWindow : Window
 
     private void SetCaption(string? document)
     {
-        ActiveCaption.Text = document;
         Title = document is null ? "RustText" : $"{document} — RustText";
     }
 

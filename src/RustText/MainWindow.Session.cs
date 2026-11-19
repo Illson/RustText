@@ -21,7 +21,6 @@ public partial class MainWindow
     private MenuItem? _closedDraftsMenu;
     private Action? _refreshHome;
     private DateTimeOffset _lastHomeRefresh;
-    private bool _checkingDisk;
 
     private async Task RestoreSessionAsync()
     {
@@ -166,6 +165,7 @@ public partial class MainWindow
             LineEndingMap: lineEndings, Stamp: tab.Stamp, Log: log)
         {
             JsonValidationDisabled = tab.JsonDisabled,
+            AutoRefresh = tab.AutoRefresh,
             UntitledName = tab.Path is null ? UntitledName(tab) : null
         };
     }
@@ -307,6 +307,7 @@ public partial class MainWindow
         tab.OriginalEndings = saved.LineEndingMap is { } markers
             ? markers.Select(value => (LineEndingKind)value).ToImmutableArray() : default;
         tab.JsonDisabled = saved.JsonValidationDisabled;
+        tab.AutoRefresh = saved.AutoRefresh ?? true;
         tab.LastWorked = saved.LastWorkedMs is { } ms ? DateTimeOffset.FromUnixTimeMilliseconds(ms) : DateTimeOffset.Now;
         tab.Deferred = saved;
         tab.Item.Content = FocusButton(Button("Загрузить вкладку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
@@ -487,22 +488,33 @@ public partial class MainWindow
 
     private void AttachDraftPreview(WorkTab tab, SessionTab saved, string draftPath)
     {
-        tab.Recovery = saved;
         var name = saved.Path is { } path ? Path.GetFileName(path) : saved.UntitledName;
         var state = new LogTabState(TextEncodingKind.Utf8, saved.DraftOffset ?? 0, WordWrap: _wordWrap);
         var lineCount = saved.DraftOffset.HasValue ? saved.LineCount : null;
         AttachLog(tab, draftPath, TextEncodingKind.Utf8, state, name ?? "Черновик", lineCount);
-        var panel = new DockPanel();
-        var copy = FocusButton(Button("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab))), primary: true);
-        Avalonia.Controls.DockPanel.SetDock(copy, Dock.Top);
-        tab.Item.Content = null;
-        panel.Children.Add(copy);
-        panel.Children.Add(tab.Log!);
-        tab.Item.Content = panel;
+        tab.Recovery = saved;
+        UpdateTab(tab);
+        tab.Log!.CommitDraftPage = async (temporary, hash, offset, token) =>
+        {
+            await _workspace.SaveGate.WaitAsync(token);
+            try
+            {
+                var current = tab.Recovery ?? throw new IOException("Черновик недоступен.");
+                var edited = _storage.AdoptEditedDraft(current, temporary, hash) with { DraftOffset = offset, LineCount = null };
+                AttachDraftPreview(tab, edited, _storage.GetDraftPath(edited)!);
+            }
+            finally { _workspace.SaveGate.Release(); }
+            await GuardAsync(async () =>
+            {
+                await SaveSessionAsync();
+                if (ReferenceEquals(tab, ActiveTab)) SetStatus("Страница черновика сохранена.");
+            });
+        };
     }
 
     private async Task SaveCurrentDraftCopyAsync(WorkTab tab)
     {
+        if (tab.Log?.HasPendingEdit == true) throw new IOException("Сохраните страницу перед созданием копии.");
         if (tab.Recovery is not { } recovery) return;
         var current = await _storage.ResolveCurrentDraftAsync(recovery, _lifetime.Token);
         if (ReferenceEquals(tab.Recovery, recovery)) tab.Recovery = current;
@@ -672,6 +684,7 @@ public partial class MainWindow
         {
             if (tab.Log is not null)
             {
+                if (tab.Log.HasPendingEdit || tab.Recovery is not null) return;
                 var log = (entry.Log ?? new LogTabState(entry.Encoding, entry.LogOffset ?? 0)) with
                 {
                     Encoding = entry.Encoding,
@@ -829,39 +842,6 @@ public partial class MainWindow
         Rebuild();
         SetStatus("История файлов");
         FormatText.Text = "";
-    }
-
-    private async Task CheckActiveFileAsync()
-    {
-        if (_checkingDisk || ActiveTab is not { Path: { } path, Stamp: { } saved, Editor: not null } tab)
-        {
-            return;
-        }
-
-        _checkingDisk = true;
-        try
-        {
-            var state = await Task.Run(() =>
-            {
-                var file = new FileInfo(path);
-                if (!file.Exists)
-                {
-                    return "файл отсутствует на диске";
-                }
-
-                return file.Length != saved.Length || file.LastWriteTimeUtc != saved.LastWriteUtc
-                    ? "файл изменён на диске" : null;
-            }, _lifetime.Token);
-            if (Equals(tab.Stamp, saved) && ReferenceEquals(tab, ActiveTab) && tab.DiskStatus != state)
-            {
-                tab.DiskStatus = state;
-                UpdateStatus(tab);
-            }
-        }
-        finally
-        {
-            _checkingDisk = false;
-        }
     }
 
     private void RefreshHistoryMenus()

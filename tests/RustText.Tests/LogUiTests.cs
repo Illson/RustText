@@ -22,6 +22,82 @@ public sealed class LogUiTests
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
     [Fact]
+    public Task PageEditPreservesTheBomAndSurroundingPagesAndRejectsExternalChanges() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "edit.log");
+        const string row = "old\r\n";
+        var old = string.Concat(Enumerable.Repeat(row, 200));
+        await File.WriteAllTextAsync(path, old, new UTF8Encoding(true));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "NavigateAsync", 3 + 80L * row.Length, true);
+            await InvokeTask(log, "TogglePageEditAsync");
+            Assert.False(log.IsReadOnly);
+            var text = (TextBox)Field(log, "_logText");
+            Assert.Equal(string.Concat(Enumerable.Repeat(row, 80)), text.Text);
+            const string replacement = "страница 🚀\r\n";
+            text.Text = replacement;
+            Assert.True(log.HasPendingEdit);
+            await log.SavePageEditAsync();
+            Assert.True(log.IsReadOnly);
+            var expected = old[..(80 * row.Length)] + replacement + old[(160 * row.Length)..];
+            var bytes = await File.ReadAllBytesAsync(path);
+            Assert.Equal(new UTF8Encoding(true).GetPreamble(), bytes[..3]);
+            Assert.Equal(expected, Encoding.UTF8.GetString(bytes.AsSpan(3)));
+
+            await InvokeTask(log, "TogglePageEditAsync");
+            text.Text = "local change";
+            await File.AppendAllTextAsync(path, "external\r\n");
+            await log.SavePageEditAsync();
+            Assert.True(log.HasPendingEdit);
+            Assert.Equal("local change", text.Text);
+            Assert.EndsWith("external\r\n", await File.ReadAllTextAsync(path));
+            Assert.Contains("измени", log.StatusText);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task EditingADraftPublishesANewRecoveryAndCopyLivesInTabMenu() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string row = "draft row\n";
+        const int count = 55_000;
+        var before = string.Concat(Enumerable.Repeat(row, count));
+        var storage = StorageService.OpenForTesting(profile);
+        var draft = new SessionTab(3, null, TextEncodingKind.Utf8, LineCount: count) { DraftOffset = 0 };
+        var original = Assert.Single((await storage.SaveSessionAsync(new SessionState([draft]),
+            new Dictionary<long, string> { [draft.Id] = before })).Tabs);
+        var window = new MainWindow();
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+            var log = Assert.IsType<LogView>(ActiveLog(window));
+            await HeadlessTests.WaitForAsync(() => Page(log) is not null && !(bool)Field(log, "_busy"));
+            var tab = (TabItem)Active(window).GetType().GetProperty("Item")!.GetValue(Active(window))!;
+            Assert.Same(log, tab.Content);
+            Assert.Contains(tab.ContextMenu!.Items.OfType<MenuItem>(), item => Equals(item.Header, "Сохранить копию…"));
+
+            await InvokeTask(log, "TogglePageEditAsync");
+            ((TextBox)Field(log, "_logText")).Text = "updated draft\n";
+            await log.SavePageEditAsync();
+            Assert.NotSame(log, ActiveLog(window));
+            var saved = Assert.Single((await storage.LoadSessionAsync())!.Tabs);
+            Assert.NotEqual(original.DraftSha256, saved.DraftSha256);
+            var edited = "updated draft\n" + before[(80 * row.Length)..];
+            Assert.Equal(edited, await File.ReadAllTextAsync(storage.GetDraftPath(saved)!));
+            Assert.Equal(before, await File.ReadAllTextAsync(storage.GetDraftPath(original)!));
+        }
+        finally
+        {
+            if ((bool)Field(window, "_restoreFinished") && ActiveLog(window) is LogView { IsReadOnly: false } editor)
+                await InvokeTask(editor, "EndPageEditAsync");
+            await CloseMainWindowAsync(window);
+        }
+    });
+
+    [Fact]
     public Task LongLineFragmentsKeepOneGutterNumberAndPreserveFollowingLines() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "long-line.log");
@@ -98,7 +174,7 @@ public sealed class LogUiTests
             await InvokeTask(window, "OpenPathAsync", path, true, null);
             var log = ActiveLog(window);
             var text = (TextBox)Field(log, "_logText");
-            var minimap = (ListBox)Field(log, "_minimapList");
+            var minimap = (Control)Field(log, "_minimap");
             await HeadlessTests.WaitForAsync(() => Page(log) is not null && minimap.Bounds.Height > 100
                 && ((System.Collections.ICollection)Field(log, "_miniSamples")).Count == 64);
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));
@@ -110,6 +186,8 @@ public sealed class LogUiTests
             var origin = minimap.TranslatePoint(new Point(0, 0), window) ?? throw new InvalidOperationException("Minimap is not attached.");
             Point At(double ratio) => origin + new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height * ratio);
             Assert.Equal("Прокрутка лога", Avalonia.Automation.AutomationProperties.GetName(minimap));
+            var firstMarker = Marker(minimap);
+            Assert.True(firstMarker.Height >= 14);
 
             var beforeWheel = FirstRowNumber(text.Text);
             window.MouseWheel(At(0.5), new Vector(0, -1));
@@ -137,6 +215,7 @@ public sealed class LogUiTests
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));
             Assert.Equal(1921, FirstRowNumber(text.Text));
             Assert.Equal("Строки 1.921–2.000", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
+            Assert.True(Marker(minimap).Y > firstMarker.Y && Marker(minimap).Bottom <= minimap.Bounds.Height);
             Assert.StartsWith("1.921", gutter.Text);
             window.MouseMove(At(0.02));
             window.MouseDown(At(0.02), MouseButton.Left, RawInputModifiers.None);
@@ -173,6 +252,9 @@ public sealed class LogUiTests
             Assert.Equal("Всего строк · 81.000", countLabel.Text);
             Assert.Equal("Большой черновик", ((TextBlock)Field(log, "_fileLabel")).Text);
             Assert.StartsWith("60.001", ((TextBlock)Field(log, "_lineGutterText")).Text);
+            var minimap = (Control)Field(log, "_minimap");
+            await HeadlessTests.WaitForAsync(() => Marker(minimap).Height >= 14);
+            Assert.InRange(Marker(minimap).Center.Y / minimap.Bounds.Height, .7, .8);
 
             var text = (TextBox)Field(log, "_logText");
             text.Focus();
@@ -353,6 +435,7 @@ public sealed class LogUiTests
     }
     private static object Active(MainWindow window) => typeof(MainWindow).GetProperty("ActiveTab", Private)!.GetValue(window)!;
     private static object Field(object owner, string name) => owner.GetType().GetField(name, Private)!.GetValue(owner)!;
+    private static Rect Marker(Control minimap) => (Rect)minimap.GetType().GetProperty("ViewportMarker", Private)!.GetValue(minimap)!;
     private static long FieldLong(object owner, string name) => (long)Field(owner, name);
     private static Task InvokeTask(object owner, string name, params object?[] arguments) =>
         (Task)(owner.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(owner, arguments) ?? throw new InvalidOperationException($"{name} returned null."));

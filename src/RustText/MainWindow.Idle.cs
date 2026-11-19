@@ -46,7 +46,7 @@ public partial class MainWindow
         {
             foreach (var tab in _tabs.Values.ToArray())
             {
-                if (tab.Loading || tab.Closing || tab.Deferred is not null || ReferenceEquals(tab, ActiveTab)
+                if (tab.Loading || tab.Closing || tab.Saving || tab.Log is { IsReadOnly: false } || tab.Deferred is not null || ReferenceEquals(tab, ActiveTab)
                     || ReferenceEquals(SelectedIn(tab.Group), tab) || DateTimeOffset.Now - tab.LastWorked < IdleEditorAge)
                 {
                     continue;

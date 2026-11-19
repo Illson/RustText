@@ -18,6 +18,63 @@ namespace RustText.Tests;
 public sealed class WorkspaceTests
 {
     [Fact]
+    public Task ExternalChangesReloadAnInactiveFileAndKeepTheView() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "watched.txt");
+        var other = Path.Combine(profile, "other.txt");
+        await File.WriteAllTextAsync(path, "before: retained selection");
+        await File.WriteAllTextAsync(other, "active document");
+        var window = await OpenWorkspaceAsync(path, other);
+        try
+        {
+            var watched = Tabs(window).Single(tab => Equals(Property(tab, "Path"), path));
+            var original = Read<TextEditor>(watched, "Editor");
+            original.Select(8, 8);
+            var temporary = Path.Combine(profile, "replacement.tmp");
+            await File.WriteAllTextAsync(temporary, "after:  retained selection");
+            File.Move(temporary, path, overwrite: true);
+            await HeadlessTests.WaitForAsync(() => Read<TextEditor>(watched, "Editor").Text == "after:  retained selection");
+            Assert.Equal(other, Property(ActiveTab(window), "Path"));
+            Assert.Equal(8, Read<TextEditor>(watched, "Editor").SelectionStart);
+            Assert.Equal(8, Read<TextEditor>(watched, "Editor").SelectionLength);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task AutoRefreshMenuPersistsTheFlagAndProtectsUnsavedChanges() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "toggle.txt");
+        await File.WriteAllTextAsync(path, "before");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var context = Assert.IsType<ContextMenu>(Read<TabItem>(tab, "Item").ContextMenu);
+            var refresh = Assert.Single(context.Items.OfType<MenuItem>(), item => Equals(item.Header, "Автообновление с диска"));
+            Assert.Equal(MenuItemToggleType.CheckBox, refresh.ToggleType);
+            refresh.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Assert.False(Read<bool>(tab, "AutoRefresh"));
+            await File.WriteAllTextAsync(path, "changed while paused");
+            await Task.Delay(700);
+            Assert.Equal("before", Read<TextEditor>(tab, "Editor").Text);
+            await CallAsync(window, "SaveSessionAsync");
+            var saved = await StorageService.OpenForTesting(profile).LoadSessionAsync();
+            Assert.False(Assert.Single(saved!.Tabs).AutoRefresh);
+
+            refresh.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => Read<TextEditor>(tab, "Editor").Text == "changed while paused");
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Insert(editor.Document.TextLength, " + local");
+            await File.WriteAllTextAsync(path, "another external value");
+            await HeadlessTests.WaitForAsync(() => Property(tab, "DiskStatus") is string message && message.Contains("изменён на диске"));
+            Assert.Equal("changed while paused + local", editor.Text);
+            Assert.Same(editor, Read<TextEditor>(tab, "Editor"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task ReloadKeepsNewTypingAndUndo() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "reload.txt");

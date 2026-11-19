@@ -292,6 +292,13 @@ internal sealed class StorageService
         return tab with { DraftRef = "standalone/" + name, DraftSha256 = hash, LineCount = lineCount };
     }
 
+    public SessionTab AdoptEditedDraft(SessionTab tab, string tempPath, string hash)
+    {
+        var name = $"closed-{tab.Id}-{hash}.txt";
+        File.Move(tempPath, Path.Combine(_drafts, name), overwrite: true);
+        return tab with { DraftRef = "standalone/" + name, DraftSha256 = hash };
+    }
+
     public async Task SaveDraftAsync(long tabId, string content, CancellationToken cancellationToken = default)
     {
         var path = Path.Combine(_drafts, $"draft-{tabId}.txt");
