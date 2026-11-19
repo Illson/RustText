@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using RustText.Demo.Logs;
 
 namespace RustText.Demo.Editor;
 
@@ -151,8 +152,32 @@ internal static class TextOperations
     public static bool IsJsonPath(string? path) =>
         string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase) || IsJsonLinesPath(path);
 
-    public static bool LooksLikeJson(string text, string? path) =>
-        IsJsonPath(path) || text.AsSpan().TrimStart().TrimStart('\uFEFF').TrimStart() is ['{' or '[', ..];
+    public static bool LooksLikeJson(string text, string? path)
+    {
+        if (IsJsonPath(path)) return true;
+        if (!LogLevels.IsLogPath(path))
+            return text.AsSpan().TrimStart().TrimStart('\uFEFF').TrimStart() is ['{' or '[', ..];
+
+        var input = JsonInput(text);
+        if (!UsesJsonLines(input, path)) return false;
+        var consumed = ReadJsonLine(input, out _);
+        _ = ReadJsonLine(input[consumed..], out var nextRecord);
+        return IsJsonContainerPrefix(nextRecord.Span);
+    }
+
+    internal static bool IsJsonContainerPrefix(ReadOnlySpan<char> record)
+    {
+        record = record.TrimStart().TrimStart('\uFEFF').TrimStart();
+        if (record.IsEmpty) return false;
+        var opener = record[0];
+        if (opener is not ('{' or '[')) return false;
+
+        var value = record[1..].TrimStart();
+        if (value.IsEmpty) return true;
+        return opener == '{'
+            ? value[0] is '"' or '}'
+            : value[0] is '"' or '{' or '[' or ']' or '-' or >= '0' and <= '9' or 't' or 'f' or 'n';
+    }
 
     public static JsonProblem? ValidateJson(string text, string? path, CancellationToken cancellationToken = default)
     {

@@ -1,11 +1,13 @@
 using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using RustText.Demo.Editor;
 using RustText.Demo.Platform;
 
@@ -20,6 +22,8 @@ public partial class MainWindow
         _closedDraftsMenu = new MenuItem { Header = "Призрачные вкладки" };
         TopMenu.Items.Add(MenuGroup("_Файл",
             Command("Новая вкладка   Ctrl+N", () => NewTab()),
+            Command("Новое окно", () => Run(() => OpenWorkspaceWindowAsync(_workspaceId))),
+            Command("Рабочие пространства…", () => Run(ShowWorkspacesAsync)),
             Command("Открыть…   Ctrl+O", () => Run(() => OpenDialogAsync())),
             Command("Открыть как лог…", () => Run(() => OpenDialogAsync(asLog: true))),
             Command("Открыть в Windows-1251…", () => Run(() => OpenDialogAsync(encoding: TextEncodingKind.Windows1251))),
@@ -54,15 +58,18 @@ public partial class MainWindow
             Command("Сравнить списки…", () => Run(ShowListComparisonAsync)),
             Command("Версии файла…", () => Run(ShowVersionsAsync)),
             _closedDraftsMenu,
+            Command("Архив черновиков…", () => Run(ShowDraftArchiveAsync)),
             Command("Вывести окно на передний план…", () => Run(ShowWindowFinderAsync)),
             Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),
             Command("История выпусков…", () => Run(ShowReleaseHistoryAsync)),
+            Command("Черновики и архив…", () => Run(ShowDraftArchiveSettingsAsync)),
             Command("Настройки…", () => Run(ShowSettingsAsync))));
         TopMenu.Items.Add(MenuGroup("_Поиск",
             Command("Найти   Ctrl+F", () => OpenSearchPanel()),
             Command("Заменить   Ctrl+H", () => OpenSearchPanel(true)),
             Command("Следующее совпадение   F3", () => Run(() => NavigateSearchAsync(false))),
             Command("Предыдущее совпадение   Shift+F3", () => Run(() => NavigateSearchAsync(true)))));
+        TopMenu.Items.Add(BuildThemeMenu());
     }
 
     private void OnWorkspaceKey(object? sender, KeyEventArgs e)
@@ -134,6 +141,27 @@ public partial class MainWindow
         e.Handled = true;
     }
 
+    private void OnWorkspacePointerWheel(object? sender, PointerWheelEventArgs e)
+    {
+        if (e.KeyModifiers != KeyModifiers.Control || e.Delta.Y == 0
+            || e.Source is not Visual source)
+        {
+            return;
+        }
+
+        var editor = ActiveTab?.EditorLogFilter?.VisibleEditor ?? ActiveTab?.Editor;
+        var log = ActiveTab?.Log;
+        var isInEditor = editor?.IsVisualAncestorOf(source) == true;
+        var isInLog = log?.IsVisualAncestorOf(source) == true;
+        if (!isInEditor && !isInLog)
+        {
+            return;
+        }
+
+        ResizeText(Math.Sign(e.Delta.Y));
+        e.Handled = true;
+    }
+
     private void ReloadActive(TextEncodingKind? encoding)
     {
         if (ActiveTab is { } tab)
@@ -152,35 +180,43 @@ public partial class MainWindow
 
     private void ToggleWrap()
     {
-        _wordWrap = !_wordWrap;
+        var enabled = !_wordWrap;
+        foreach (var window in _workspace.Windows)
+        {
+            window._wordWrap = enabled;
+            window.ApplyTextAppearance();
+        }
+        Run(() => SaveWorkspaceSettingsAsync(settings => settings with { WordWrap = enabled }));
+    }
+
+    private void ResizeText(double delta)
+    {
+        var size = Math.Clamp(_fontSize + delta, 8, 48);
+        foreach (var window in _workspace.Windows)
+        {
+            window._fontSize = size;
+            window.ApplyTextAppearance();
+        }
+        Run(() => SaveWorkspaceSettingsAsync(settings => settings with { FontSize = size }));
+    }
+
+    private void ApplyTextAppearance()
+    {
         foreach (var tab in _tabs.Values)
         {
             if (tab.Editor is { } editor)
             {
                 editor.WordWrap = _wordWrap;
-            }
-
-            if (tab.Log is { } log)
-            {
-                log.WordWrap = _wordWrap;
-            }
-        }
-    }
-
-    private void ResizeText(double delta)
-    {
-        _fontSize = Math.Clamp(_fontSize + delta, 8, 48);
-        foreach (var tab in _tabs.Values)
-        {
-            if (tab.Editor is { } editor)
-            {
                 editor.FontSize = _fontSize;
+                if (tab.EditorLogFilter is { IsFiltering: true } filter)
+                {
+                    filter.VisibleEditor.WordWrap = _wordWrap;
+                    filter.VisibleEditor.FontSize = _fontSize;
+                }
             }
 
-            if (tab.Log is { } log)
-            {
-                log.SetTextSize(_fontSize);
-            }
+            tab.Log?.SetTextSize(_fontSize);
+            if (tab.Log is { } log) log.WordWrap = _wordWrap;
         }
     }
 
@@ -195,7 +231,7 @@ public partial class MainWindow
 
     private async Task FormatJsonAsync()
     {
-        if (ActiveTab is not { Editor: { } editor } tab)
+        if (ActiveTab is not { Editor: { IsReadOnly: false } editor } tab)
         {
             return;
         }
@@ -214,6 +250,7 @@ public partial class MainWindow
             throw new InvalidOperationException("Текст изменился во время форматирования.");
         }
 
+        if (editor.IsReadOnly || !ReferenceEquals(tab.Editor, editor)) return;
         editor.Document.Replace(start, length, formatted);
         SelectText(tab, start, 0);
     }
@@ -364,38 +401,91 @@ public partial class MainWindow
 
     private async Task ShowSettingsAsync()
     {
-        var limit = new TextBox { Text = _titleLimit.ToString(CultureInfo.CurrentCulture) };
-        var perFile = new TextBox { Text = (_settings.VersionFileLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
-        var total = new TextBox { Text = (_settings.VersionTotalLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
-        var autoUpdate = new CheckBox { Content = "Проверять обновления при запуске", IsChecked = _settings.AutoCheckUpdates };
+        _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        var catalog = _workspace.Catalog;
+        var limit = new TextBox { Text = Settings.UntitledTabLimit.ToString(CultureInfo.CurrentCulture) };
+        var perFile = new TextBox { Text = (Settings.VersionFileLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
+        var total = new TextBox { Text = (Settings.VersionTotalLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
+        var draftLines = new CheckBox { Content = "Число строк у вкладок без имени", IsChecked = Settings.ShowDraftLineCount };
+        var autoUpdate = new CheckBox { Content = "Проверять обновления при запуске", IsChecked = Settings.AutoCheckUpdates };
+        var wordWrap = new CheckBox { Content = "Переносить длинные строки", IsChecked = _wordWrap };
+        var fontSize = new TextBox { Text = _fontSize.ToString(CultureInfo.CurrentCulture) };
+        var startupMode = new ComboBox
+        {
+            ItemsSource = new[] { "Последнее пространство", "Выбранное пространство", "Пустое окно" },
+            SelectedIndex = Settings.WorkspaceStartupMode switch
+            {
+                WorkspaceStartupMode.Specific => 1,
+                WorkspaceStartupMode.Empty => 2,
+                _ => 0
+            }
+        };
+        var startupWorkspace = new ComboBox
+        {
+            ItemsSource = catalog.Workspaces,
+            ItemTemplate = new FuncDataTemplate<WorkspaceEntry>((entry, _) => new TextBlock { Text = entry?.Name }),
+            SelectedItem = catalog.Workspaces.FirstOrDefault(item => item.Id == Settings.StartupWorkspaceId)
+                ?? catalog.Workspaces.FirstOrDefault(item => item.Id == _workspaceId)
+        };
+        var workspaceHistory = new TextBox
+        {
+            Text = Settings.WorkspaceHistoryLimit < 0 ? "Безлимит" : Settings.WorkspaceHistoryLimit.ToString(CultureInfo.CurrentCulture)
+        };
+        startupWorkspace.IsEnabled = startupMode.SelectedIndex == 1;
+        startupMode.SelectionChanged += (_, _) => startupWorkspace.IsEnabled = startupMode.SelectedIndex == 1;
         var largeFiles = new ComboBox
         {
             ItemsSource = new[] { "Спрашивать", "Открывать как лог", "Открывать в редакторе" },
-            SelectedIndex = _settings.OpenLargeFilesAsLog switch { true => 1, false => 2, null => 0 }
+            SelectedIndex = Settings.OpenLargeFilesAsLog switch { true => 1, false => 2, null => 0 }
         };
         var body = DialogPanel(new TextBlock { Text = "Символов в заголовке пустой вкладки (1–200)" }, limit,
             new TextBlock { Text = "Лимит снимка файла, МиБ" }, perFile,
             new TextBlock { Text = "Общий лимит снимков, МиБ" }, total,
-            new TextBlock { Text = "Файлы больше 100 МиБ" }, largeFiles, autoUpdate);
+            new TextBlock { Text = "Файлы больше 100 МиБ" }, largeFiles, draftLines, autoUpdate, wordWrap,
+            new TextBlock { Text = "Размер текста (8–48 px)" }, fontSize,
+            new TextBlock { Text = "Открывать при запуске" }, startupMode, startupWorkspace,
+            new TextBlock { Text = "Хранить удалённые пространства (0–200 или «Безлимит»)" }, workspaceHistory);
         var dialog = Dialog("Настройки", body);
+        body.Children.Add(FocusButton(Button("Черновики и архив…", () =>
+        {
+            dialog.Close();
+            Dispatcher.UIThread.Post(() => Run(ShowDraftArchiveSettingsAsync));
+        })));
         var warning = new TextBlock { Foreground = FocusTheme.Danger };
         body.Children.Add(warning);
         body.Children.Add(FocusButton(Button("Сохранить", () =>
         {
             if (int.TryParse(limit.Text, out var length) && length is >= 1 and <= 200
                 && int.TryParse(perFile.Text, out var fileLimit) && fileLimit is >= 0 and <= 64
-                && long.TryParse(total.Text, out var totalLimit) && totalLimit is >= 0 and <= 1024)
+                && long.TryParse(total.Text, out var totalLimit) && totalLimit is >= 0 and <= 1024
+                && double.TryParse(fontSize.Text, CultureInfo.CurrentCulture, out var parsedFontSize) && parsedFontSize is >= 8 and <= 48
+                && (string.Equals(workspaceHistory.Text?.Trim(), "Безлимит", StringComparison.OrdinalIgnoreCase)
+                    || int.TryParse(workspaceHistory.Text, out var historyLimit) && historyLimit is >= 0 and <= 200))
             {
-                _settings = _settings with
+                var wrapEnabled = wordWrap.IsChecked == true;
+                var startup = startupMode.SelectedIndex switch
+                {
+                    1 => WorkspaceStartupMode.Specific,
+                    2 => WorkspaceStartupMode.Empty,
+                    _ => WorkspaceStartupMode.LastUsed
+                };
+                var retention = string.Equals(workspaceHistory.Text?.Trim(), "Безлимит", StringComparison.OrdinalIgnoreCase)
+                    ? -1 : int.Parse(workspaceHistory.Text!, CultureInfo.CurrentCulture);
+                Func<UserSettings, UserSettings> update = settings => settings with
                 {
                     UntitledTabLimit = length,
                     VersionFileLimitBytes = fileLimit * 1024 * 1024,
                     VersionTotalLimitBytes = totalLimit * 1024 * 1024,
+                    ShowDraftLineCount = draftLines.IsChecked == true,
                     AutoCheckUpdates = autoUpdate.IsChecked == true,
-                    OpenLargeFilesAsLog = largeFiles.SelectedIndex switch { 1 => true, 2 => false, _ => null }
+                    OpenLargeFilesAsLog = largeFiles.SelectedIndex switch { 1 => true, 2 => false, _ => null },
+                    WordWrap = wrapEnabled,
+                    FontSize = parsedFontSize,
+                    WorkspaceStartupMode = startup,
+                    StartupWorkspaceId = startupWorkspace.SelectedItem is WorkspaceEntry selectedWorkspace ? selectedWorkspace.Id : null,
+                    WorkspaceHistoryLimit = retention
                 };
-                _titleLimit = length;
-                dialog.Close(true);
+                dialog.Close(update);
             }
             else
             {
@@ -403,21 +493,43 @@ public partial class MainWindow
             }
         }), primary: true));
 
-        if (await dialog.ShowDialog<bool>(this))
+        if (await dialog.ShowDialog<Func<UserSettings, UserSettings>?>(this) is { } update)
         {
-            await SaveWorkspaceSettingsAsync(_settings);
-            foreach (var tab in _tabs.Values)
+            await SaveWorkspaceSettingsAsync(update);
+            foreach (var window in _workspace.Windows)
             {
-                UpdateTab(tab);
+                window._wordWrap = Settings.WordWrap ?? window._wordWrap;
+                window._fontSize = Settings.FontSize ?? window._fontSize;
+                window.ApplyTextAppearance();
             }
         }
     }
 
-    private async Task SaveWorkspaceSettingsAsync(UserSettings settings)
+    private async Task SaveWorkspaceSettingsAsync(Func<UserSettings, UserSettings> update)
     {
-        await _storage.SaveSettingsAsync(settings, _lifetime.Token);
-        foreach (var window in _workspace.Windows)
-            window._settings = window._settings with { OpenLargeFilesAsLog = settings.OpenLargeFilesAsLog };
+        await _workspace.SettingsGate.WaitAsync(_lifetime.Token);
+        try
+        {
+            var previous = Settings;
+            var settings = update(previous);
+            if (settings == previous) return;
+
+            await _storage.SaveSettingsAsync(settings, _lifetime.Token);
+            _workspace.Settings = settings;
+            if (settings.UntitledTabLimit != previous.UntitledTabLimit
+                || settings.ShowDraftLineCount != previous.ShowDraftLineCount)
+            {
+                foreach (var window in _workspace.Windows)
+                {
+                    foreach (var tab in window.LoadedWorkspaceTabs()) window.UpdateTab(tab);
+                    window.RefreshHistoryMenusLocal();
+                    if (window._home) window._refreshHome?.Invoke();
+                }
+            }
+            if (settings.Theme != previous.Theme)
+                ApplyWorkspaceTheme();
+        }
+        finally { _workspace.SettingsGate.Release(); }
     }
 
     private async Task<string?> PromptAsync(string title, string description, string initial = "")

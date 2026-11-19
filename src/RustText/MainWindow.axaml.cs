@@ -10,6 +10,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using AvaloniaEdit;
 using RustText.Demo.Logs;
 
 namespace RustText.Demo;
@@ -18,7 +19,7 @@ public partial class MainWindow : Window
 {
     private readonly string[] _startupPaths;
     private readonly List<Grid> _splitGrids = [];
-    private readonly Dictionary<long, WorkTab> _tabs = [];
+    private Dictionary<long, WorkTab> _tabs = [];
     private readonly CancellationTokenSource _lifetime = new();
     private readonly DispatcherTimer _checkpoint;
     private Group _root;
@@ -26,11 +27,18 @@ public partial class MainWindow : Window
     private bool _home;
     private bool _closing;
     private bool _closed;
+    private bool _restartingForUpdate;
     private bool _restoreFinished;
+    private bool _startEmpty;
     private bool _closeAfterStartupValidation;
     private bool _wordWrap = true;
     private double _fontSize = FocusTheme.EditorFontSize;
-    private int _titleLimit = 10;
+    private string _workspaceId = WorkspaceCatalogStore.DefaultWorkspaceId;
+    private string _windowId = WorkspaceCatalogStore.PrimaryWindowId;
+    private bool _shareDefaultSession;
+    private string? _workspaceLoadWarning;
+    private readonly Dictionary<string, WorkspaceViewState> _workspaceViews = new(StringComparer.Ordinal);
+    private UserSettings Settings => _workspace.Settings;
 
 
 
@@ -42,14 +50,30 @@ public partial class MainWindow : Window
     {
     }
 
-    private MainWindow(string[] startupPaths, WorkspaceSession? workspace)
+    private MainWindow(string[] startupPaths, WorkspaceSession? workspace, string? workspaceId = null, string? windowId = null,
+        bool shareDefaultSession = false, bool restoreWorkspace = true)
     {
         _workspace = workspace ?? new WorkspaceSession();
         _storage = _workspace.Storage;
-        _closedTabs = _workspace.ClosedTabs;
-        _restoreWorkspace = workspace is null;
+        _workspaceId = workspaceId ?? WorkspaceCatalogStore.DefaultWorkspaceId;
+        _windowId = windowId ?? WorkspaceCatalogStore.PrimaryWindowId;
+        _shareDefaultSession = shareDefaultSession;
+        _closedTabs = _workspace.GetClosedTabs(SessionStorage);
+        _restoreWorkspace = restoreWorkspace;
         _workspace.Windows.Add(this);
-        Closed += (_, _) => _workspace.Windows.Remove(this);
+        Closed += async (_, _) =>
+        {
+            _workspace.Windows.Remove(this);
+            if (_windowId == WorkspaceCatalogStore.PrimaryWindowId || _restartingForUpdate && HasRestorableWindowAssignment()) return;
+            try
+            {
+                _workspace.Catalog = await _workspace.CatalogStore.RemoveWindowAsync(_windowId);
+            }
+            catch (Exception error) when (IsUserError(error))
+            {
+                SetStatus($"Не удалось обновить список окон. {error.Message}");
+            }
+        };
         _startupPaths = startupPaths;
         InitializeComponent();
         PropertyChanged += CaptionStateChanged;
@@ -78,6 +102,7 @@ public partial class MainWindow : Window
         AddHandler(DragDrop.DropEvent, OnWindowDrop);
         AddHandler(PointerMovedEvent, TabDragMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
         AddHandler(PointerReleasedEvent, TabDragReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerWheelChangedEvent, OnWorkspacePointerWheel, RoutingStrategies.Tunnel, handledEventsToo: true);
         PointerCaptureLost += TabDragCaptureLost;
         AddHandler(KeyDownEvent, OnWorkspaceKey, RoutingStrategies.Tunnel);
         Closing += WindowClosing;
@@ -99,6 +124,7 @@ public partial class MainWindow : Window
         {
             await RestoreSessionAsync();
             if (_closed) return;
+            await RestoreAssignedWorkspaceWindowsAsync();
             if (_closeAfterStartupValidation)
             {
                 Close();
@@ -109,11 +135,14 @@ public partial class MainWindow : Window
             {
                 await ShowHomeAsync();
             }
+            if (!_closed && _workspaceLoadWarning is not null)
+                SetStatus(_workspaceLoadWarning);
         });
         if (_closed || _closing) return;
         _restoreFinished = true;
         _checkpoint.Start();
-        if (_settings.AutoCheckUpdates && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
+        if (_windowId == WorkspaceCatalogStore.PrimaryWindowId && Settings.AutoCheckUpdates
+            && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
         {
             Run(() => CheckUpdatesAsync(manual: false));
         }
@@ -144,8 +173,15 @@ public partial class MainWindow : Window
         });
         ToolTip.SetTip(search, "Найти (Ctrl+F)");
         AutomationProperties.SetName(search, "Найти");
+        group.LevelFilterButton = Button("Уровни…", () =>
+        {
+            if (SelectedIn(group) is { } tab) ShowEditorLevelFilter(tab);
+        });
+        ToolTip.SetTip(group.LevelFilterButton, "Уровни…");
+        AutomationProperties.SetName(group.LevelFilterButton, "Уровни…");
+        group.LevelFilterButton.IsVisible = false;
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
-        foreach (var button in new[] { add, restore, across, below, group.CloseButton, search })
+        foreach (var button in new[] { add, restore, across, below, group.CloseButton, search, group.LevelFilterButton })
         {
             button.Classes.Add("focus-icon");
             tools.Children.Add(button);
@@ -162,6 +198,7 @@ public partial class MainWindow : Window
                 {
                     ActivateTab(selected);
                 }
+                group.LevelFilterButton.IsVisible = selected?.Editor is not null && LogLevels.IsLogPath(selected.Path);
             }
         };
         group.View.AddHandler(PointerPressedEvent, (_, _) =>
@@ -201,12 +238,14 @@ public partial class MainWindow : Window
         return group;
     }
 
-    private WorkTab AddTab(long? id = null, Group? group = null, bool select = true)
+    private WorkTab AddTab(long? id = null, Group? group = null, bool select = true) =>
+        AddTabTo(_tabs, group ?? _active, id, select);
+
+    private WorkTab AddTabTo(Dictionary<long, WorkTab> tabs, Group group, long? id, bool select)
     {
-        group ??= _active;
         var tab = new WorkTab(id ?? NextId(), group);
         _workspace.NextId = Math.Max(_workspace.NextId, tab.Id);
-        _tabs.Add(tab.Id, tab);
+        tabs.Add(tab.Id, tab);
         var label = new TextBlock
         {
             Text = "Без имени", TextTrimming = TextTrimming.CharacterEllipsis,
@@ -226,7 +265,7 @@ public partial class MainWindow : Window
         close.Classes.Add("focus-icon");
         AutomationProperties.SetName(close, "Закрыть вкладку");
         ToolTip.SetTip(close, "Закрыть вкладку");
-        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 5 };
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 5 };
         header.Children.Add(label);
         var loadMark = new TextBlock
         {
@@ -238,9 +277,11 @@ public partial class MainWindow : Window
         dirtyMark.HorizontalAlignment = HorizontalAlignment.Center;
         marks.Children.Add(dirtyMark);
         marks.Children.Add(loadMark);
-        Grid.SetColumn(marks, 1);
+        Grid.SetColumn(tab.LineCountLabel, 1);
+        header.Children.Add(tab.LineCountLabel);
+        Grid.SetColumn(marks, 2);
         header.Children.Add(marks);
-        Grid.SetColumn(close, 2);
+        Grid.SetColumn(close, 3);
         header.Children.Add(close);
         tab.Label = label;
         tab.DirtyMark = dirtyMark;
@@ -248,6 +289,11 @@ public partial class MainWindow : Window
         tab.HeaderMarks = marks;
         tab.Item.Classes.Add("focus-tab");
         tab.Item.Header = header;
+        var filter = Command("Уровни…", () =>
+        {
+            if (tab.Log is { } log) Run(() => log.ShowLevelFilterAsync());
+            else ShowEditorLevelFilter(tab);
+        });
         var saveCopy = Command("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab)));
         var autoRefresh = Command("Автообновление с диска", () => SetTabAutoRefresh(tab, !TabAutoRefresh(tab)));
         autoRefresh.ToggleType = MenuItemToggleType.CheckBox;
@@ -255,8 +301,10 @@ public partial class MainWindow : Window
         {
             Items =
             {
+                Command("Переименовать вкладку…", () => Run(() => RenameTabAsync(tab))),
                 Command("Показать в Проводнике", () => RevealTab(tab)),
                 Command("Скопировать путь", () => Run(() => CopyTextAsync(tab.Path))),
+                filter,
                 saveCopy,
                 autoRefresh,
                 Command("Переместить в новое окно", () => OpenTabWindow(tab)),
@@ -265,6 +313,7 @@ public partial class MainWindow : Window
         };
         context.Opening += (_, _) =>
         {
+            filter.IsVisible = tab.Editor is not null || tab.Log is { CanFilterLevels: true };
             saveCopy.IsVisible = tab.Recovery is not null;
             saveCopy.IsEnabled = tab.Log?.HasPendingEdit != true;
             autoRefresh.IsVisible = tab.Path is not null && tab.Recovery is null;
@@ -583,19 +632,39 @@ public partial class MainWindow : Window
             SetStatus("Завершите сохранение или отмените правки страницы перед закрытием окна.");
             return;
         }
+        if (_workspaceSwitchPending)
+        {
+            SetStatus("Дождитесь завершения переключения пространства перед закрытием окна.");
+            return;
+        }
 
         _closing = true;
         CancelTabDrag();
         _checkpoint.Stop();
         var closeGateHeld = false;
+        var switchGateHeld = false;
         var sessionSaved = false;
+        (TextEditor Editor, bool WasEnabled)[] closingEditors = [];
         WorkTab[] archivedTabs = [];
         var priorHistory = new List<(int Index, SessionTab Tab)>();
         try
         {
             await _workspace.CloseGate.WaitAsync();
             closeGateHeld = true;
-            if (FindOtherWindow() is not null)
+            await _workspace.WorkspaceSwitchGate.WaitAsync();
+            switchGateHeld = true;
+            if (_closed) return;
+
+            closingEditors = _workspace.Windows
+                .Where(window => !window._closed && window.SharesSessionWith(this))
+                .SelectMany(window => window._tabs.Values)
+                .Select(tab => tab.Editor)
+                .OfType<TextEditor>()
+                .Select(editor => (editor, editor.IsEnabled))
+                .ToArray();
+            foreach (var (editor, _) in closingEditors) editor.IsEnabled = false;
+
+            if (FindOtherSessionWindow() is not null)
             {
                 archivedTabs = TabsInVisualOrder().ToArray();
                 var closingIds = archivedTabs.Select(tab => tab.Id).ToHashSet();
@@ -611,7 +680,7 @@ public partial class MainWindow : Window
                     await RememberClosedAsync(tab, preserveUnsavedText: true, deferHistoryLimit: true);
 
                 await SaveWorkspaceSessionAsync(excludeWindow: this);
-                if (_closedTabs.Count > 100)
+                if (_closedTabs.Count > 100 && !(_startEmpty && _emptyStartupPreserveAllHistory))
                 {
                     _closedTabs.RemoveRange(100, _closedTabs.Count - 100);
                     RefreshHistoryMenus();
@@ -621,6 +690,7 @@ public partial class MainWindow : Window
             {
                 await SaveSessionAsync();
             }
+            await PreserveDetachedDraftsOnCloseAsync();
             sessionSaved = true;
 
             CloseWorkspaceContents();
@@ -645,10 +715,9 @@ public partial class MainWindow : Window
         }
         finally
         {
-            if (closeGateHeld)
-            {
-                _workspace.CloseGate.Release();
-            }
+            foreach (var (editor, wasEnabled) in closingEditors) editor.IsEnabled = wasEnabled;
+            if (switchGateHeld) _workspace.WorkspaceSwitchGate.Release();
+            if (closeGateHeld) _workspace.CloseGate.Release();
         }
     }
 
@@ -659,12 +728,17 @@ public partial class MainWindow : Window
         _idleUnloadTimer?.Stop();
         _lifetime.Cancel();
         _searchCancellation?.Cancel();
-        foreach (var tab in _tabs.Values)
-        {
-            tab.LoadCancellation?.Cancel();
-            tab.Log?.Close();
-            DetachEditor(tab);
-        }
+        foreach (var tab in LoadedWorkspaceTabs().ToArray()) ReleaseTabContents(tab);
+        _workspaceViews.Clear();
+    }
+
+    private void ReleaseTabContents(WorkTab tab)
+    {
+        tab.LoadCancellation?.Cancel();
+        tab.Log?.Close();
+        tab.Log = null;
+        DetachEditor(tab);
+        tab.Item.Content = null;
     }
 
     private void HomeClicked(object? sender, RoutedEventArgs e) => Run(ShowHomeAsync);
@@ -694,7 +768,7 @@ public partial class MainWindow : Window
     }
 
     private static bool IsUserError(Exception error) => error is IOException or InvalidDataException or UnauthorizedAccessException
-        or FormatException or ArgumentException or InvalidOperationException or OverflowException or TimeoutException
+        or FormatException or ArgumentException or InvalidOperationException or KeyNotFoundException or OverflowException or TimeoutException
         or System.Text.Json.JsonException or System.Text.RegularExpressions.RegexMatchTimeoutException
         or System.ComponentModel.Win32Exception or HttpRequestException;
 
@@ -758,6 +832,7 @@ public partial class MainWindow : Window
         public Grid View { get; } = new();
         public WorkspaceTabs Tabs { get; } = new();
         public Button CloseButton { get; set; } = null!;
+        public Button LevelFilterButton { get; set; } = null!;
         public Orientation? Axis { get; init; }
         public Group? First { get; set; }
         public Group? Second { get; set; }

@@ -115,6 +115,184 @@ public sealed class LogUiTests
     });
 
     [Fact]
+    public Task LogSelectionCanBeCopiedWhileReadOnly() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "select.log");
+        await File.WriteAllTextAsync(path, "first selection line\nsecond line");
+        var window = new MainWindow();
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+        await InvokeTask(window, "OpenPathAsync", path, true, null);
+        var log = (LogView)ActiveLog(window);
+        try
+        {
+            var text = (TextBox)Field(log, "_logText");
+            Assert.True(text.IsReadOnly);
+            await HeadlessTests.WaitForAsync(() => text.Text?.StartsWith("first", StringComparison.Ordinal) == true);
+            text.Focus();
+            text.SelectionStart = 0;
+            text.SelectionEnd = 5;
+            Assert.Equal("first", SelectedText(text));
+            window.KeyPress(Key.C, RawInputModifiers.Control, PhysicalKey.C, "c");
+            window.KeyRelease(Key.C, RawInputModifiers.Control, PhysicalKey.C, "c");
+            var clipboard = await window.Clipboard!.TryGetDataAsync();
+            Assert.NotNull(clipboard);
+            Assert.Equal("first", await clipboard.TryGetTextAsync());
+            Assert.True(text.IsReadOnly);
+        }
+        finally { await CloseMainWindowAsync(window); }
+    });
+
+    [Fact]
+    public Task InlineLevelFilterPreservesTheUnderlyingPageAndReturnsToItWhenReset() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels.log");
+        var original = string.Concat(Enumerable.Range(0, 240).Select(row => row % 2 == 0
+            ? $"Fatal fatal-row-{row:D3}\n" : $"Info info-row-{row:D3}\n"));
+        await File.WriteAllTextAsync(path, original);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "NavigateAsync", 0L, true);
+            await InvokeTask(log, "TogglePageEditAsync");
+            var source = (TextBox)Field(log, "_logText");
+            var originalPage = source.Text;
+            source.CaretIndex = Math.Min(12, source.Text!.Length);
+            source.SelectionStart = 0;
+            source.SelectionEnd = Math.Min(5, source.Text.Length);
+            var originalSelection = SelectedText(source);
+            var pageOffset = Page(log)!.StartOffset;
+
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            var filterPanel = (LogLevelFilterPanel)Field(log, "_levelFilter")!;
+            Assert.True(filterPanel.IsVisible);
+            Assert.Equal(pageOffset, Page(log)!.StartOffset);
+            Assert.True(source.IsVisible);
+            Assert.Equal(originalPage, source.Text);
+            Assert.Equal(originalSelection, SelectedText(source));
+            Assert.False(log.IsReadOnly);
+
+            filterPanel.SetLevels(LogLevel.Fatal);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Fatal fatal-row-000", StringComparison.Ordinal) == true);
+            Assert.DoesNotContain("Info info-row-", filtered.Text);
+            Assert.False(((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            Assert.Equal(originalPage, source.Text);
+
+            ((Button)Field(log, "_levelFilterButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => !filterPanel.IsVisible && ((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            Assert.Equal(pageOffset, Page(log)!.StartOffset);
+            Assert.Equal(originalPage, source.Text);
+            Assert.Equal(originalSelection, SelectedText(source));
+
+            Assert.False(filterPanel.IsVisible);
+            Assert.Equal(originalPage, source.Text);
+            Assert.False(log.IsReadOnly);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task InlineLevelFilterCannotOpenWhilePageHasPendingEdits() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels-pending.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(0, 100).Select(row => $"Info row-{row:D3}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "TogglePageEditAsync");
+            var source = (TextBox)Field(log, "_logText");
+            source.Text = "pending edit";
+            Assert.True(log.HasPendingEdit);
+            Assert.False(log.CanFilterLevels);
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            Assert.False(((LogLevelFilterPanel)Field(log, "_levelFilter")!).IsVisible);
+            Assert.Equal("pending edit", source.Text);
+            Assert.False(log.IsReadOnly);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task FollowControlIsDisabledWhileFilteredAndRestoredWithoutChangingItsState(bool followEnd) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels-follow.log");
+        await File.WriteAllTextAsync(path, "Info first\nError second\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, FollowEnd: followEnd));
+        try
+        {
+            var follow = (Button)Field(log, "_followButton");
+            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            var panel = (LogLevelFilterPanel)Field(log, "_levelFilter")!;
+            panel.SetLevels(LogLevel.Error);
+            await HeadlessTests.WaitForAsync(() => !follow.IsEnabled
+                && ((TextBox)Field(log, "_filteredLogText")).Text == "Error second");
+            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+
+            panel.SetLevels(LogLevel.All);
+            await HeadlessTests.WaitForAsync(() => follow.IsEnabled);
+            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task InlineLevelFilterRefreshesAfterAnErrorIsAppended() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels-refresh.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(0, 120).Select(row => $"Info row-{row:D3}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")!).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            await HeadlessTests.WaitForAsync(() => Field(log, "_filterReading") is null
+                && ((TextBlock)Field(log, "_filterStatus")).Text == "Совпадений нет");
+            await WriteAppend(path, Encoding.UTF8.GetBytes("Error appended while filtered\n"));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.Contains("Error appended while filtered", StringComparison.Ordinal) == true);
+            Assert.DoesNotContain("Info row-", filtered.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
+    [InlineData("first\r\nlast", 11, "first", "last")]
+    [InlineData("first\r\n\r\nlast", 7, "first\r\nlast", "\r\n")]
+    public Task CtrlXInWritablePageEditorCutsTheCurrentLineAndUndoRestoresIt(string original, int caret, string expected, string cut) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "cut-page.log");
+        await File.WriteAllTextAsync(path, original);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var text = (TextBox)Field(log, "_logText");
+            text.CaretIndex = caret;
+            window.KeyPress(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            window.KeyRelease(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            Assert.Equal(original, text.Text);
+
+            await InvokeTask(log, "TogglePageEditAsync");
+            Assert.False(log.IsReadOnly);
+            text.CaretIndex = caret;
+            window.KeyPress(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            window.KeyRelease(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
+            await HeadlessTests.WaitForAsync(() => text.Text == expected);
+            var clipboard = await window.Clipboard!.TryGetDataAsync();
+            Assert.NotNull(clipboard);
+            Assert.Equal(cut, await clipboard.TryGetTextAsync());
+
+            text.Undo();
+            Assert.Equal(original, text.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public Task EditingADraftPublishesANewRecoveryAndCopyLivesInTabMenu() => HeadlessTests.RunAsync(async profile =>
     {
         const string row = "draft row\n";
@@ -333,8 +511,11 @@ public sealed class LogUiTests
             window.MouseUp(At(0.8), MouseButton.Left, RawInputModifiers.None);
             Assert.True(whileDragging > afterTrackPress + 500);
 
-            window.MouseMove(At(0.98));
-            window.MouseDown(At(0.98), MouseButton.Left, RawInputModifiers.None);
+            // These input events can all arrive before the first background alignment completes.
+            window.MouseMove(At(0.33));
+            window.MouseDown(At(0.33), MouseButton.Left, RawInputModifiers.None);
+            foreach (var ratio in new[] { .62, .11, .75, .21, .98 })
+                window.MouseMove(At(ratio), RawInputModifiers.LeftMouseButton);
             window.MouseUp(At(0.98), MouseButton.Left, RawInputModifiers.None);
             await HeadlessTests.WaitForAsync(() => FirstRowNumber(text.Text) > 1850);
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));

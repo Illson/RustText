@@ -22,7 +22,13 @@ public partial class MainWindow
         _idleUnloadTimer.Start();
     }
 
-    private void IdleUnloadTimerTick(object? sender, EventArgs e) => Run(UnloadIdleEditorsAsync);
+    private void IdleUnloadTimerTick(object? sender, EventArgs e) => Run(HandleIdleUnloadTimerTickAsync);
+
+    private async Task HandleIdleUnloadTimerTickAsync()
+    {
+        await UnloadIdleEditorsAsync();
+        await ArchiveClosedDraftsAsync();
+    }
 
     private void OnIdleUnloadWindowClosed(object? sender, EventArgs e)
     {

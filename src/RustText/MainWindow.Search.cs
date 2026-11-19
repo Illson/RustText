@@ -18,8 +18,8 @@ public partial class MainWindow
     private ToggleButton _regexOption = null!;
     private ToggleButton _caseOption = null!;
     private ToggleButton _wordOption = null!;
-    private CheckBox _allTabs = null!;
-    private CheckBox _onlyCurrent = null!;
+    private ToggleButton _allTabs = null!;
+    private ToggleButton _onlyCurrent = null!;
     private ToggleButton _replaceMode = null!;
     private Button _findAll = null!;
     private Button _cancelSearch = null!;
@@ -40,8 +40,8 @@ public partial class MainWindow
         _regexOption = SearchBar.Option(".*", "Регулярное выражение");
         _caseOption = SearchBar.Option("Aa", "Учитывать регистр");
         _wordOption = SearchBar.Option("«»", "Целое слово");
-        _allTabs = new CheckBox { Content = "Все вкладки", FontSize = 12 };
-        _onlyCurrent = new CheckBox { Content = "Только текущее", FontSize = 12 };
+        _allTabs = SearchBar.Option("Все вкладки", "Искать во всех вкладках");
+        _onlyCurrent = SearchBar.Option("Только текущее", "Подсвечивать только текущее совпадение");
         _searchResults = new ListBox { MaxHeight = 112 };
         _searchStatus = SearchBar.Status();
 
@@ -144,6 +144,7 @@ public partial class MainWindow
 
     private void OpenSearchPanel(bool replace = false)
     {
+        if (ActiveTab is { EditorLogFilter.IsFiltering: true } filteredTab) CloseEditorLevelFilter(filteredTab);
         if (!replace && ActiveTab?.Log is { } log)
         {
             if (PanelHost.IsVisible) CloseSearchPanel();
@@ -176,6 +177,25 @@ public partial class MainWindow
         _searchFocus = null;
         RefreshSearchHighlights();
         ActiveTab?.Editor?.Focus();
+    }
+
+    private void ForgetSearchTab(WorkTab tab)
+    {
+        var isSearchSource = ReferenceEquals(_searchTab, tab);
+        if (isSearchSource || _allTabs.IsChecked == true && _searchCancellation is not null)
+            CancelSearch();
+
+        if (isSearchSource) _searchTab = null;
+        if (_searchFocus is { } focus && ReferenceEquals(focus.Tab, tab)) _searchFocus = null;
+
+        var matchingItems = _searchResults.Items.OfType<ListBoxItem>().Where(item =>
+            item.Tag is SearchResult result && ReferenceEquals(result.Tab, tab)).ToArray();
+        if (_searchResults.SelectedItem is ListBoxItem selected && matchingItems.Contains(selected))
+            _searchResults.SelectedItem = null;
+        foreach (var item in matchingItems)
+        {
+            _searchResults.Items.Remove(item);
+        }
     }
 
     private void CancelSearch()
@@ -265,7 +285,7 @@ public partial class MainWindow
                     incomplete |= tab.Deferred is not null || tab.Loading;
                     continue;
                 }
-                if (tab.Deferred is { DraftRef: not null } draft && _storage.GetDraftLength(draft) > LineGeneratorThreshold)
+                if (tab.Deferred is { DraftRef: not null } draft && SessionStorage.GetDraftLength(draft) > LineGeneratorThreshold)
                 {
                     incomplete = true;
                     continue;
@@ -397,7 +417,7 @@ public partial class MainWindow
 
     private async Task ReplaceAsync(bool all)
     {
-        if (ActiveTab is not { Editor: { } editor } tab)
+        if (ActiveTab is not { Editor: { IsReadOnly: false } editor } tab)
         {
             return;
         }
@@ -429,6 +449,7 @@ public partial class MainWindow
             throw new InvalidOperationException("Текст изменился во время замены.");
         }
 
+        if (editor.IsReadOnly || !ReferenceEquals(tab.Editor, editor)) return;
         if (result.Count > 0)
         {
             MultiCaretEditing.CollapseToPrimary(editor.TextArea);

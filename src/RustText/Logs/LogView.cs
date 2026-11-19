@@ -83,6 +83,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         SelectionForegroundBrush = FocusTheme.Text,
         TextWrapping = TextWrapping.NoWrap,
     };
+    private readonly LogLevelBands _levelBands;
+    private readonly Button _levelFilterButton = new() { Content = "Уровни…" };
     private readonly TextBox _percentBox = new()
     {
         Width = 76,
@@ -139,6 +141,8 @@ internal sealed partial class LogView : UserControl, IDisposable
     private ScrollViewer? _logScrollViewer;
     private readonly TextBlock _indexLabel = new();
     private readonly LogMinimap _minimap = new() { Width = 54 };
+    private Grid? _contentViewport;
+    private Grid? _levelFilterViewport;
     private readonly StackPanel _searchPanel = new()
     {
         Spacing = 2,
@@ -182,6 +186,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private bool _minimapLoading;
     private bool _minimapDragging;
     private double? _pendingMinimapRatio;
+    private long _minimapRequest;
     private string _lastSearchText = string.Empty;
     private long _dataGeneration;
     private int[] _displayRowStarts = [];
@@ -221,6 +226,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _refreshTimer = new DispatcherTimer { Interval = RefreshInterval };
         _refreshTimer.Tick += OnRefreshTimerTick;
 
+        _levelBands = new LogLevelBands(_logText) { IsHitTestVisible = false, ClipToBounds = true };
         Content = BuildLayout();
         ScrollViewer.SetHorizontalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
         ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
@@ -258,7 +264,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         set
         {
             _wordWrap = value;
-            _logText.TextWrapping = value ? TextWrapping.Wrap : TextWrapping.NoWrap;
+            _logText.TextWrapping = _filteredLogText.TextWrapping = value ? TextWrapping.Wrap : TextWrapping.NoWrap;
             _wrapButton.Content = value ? "Перенос: вкл." : "Перенос: выкл.";
         }
     }
@@ -379,6 +385,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     public void SetTextSize(double value)
     {
         _logText.FontSize = value;
+        _filteredLogText.FontSize = value;
         _lineGutterText.FontSize = value;
         RefreshLineCount();
     }
@@ -387,6 +394,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     public async Task NavigateMatchAsync(bool backward)
     {
+        if (_levelFilterViewport?.IsVisible == true) CloseInlineLevelFilter();
         if (string.IsNullOrEmpty(_searchBox.Text))
         {
             FocusSearch();
@@ -449,6 +457,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     public void FocusSearch()
     {
         if (PageNavigationBlocked) return;
+        if (_levelFilterViewport?.IsVisible == true) CloseInlineLevelFilter();
         if (!_searchBox.IsKeyboardFocusWithin && _logText.SelectedText is { Length: > 0 } selected)
         {
             _regexBox.IsChecked = false;
@@ -478,6 +487,9 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         _closed = true;
         _closing.Cancel();
+        _filterReading?.Cancel();
+        _filterReading?.Dispose();
+        _filterReading = null;
         StopSearch();
         _indexCancellation?.Cancel();
         _trimCancellation?.Cancel();
@@ -485,7 +497,36 @@ internal sealed partial class LogView : UserControl, IDisposable
         _logText.LayoutUpdated -= OnLogTextLayoutUpdated;
         AttachLogScrollbar(null);
         _file.Dispose();
+        _logText.Text = string.Empty;
+        _lineGutterText.Text = string.Empty;
+        _fileLabel.Text = string.Empty;
+        _indexLabel.Text = string.Empty;
+        _statusLabel.Text = string.Empty;
+        _countLabel.Text = string.Empty;
+        _lineNumberLabel.Text = string.Empty;
+        _positionLabel.Text = string.Empty;
+        _searchStatusText.Text = string.Empty;
+        _searchResults.Clear();
+        _searchResultButtons.Children.Clear();
+        _miniSamples.Clear();
+        _previousOffsets.Clear();
+        _skippedSearchLines.Clear();
+        _displayRowStarts = [];
+        _displaySourceLineNumbers = [];
+        _page = null;
+        _pageEdit = null;
+        lock (_lineIndexGate) _lineIndex.Clear();
         _closing.Dispose();
+    }
+
+    internal bool CanFilterLevels => !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path)) && !HasPendingEdit;
+
+    internal Task ShowLevelFilterAsync()
+    {
+        if (_closed || _levelFilterViewport is null || (!_levelFilterOpen && !CanFilterLevels)) return Task.CompletedTask;
+        if (_levelFilterOpen) CloseInlineLevelFilter();
+        else OpenInlineLevelFilter();
+        return Task.CompletedTask;
     }
 
     public void Dispose() => Close();
@@ -564,12 +605,24 @@ internal sealed partial class LogView : UserControl, IDisposable
         Grid.SetColumn(_logText, 1);
         AutomationProperties.SetAutomationId(_logText, "LogText");
         content.Children.Add(_logText);
+        Grid.SetColumn(_levelBands, 1);
+        content.Children.Add(_levelBands);
         _minimap.Samples = _miniSamples;
         AutomationProperties.SetName(_minimap, "Прокрутка лога");
         AutomationProperties.SetAutomationId(_minimap, "LogMinimap");
         Grid.SetColumn(_minimap, 2);
         content.Children.Add(_minimap);
-        root.Children.Add(content);
+        _contentViewport = new Grid();
+        _contentViewport.Children.Add(content);
+        _levelFilterViewport = BuildLevelFilterViewport();
+        _levelFilterViewport.IsVisible = false;
+        _levelFilter!.IsVisible = false;
+        var logViewport = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
+        logViewport.Children.Add(_levelFilter!);
+        Grid.SetRow(_contentViewport, 1);
+        logViewport.Children.Add(_contentViewport);
+        Grid.SetRow(logViewport, 1);
+        root.Children.Add(logViewport);
 
         var searchRow = SearchBar.MakeRows();
         SearchBar.StyleInput(_searchBox);
@@ -646,6 +699,10 @@ internal sealed partial class LogView : UserControl, IDisposable
         var actions = new Button { Content = "Действия ▾", Flyout = actionsFlyout };
         SetButtonStyle(actions, "focus-quiet");
         navigation.Children.Add(_openSearchButton);
+        SetButtonStyle(_levelFilterButton, "focus-quiet");
+        ToolTip.SetTip(_levelFilterButton, "Фильтр строк по уровням во всём логе");
+        _levelFilterButton.Click += async (_, _) => await ShowLevelFilterAsync();
+        navigation.Children.Add(_levelFilterButton);
         navigation.Children.Add(actions);
         navigation.Children.Add(_cancelIndexButton);
         navigation.Children.Add(_cancelTrimButton);
@@ -711,8 +768,16 @@ internal sealed partial class LogView : UserControl, IDisposable
     private void ConfigureInteractions()
     {
         _startButton.Click += async (_, _) => await NavigateAsync(_hiddenOffset, true);
-        _previousButton.Click += async (_, _) => await NavigatePreviousAsync();
-        _nextButton.Click += async (_, _) => await NavigateAsync(_page?.NextOffset ?? _hiddenOffset, true);
+        _previousButton.Click += async (_, _) =>
+        {
+            if (_levelFilterViewport?.IsVisible == true) await NavigateFilteredAsync(forward: false);
+            else await NavigatePreviousAsync();
+        };
+        _nextButton.Click += async (_, _) =>
+        {
+            if (_levelFilterViewport?.IsVisible == true) await NavigateFilteredAsync(forward: true);
+            else await NavigateAsync(_page?.NextOffset ?? _hiddenOffset, true);
+        };
         _endButton.Click += async (_, _) => await NavigateToPageAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true, scrollToEnd: true);
         _middleButton.Click += async (_, _) => await NavigateAsync(Math.Max(_hiddenOffset, _reader.GetMidpointOffset(_closing.Token)), true);
         _pauseButton.Click += (_, _) => SetAutoRefresh(!_autoRefresh);
@@ -785,6 +850,14 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async void OnLogKeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.Key == Key.X && e.KeyModifiers == KeyModifiers.Control && _pageEdit is not null
+            && !_logText.IsReadOnly && _logText.SelectionStart == _logText.SelectionEnd)
+        {
+            e.Handled = true;
+            await CutCurrentPageLineAsync();
+            return;
+        }
+
         if (_closed || PageNavigationBlocked) return;
 
         if (e.Key == Key.Home && e.KeyModifiers.HasFlag(KeyModifiers.Control))
@@ -810,7 +883,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         else if (e.Key == Key.F && e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
             e.Handled = true;
-            FocusSearch();
+            if (_levelFilterViewport?.IsVisible != true) FocusSearch();
         }
     }
 
@@ -932,6 +1005,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                     displayText.Append(row.Text);
                 }
                 _logText.Text = displayText.ToString();
+                _levelBands.SetPage(page);
             }
             if (editCaretBytes is null)
             {
@@ -993,7 +1067,8 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task NavigateMinimapToRatioAsync(double ratio)
     {
-        if (PageNavigationBlocked) return;
+        if (_closed || PageNavigationBlocked) return;
+        var request = ++_minimapRequest;
         ratio = Math.Clamp(ratio, 0, 1);
         if (_busy)
         {
@@ -1006,17 +1081,26 @@ internal sealed partial class LogView : UserControl, IDisposable
         var target = ratio >= 1
             ? _reader.GetEndOffset(_closing.Token)
             : _hiddenOffset + (long)(available * ratio);
+        var reader = _reader;
+        var token = _closing.Token;
         try
         {
-            var aligned = await Task.Run(() => _reader.AlignToNextLine(target, _closing.Token), _closing.Token);
+            var aligned = await Task.Run(() => reader.AlignToNextLine(target, token), token);
+            if (_closed || request != _minimapRequest || !ReferenceEquals(reader, _reader)) return;
+            if (_busy)
+            {
+                _pendingMinimapRatio = ratio;
+                return;
+            }
             await LoadPageAsync(Math.Max(_hiddenOffset, aligned), saveHistory: true, allowFollowEnd: false);
         }
         catch (OperationCanceledException) when (_closing.IsCancellationRequested)
         {
         }
+        catch (ObjectDisposedException) when (_closed || !ReferenceEquals(reader, _reader)) { }
         catch (IOException error)
         {
-            SetStatus($"Переход по миникарте остановлен. {error.Message}");
+            if (!_closed && request == _minimapRequest) SetStatus($"Переход по миникарте остановлен. {error.Message}");
         }
     }
 
@@ -1696,6 +1780,15 @@ internal sealed partial class LogView : UserControl, IDisposable
             ApplyLargeLogIndexOptInPolicy();
             StartIndexIfNeeded();
             LoadMinimapSamples();
+            if (_levelFilterOpen && _levelFilter?.SelectedLevels != LogLevel.All)
+            {
+                if (!appended)
+                {
+                    _filterHistory.Clear();
+                    _filterCurrent = new(_hiddenOffset);
+                }
+                await LoadFilteredPageAsync(appended ? _filterCurrent : new FilterCursor(_hiddenOffset));
+            }
             if (preservedDraft) ReportPreservedExternalEdit();
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -1947,7 +2040,11 @@ internal sealed partial class LogView : UserControl, IDisposable
     private void OnLogTextLayoutUpdated(object? sender, EventArgs e)
     {
         AttachLogScrollViewer();
-        if (_pageEdit is null) UpdateLineGutterText();
+        if (_pageEdit is null)
+        {
+            UpdateLineGutterText();
+            _levelBands.InvalidateVisual();
+        }
     }
 
     private void AttachLogScrollViewer()
@@ -1981,6 +2078,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
             UpdateMinimapViewport();
+            _levelBands.InvalidateVisual();
         }
     }
 
@@ -2092,6 +2190,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_closed) return;
         var enabled = !_busy && !PageNavigationBlocked;
         UpdatePageModeControls();
+        _levelBands.IsVisible = !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path));
+        _levelFilterButton.IsVisible = _levelBands.IsVisible;
+        _levelFilterButton.IsEnabled = CanFilterLevels || _levelFilterOpen;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
         _followButton.Content = _followEnd ? "К концу" : "Следовать";
         _liveLabel.Text = _isDraft ? "" : _autoRefresh ? "● Обновляется" : "● На паузе";
@@ -2134,6 +2235,24 @@ internal sealed partial class LogView : UserControl, IDisposable
         _cancelSearchButton.IsVisible = _searchCancellation is not null;
         _openSearchButton.IsEnabled = enabled;
         _timeButton.IsEnabled = enabled;
+        if (_levelFilterViewport?.IsVisible == true)
+        {
+            _previousButton.IsEnabled = !_busy && _filterReading is null && _filterHistory.Count > 0;
+            _nextButton.IsEnabled = !_busy && _filterReading is null && _filterNext.HasValue;
+            _followButton.IsEnabled = false;
+            _startButton.IsEnabled = _endButton.IsEnabled = _middleButton.IsEnabled = false;
+            _openSearchButton.IsEnabled = _timeButton.IsEnabled = false;
+            _searchButton.IsEnabled = _moreButton.IsEnabled = false;
+            _hideButton.IsEnabled = _revealButton.IsEnabled = _trimButton.IsEnabled = false;
+            _levelFilterButton.Content = "Закрыть уровни";
+        }
+        if (_levelFilterOpen)
+        {
+            _levelFilter!.IsEnabled = !HasPendingEdit;
+            _levelFilterButton.IsEnabled = true;
+            if (_levelFilter.SelectedLevels != LogLevel.All)
+                _editPageButton.IsEnabled = _savePageButton.IsEnabled = _cancelPageButton.IsEnabled = false;
+        }
     }
 
     private void SetStatus(string text)
