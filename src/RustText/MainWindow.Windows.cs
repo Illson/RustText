@@ -62,7 +62,9 @@ public partial class MainWindow
     private sealed record WorkspaceViewState(Dictionary<long, WorkTab> Tabs, Group Root, Group Active, bool Home,
         Control? HomeContent, double Width, double Height, bool Maximized, StorageService Storage, List<SessionTab> ClosedTabs);
 
-    private StorageService SessionStorage => _workspace.GetStorage(_workspaceId, _windowId, _shareDefaultSession);
+    private StorageService SessionStorage => _startEmpty
+        ? _workspace.GetStorage(WorkspaceCatalogStore.DefaultWorkspaceId, EmptyStartupWindowId)
+        : _workspace.GetStorage(_workspaceId, _windowId, _shareDefaultSession);
     private static string StorageCacheKey(StorageService storage) => Path.GetFullPath(storage.RootDirectory)
         .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant();
     private string WorkspaceCacheKey => StorageCacheKey(SessionStorage);

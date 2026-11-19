@@ -168,7 +168,8 @@ internal sealed class StorageService
     public async Task<SessionState> SaveSessionWithDraftReadersAsync(
         SessionState state,
         IReadOnlyDictionary<long, Func<TextReader>>? drafts,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool preserveAllClosedTabs = false)
     {
         ArgumentNullException.ThrowIfNull(state);
         using var writerLock = AcquireSessionLock();
@@ -219,7 +220,7 @@ internal sealed class StorageService
                 tabs.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
                     : await PreserveDraftReferenceAsync(tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var closed = new List<SessionTab>();
-            foreach (var tab in (state.ClosedTabs ?? []).Take(MaxClosedTabs))
+            foreach (var tab in (state.ClosedTabs ?? []).Take(preserveAllClosedTabs ? int.MaxValue : MaxClosedTabs))
                 closed.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
                     : await PreserveDraftReferenceAsync(tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var snapshot = state with { Tabs = tabs, ClosedTabs = closed };

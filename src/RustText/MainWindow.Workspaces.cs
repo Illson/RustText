@@ -113,7 +113,8 @@ public partial class MainWindow
 
     private async Task SwitchWorkspaceCoreAsync(string workspaceId)
     {
-        if (workspaceId == _workspaceId) return;
+        var leavingEmptyStartup = _startEmpty;
+        if (workspaceId == _workspaceId && !leavingEmptyStartup) return;
         if (_tabs.Values.Any(tab => tab.Saving || tab.Log?.HasPendingEdit == true))
             throw new InvalidOperationException("Сначала завершите сохранение вкладки или отмените правки страницы.");
 
@@ -147,22 +148,23 @@ public partial class MainWindow
         if (!_workspace.Catalog.Workspaces.Any(item => item.Id == workspaceId))
             throw new KeyNotFoundException("Рабочее пространство не найдено.");
         var cachedView = _workspaceViews.TryGetValue(workspaceId, out var existingView) ? existingView : null;
-        var targetStorage = _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession);
+        var targetWindowId = leavingEmptyStartup ? WorkspaceCatalogStore.PrimaryWindowId : _windowId;
+        var targetStorage = _workspace.GetStorage(workspaceId, targetWindowId, _shareDefaultSession);
         var targetState = cachedView is null ? await targetStorage.LoadSessionAsync(_lifetime.Token) : null;
         if (cachedView is null && targetState is null && targetStorage.HasSessionCheckpoint)
         {
             _workspace.UnavailableSessions.Add(StorageCacheKey(targetStorage));
             throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
         }
-        if (cachedView is null && targetState is null && _windowId != WorkspaceCatalogStore.PrimaryWindowId)
+        if (cachedView is null && targetState is null && targetWindowId != WorkspaceCatalogStore.PrimaryWindowId)
         {
             var primaryState = await _workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId)
                 .LoadSessionAsync(_lifetime.Token);
             if (primaryState is not null)
             {
                 await CopyWorkspaceSessionAsync(_workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId),
-                    _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession));
-                targetState = await _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession).LoadSessionAsync(_lifetime.Token);
+                    _workspace.GetStorage(workspaceId, targetWindowId, _shareDefaultSession));
+                targetState = await _workspace.GetStorage(workspaceId, targetWindowId, _shareDefaultSession).LoadSessionAsync(_lifetime.Token);
             }
             else if (_workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId).HasSessionCheckpoint)
             {
@@ -171,18 +173,24 @@ public partial class MainWindow
             }
         }
 
+        _workspaceLoadWarning = null;
         await SaveWorkspaceSessionAsync(excludeWindow: null);
-        await _workspace.CatalogStore.SetWindowWorkspaceAsync(_windowId, workspaceId, _lifetime.Token);
+        await _workspace.CatalogStore.SetWindowWorkspaceAsync(targetWindowId, workspaceId, _lifetime.Token);
         _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         var currentContent = WorkspaceHost.Content;
-        _workspaceViews[_workspaceId] = new WorkspaceViewState(_tabs, _root, _active, _home,
-            _home ? currentContent as Control : null, Width, Height, WindowState == WindowState.Maximized, SessionStorage, _closedTabs);
+        if (!leavingEmptyStartup)
+        {
+            _workspaceViews[_workspaceId] = new WorkspaceViewState(_tabs, _root, _active, _home,
+                _home ? currentContent as Control : null, Width, Height, WindowState == WindowState.Maximized, SessionStorage, _closedTabs);
+        }
         CloseSearchPanel();
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids) grid.Children.Clear();
         _splitGrids.Clear();
 
         _workspaceId = workspaceId;
+        _windowId = targetWindowId;
+        _startEmpty = false;
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
 
         if (cachedView is { } view)
@@ -217,13 +225,80 @@ public partial class MainWindow
         RefreshHistoryMenus();
     }
 
+    private async Task EnterEmptyStartupAsync()
+    {
+        if (_startEmpty || _windowId != WorkspaceCatalogStore.PrimaryWindowId) return;
+        await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
+        try
+        {
+            if (_startEmpty || _windowId != WorkspaceCatalogStore.PrimaryWindowId) return;
+            if (_tabs.Values.Any(tab => tab.Saving || tab.Log?.HasPendingEdit == true))
+                throw new InvalidOperationException("Сначала завершите сохранение вкладки или отмените правки страницы.");
+
+            var dirtyFiles = _tabs.Values.Where(tab => tab.Dirty && tab.Path is not null).ToArray();
+            if (dirtyFiles.Length > 0)
+            {
+                var body = DialogPanel(new TextBlock
+                {
+                    Text = $"Открытые файлы содержат несохранённые изменения ({dirtyFiles.Length}). Сохраните их перед переходом или оставьте черновиками в текущем пространстве.",
+                    TextWrapping = TextWrapping.Wrap
+                });
+                var dialog = Dialog("Открыть пустое окно?", body);
+                var answer = (string?)null;
+                body.Children.Add(Row(
+                    FocusButton(Button("Сохранить", () => { answer = "save"; dialog.Close(true); }), primary: true),
+                    FocusButton(Button("Оставить черновики", () => { answer = "drafts"; dialog.Close(true); })),
+                    FocusButton(Button("Отмена", () => dialog.Close(false)))));
+                if (!await dialog.ShowDialog<bool>(this)) return;
+                if (answer == "save")
+                {
+                    foreach (var tab in dirtyFiles)
+                    {
+                        Select(tab);
+                        await SaveAsync();
+                        if (tab.Dirty) return;
+                    }
+                }
+            }
+
+            await SaveWorkspaceSessionAsync(excludeWindow: null);
+            _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+            var currentContent = WorkspaceHost.Content;
+            _workspaceViews[_workspaceId] = new WorkspaceViewState(_tabs, _root, _active, _home,
+                _home ? currentContent as Control : null, Width, Height, WindowState == WindowState.Maximized,
+                SessionStorage, _closedTabs);
+            CloseSearchPanel();
+            WorkspaceHost.Content = null;
+            foreach (var grid in _splitGrids) grid.Children.Clear();
+            _splitGrids.Clear();
+
+            _workspaceId = WorkspaceCatalogStore.DefaultWorkspaceId;
+            _startEmpty = true;
+            _closedTabs = _workspace.GetClosedTabs(SessionStorage);
+            await LoadEmptyStartupHistoryAsync();
+            _tabs = [];
+            _root = _active = MakeGroup();
+            ShowGroups();
+            await ShowHomeAsync();
+            if (_workspaceLoadWarning is not null) SetStatus(_workspaceLoadWarning);
+        }
+        finally
+        {
+            _workspace.WorkspaceSwitchGate.Release();
+        }
+    }
+
     private async Task OpenWorkspaceWindowAsync(string workspaceId)
     {
         _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         if (!_workspace.Catalog.Workspaces.Any(item => item.Id == workspaceId))
             throw new KeyNotFoundException("Рабочее пространство не найдено.");
         StorageService sourceStorage;
-        if (_workspaceId == workspaceId)
+        if (_startEmpty)
+        {
+            sourceStorage = _workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+        }
+        else if (_workspaceId == workspaceId)
         {
             await SaveWorkspaceSessionAsync(excludeWindow: null);
             sourceStorage = SessionStorage;

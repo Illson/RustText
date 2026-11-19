@@ -651,7 +651,7 @@ public partial class MainWindow : Window
                     await RememberClosedAsync(tab, preserveUnsavedText: true, deferHistoryLimit: true);
 
                 await SaveWorkspaceSessionAsync(excludeWindow: this);
-                if (_closedTabs.Count > 100)
+                if (_closedTabs.Count > 100 && !(_startEmpty && _emptyStartupPreserveAllHistory))
                 {
                     _closedTabs.RemoveRange(100, _closedTabs.Count - 100);
                     RefreshHistoryMenus();
