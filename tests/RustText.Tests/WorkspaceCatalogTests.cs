@@ -113,6 +113,49 @@ public sealed class WorkspaceCatalogTests
         Assert.Equal("saved content", await File.ReadAllTextAsync(Path.Combine(source, "data.txt")));
     }
 
+    [Fact]
+    public async Task InterruptedDirectoryMovesFollowTheLastCommittedCatalog()
+    {
+        using var folder = new TempDirectory();
+        var store = new WorkspaceCatalogStore(folder.Path);
+        var workspace = await store.CreateAsync("Project");
+        var live = store.GetWorkspaceDirectory(workspace.Id);
+        Directory.CreateDirectory(live);
+        await File.WriteAllTextAsync(Path.Combine(live, "note.txt"), "keep me");
+        var trash = Directory.CreateDirectory(Path.Combine(store.DirectoryPath, "deleted")).FullName;
+        var name = workspace.Id + "-1000-" + Guid.NewGuid().ToString("N");
+        var marker = Path.Combine(store.DirectoryPath, "pending-directory-move");
+
+        await File.WriteAllTextAsync(marker, name);
+        Directory.Move(live, Path.Combine(trash, name));
+        var restarted = new WorkspaceCatalogStore(folder.Path);
+        Assert.Contains((await restarted.LoadAsync()).Workspaces, entry => entry.Id == workspace.Id);
+        Assert.Equal("keep me", await File.ReadAllTextAsync(Path.Combine(live, "note.txt")));
+        Assert.False(File.Exists(marker));
+
+        var deleted = Assert.Single((await restarted.DeleteAsync(workspace.Id)).DeletedWorkspaces!);
+        var archived = Path.Combine(trash, deleted.DirectoryName);
+        await File.WriteAllTextAsync(marker, deleted.DirectoryName);
+        Directory.Move(archived, live);
+        Assert.Single((await store.LoadAsync()).DeletedWorkspaces!);
+        Assert.False(Directory.Exists(live));
+        Assert.Equal("keep me", await File.ReadAllTextAsync(Path.Combine(archived, "note.txt")));
+        await store.RestoreDeletedAsync(workspace.Id);
+        Assert.Equal("keep me", await File.ReadAllTextAsync(Path.Combine(live, "note.txt")));
+    }
+
+    [Fact]
+    public async Task ConcurrentCatalogWritersKeepBothWorkspaceEntries()
+    {
+        using var folder = new TempDirectory();
+        var first = new WorkspaceCatalogStore(folder.Path);
+        var second = new WorkspaceCatalogStore(folder.Path);
+        await Task.WhenAll(first.CreateAsync("First"), second.CreateAsync("Second"));
+        var saved = await first.LoadAsync();
+        Assert.Contains(saved.Workspaces, entry => entry.Name == "First");
+        Assert.Contains(saved.Workspaces, entry => entry.Name == "Second");
+    }
+
     private static string CreateProfile()
     {
         var directory = Path.Combine(Path.GetTempPath(), "RustText-workspaces-" + Guid.NewGuid().ToString("N"));

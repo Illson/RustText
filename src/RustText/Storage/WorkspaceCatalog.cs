@@ -25,6 +25,7 @@ internal sealed class WorkspaceCatalogStore
     private const int MaximumNameLength = 80;
     private readonly string _directory;
     private readonly string _indexPath;
+    private readonly string _moveMarker;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public WorkspaceCatalogStore(string profileBaseDirectory)
@@ -33,6 +34,7 @@ internal sealed class WorkspaceCatalogStore
         var profile = Path.GetFullPath(profileBaseDirectory);
         _directory = Path.Combine(profile, "workspaces");
         _indexPath = Path.Combine(_directory, "index.json");
+        _moveMarker = Path.Combine(_directory, "pending-directory-move");
     }
 
     public string DirectoryPath => _directory;
@@ -42,24 +44,8 @@ internal sealed class WorkspaceCatalogStore
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!File.Exists(_indexPath))
-            {
-                var initial = WorkspaceCatalog.CreateDefault();
-                await SaveCoreAsync(initial, cancellationToken).ConfigureAwait(false);
-                return initial;
-            }
-
-            try
-            {
-                await using var stream = new FileStream(_indexPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-                var catalog = await JsonSerializer.DeserializeAsync(stream, WorkspaceCatalogJsonContext.Default.WorkspaceCatalog, cancellationToken).ConfigureAwait(false)
-                    ?? throw new InvalidDataException("Каталог рабочих пространств пуст.");
-                return Validate(catalog);
-            }
-            catch (JsonException error)
-            {
-                throw new InvalidDataException("Каталог рабочих пространств повреждён. Другие сохранённые данные не изменены.", error);
-            }
+            using var catalogLock = await LockCatalogAsync(cancellationToken).ConfigureAwait(false);
+            return await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -73,6 +59,7 @@ internal sealed class WorkspaceCatalogStore
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var catalogLock = await LockCatalogAsync(cancellationToken).ConfigureAwait(false);
             var catalog = await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
             if (catalog.Workspaces.Count >= MaximumWorkspaceCount)
                 throw new InvalidOperationException("Достигнут предел в 200 рабочих пространств.");
@@ -94,6 +81,7 @@ internal sealed class WorkspaceCatalogStore
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var catalogLock = await LockCatalogAsync(cancellationToken).ConfigureAwait(false);
             var catalog = await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
             if (id == DefaultWorkspaceId) throw new InvalidOperationException("Рабочее пространство «По умолчанию» нельзя переименовать.");
             var selected = catalog.Workspaces.FirstOrDefault(item => item.Id == id)
@@ -117,6 +105,7 @@ internal sealed class WorkspaceCatalogStore
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var catalogLock = await LockCatalogAsync(cancellationToken).ConfigureAwait(false);
             var catalog = await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
             if (!catalog.Workspaces.Any(item => item.Id == workspaceId))
                 throw new KeyNotFoundException("Рабочее пространство не найдено.");
@@ -144,6 +133,7 @@ internal sealed class WorkspaceCatalogStore
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var catalogLock = await LockCatalogAsync(cancellationToken).ConfigureAwait(false);
             var catalog = await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
             if (!catalog.WindowAssignments.ContainsKey(windowId)) return catalog;
             var assignments = new Dictionary<string, string>(catalog.WindowAssignments, StringComparer.Ordinal);
@@ -171,6 +161,7 @@ internal sealed class WorkspaceCatalogStore
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var catalogLock = await LockCatalogAsync(cancellationToken).ConfigureAwait(false);
             var catalog = await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
             if (!catalog.Workspaces.Any(item => item.Id == id)) throw new KeyNotFoundException("Рабочее пространство не найдено.");
             var deletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -186,7 +177,9 @@ internal sealed class WorkspaceCatalogStore
                 if (System.IO.Directory.Exists(workspacePath))
                 {
                     EnsureNoReparsePoints(workspacePath);
+                    EnsureNoReparsePoints(tombstone);
                     System.IO.Directory.CreateDirectory(archiveRoot);
+                    await WriteMoveMarkerAsync(directoryName, cancellationToken).ConfigureAwait(false);
                     System.IO.Directory.Move(workspacePath, tombstone);
                     moved = true;
                 }
@@ -211,6 +204,7 @@ internal sealed class WorkspaceCatalogStore
                 };
                 await SaveCoreAsync(updated, cancellationToken).ConfigureAwait(false);
                 committed = true;
+                if (moved) File.Delete(_moveMarker);
                 foreach (var expired in deleted.Except(retained))
                 {
                     if (string.IsNullOrEmpty(expired.DirectoryName)) continue;
@@ -245,6 +239,7 @@ internal sealed class WorkspaceCatalogStore
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var catalogLock = await LockCatalogAsync(cancellationToken).ConfigureAwait(false);
             var catalog = await LoadCoreAsync(cancellationToken).ConfigureAwait(false);
             var deleted = (catalog.DeletedWorkspaces ?? []).FirstOrDefault(item => item.Workspace.Id == id)
                 ?? throw new KeyNotFoundException("Удалённое рабочее пространство не найдено.");
@@ -260,10 +255,13 @@ internal sealed class WorkspaceCatalogStore
             if (moved)
             {
                 EnsureNoReparsePoints(archivedPath!);
+                if (Directory.Exists(workspacePath)) throw new IOException("Целевая папка пространства уже существует.");
                 System.IO.Directory.CreateDirectory(_directory);
+                await WriteMoveMarkerAsync(deleted.DirectoryName, cancellationToken).ConfigureAwait(false);
                 System.IO.Directory.Move(archivedPath!, workspacePath);
             }
 
+            var committed = false;
             try
             {
                 var updated = catalog with
@@ -272,9 +270,11 @@ internal sealed class WorkspaceCatalogStore
                     DeletedWorkspaces = catalog.DeletedWorkspaces!.Where(item => item.Workspace.Id != id).ToList()
                 };
                 await SaveCoreAsync(updated, cancellationToken).ConfigureAwait(false);
+                committed = true;
+                if (moved) File.Delete(_moveMarker);
                 return updated;
             }
-            catch
+            catch when (!committed)
             {
                 if (moved && System.IO.Directory.Exists(workspacePath) && !System.IO.Directory.Exists(archivedPath!))
                     System.IO.Directory.Move(workspacePath, archivedPath!);
@@ -298,6 +298,7 @@ internal sealed class WorkspaceCatalogStore
     {
         if (!File.Exists(_indexPath))
         {
+            if (File.Exists(_moveMarker)) throw new InvalidDataException("Отсутствует каталог для незавершённого перемещения пространства.");
             var initial = WorkspaceCatalog.CreateDefault();
             await SaveCoreAsync(initial, token).ConfigureAwait(false);
             return initial;
@@ -306,13 +307,66 @@ internal sealed class WorkspaceCatalogStore
         try
         {
             await using var stream = new FileStream(_indexPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            return Validate(await JsonSerializer.DeserializeAsync(stream, WorkspaceCatalogJsonContext.Default.WorkspaceCatalog, token).ConfigureAwait(false)
+            var catalog = Validate(await JsonSerializer.DeserializeAsync(stream, WorkspaceCatalogJsonContext.Default.WorkspaceCatalog, token).ConfigureAwait(false)
                 ?? throw new InvalidDataException("Каталог рабочих пространств пуст."));
+            await RecoverDirectoryMoveAsync(catalog, token).ConfigureAwait(false);
+            return catalog;
         }
         catch (JsonException error)
         {
             throw new InvalidDataException("Каталог рабочих пространств повреждён. Другие сохранённые данные не изменены.", error);
         }
+    }
+
+    private async Task<FileStream> LockCatalogAsync(CancellationToken token)
+    {
+        Directory.CreateDirectory(_directory);
+        var path = Path.Combine(_directory, "index.lock");
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33
+                && System.Diagnostics.Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(5))
+            {
+                await Task.Delay(25, token).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private Task WriteMoveMarkerAsync(string directoryName, CancellationToken token) =>
+        StorageService.AtomicWriteAsync(_moveMarker, System.Text.Encoding.UTF8.GetBytes(directoryName), token);
+
+    private async Task RecoverDirectoryMoveAsync(WorkspaceCatalog catalog, CancellationToken token)
+    {
+        if (!File.Exists(_moveMarker)) return;
+        EnsureNoReparsePoints(_moveMarker);
+        if (new FileInfo(_moveMarker).Length > 128) throw new InvalidDataException("Журнал перемещения пространства повреждён.");
+        var name = await File.ReadAllTextAsync(_moveMarker, token).ConfigureAwait(false);
+        var parts = name.Split('-');
+        if (parts.Length != 3 || !Guid.TryParseExact(parts[0], "N", out _) || !long.TryParse(parts[1], out _)
+            || !Guid.TryParseExact(parts[2], "N", out _))
+            throw new InvalidDataException("Журнал перемещения пространства повреждён.");
+
+        var live = GetWorkspaceDirectory(parts[0]);
+        var archived = Path.Combine(_directory, "deleted", name);
+        var active = catalog.Workspaces.Any(entry => entry.Id == parts[0]);
+        var retained = catalog.DeletedWorkspaces?.Any(entry => entry.DirectoryName == name) == true;
+        if (active || retained)
+        {
+            var target = active ? live : archived;
+            var source = active ? archived : live;
+            if (Directory.Exists(target) == Directory.Exists(source))
+                throw new InvalidDataException("Не удалось однозначно восстановить папку рабочего пространства.");
+            if (!Directory.Exists(target))
+            {
+                EnsureNoReparsePoints(source);
+                EnsureNoReparsePoints(target);
+                Directory.Move(source, target);
+            }
+        }
+        File.Delete(_moveMarker);
     }
 
     private Task SaveCoreAsync(WorkspaceCatalog catalog, CancellationToken token) =>
