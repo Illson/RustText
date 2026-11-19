@@ -75,3 +75,13 @@ jobs:
           } finally {
             $reader.Dispose()
           }
+
+      - name: Upload Windows preview
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: RustText-win-x64-${{ github.sha }}
+          path: ${{ runner.temp }}/rusttext-win-x64/rusttext.exe
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 9
