@@ -333,10 +333,15 @@ public sealed class WorkspaceTests
             empty = await OpenWorkspaceAsync();
             Assert.Empty(Tabs(empty));
             Assert.True((bool)Field(empty, "_startEmpty"));
+            Assert.Null(Field(empty, "_workspaceLoadWarning"));
+            var scratch = Assert.IsType<StorageService>(Property(empty, "SessionStorage", Private));
+            Assert.NotSame(storage, scratch);
+            Assert.False(scratch.HasSessionCheckpoint);
             await CloseAsync(empty);
 
             var session = await storage.LoadSessionAsync();
             Assert.Equal(path, Assert.Single(session!.Tabs).Path);
+            Assert.False(scratch.HasSessionCheckpoint);
         }
         finally
         {
@@ -345,6 +350,144 @@ public sealed class WorkspaceTests
         }
     });
 
+    [Fact]
+    public Task EmptyStartupHomeSwitchKeepsBothEditorsAndTheirSavedDrafts() => HeadlessTests.RunAsync(async profile =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "named draft");
+            var named = Read<TextEditor>(ActiveTab(window), "Editor").Document;
+            var namedStorage = Assert.IsType<StorageService>(Property(window, "SessionStorage", Private));
+            await CallAsync(window, "EnterEmptyStartupAsync");
+            Assert.Empty(Tabs(window));
+            Invoke(window, "NewTab", "scratch draft");
+            var scratch = Read<TextEditor>(ActiveTab(window), "Editor").Document;
+            var scratchStorage = Assert.IsType<StorageService>(Property(window, "SessionStorage", Private));
+
+            await CallAsync(window, "SwitchWorkspaceAsync", WorkspaceCatalogStore.DefaultWorkspaceId);
+            Assert.Same(named, Read<TextEditor>(ActiveTab(window), "Editor").Document);
+            await CallAsync(window, "EnterEmptyStartupAsync");
+            Assert.Same(scratch, Read<TextEditor>(ActiveTab(window), "Editor").Document);
+
+            await CallAsync(window, "SaveSessionAsync");
+            var namedTab = Assert.Single((await namedStorage.LoadSessionAsync())!.Tabs);
+            var scratchTab = Assert.Single((await scratchStorage.LoadSessionAsync())!.Tabs);
+            Assert.Equal("named draft", await namedStorage.LoadDraftAsync(namedTab));
+            Assert.Equal("scratch draft", await scratchStorage.LoadDraftAsync(scratchTab));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task EmptyStartupKeepsNewDraftsSeparateAndSameWorkspaceSelectionRestoresSavedSession() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "previous-workspace.txt");
+        await File.WriteAllTextAsync(path, "previous workspace content");
+        var previous = await OpenWorkspaceAsync(path);
+        MainWindow? empty = null;
+        MainWindow? restartedEmpty = null;
+        try
+        {
+            await CallAsync(previous, "SaveSessionAsync");
+            var primaryStorage = StorageService.OpenForTesting(profile);
+            Assert.Equal(path, Assert.Single((await primaryStorage.LoadSessionAsync())!.Tabs).Path);
+            await primaryStorage.SaveSettingsAsync(new UserSettings { WorkspaceStartupMode = WorkspaceStartupMode.Empty });
+            await CloseAsync(previous);
+
+            empty = await OpenWorkspaceAsync();
+            Assert.Empty(Tabs(empty));
+            Assert.Null(Field(empty, "_workspaceLoadWarning"));
+            var scratchStorage = Assert.IsType<StorageService>(Property(empty, "SessionStorage", Private));
+            Assert.NotSame(primaryStorage, scratchStorage);
+
+            const string newDraftText = "new draft in the empty window";
+            Invoke(empty, "NewTab", newDraftText);
+            await CallAsync(empty, "SaveSessionAsync");
+            var scratchState = Assert.IsType<SessionState>(await scratchStorage.LoadSessionAsync());
+            var savedScratchTab = Assert.Single(scratchState.Tabs);
+            Assert.Equal(newDraftText, await scratchStorage.LoadDraftAsync(savedScratchTab));
+            Assert.Equal(path, Assert.Single((await primaryStorage.LoadSessionAsync())!.Tabs).Path);
+
+            await CallAsync(empty, "SwitchWorkspaceAsync", WorkspaceCatalogStore.DefaultWorkspaceId);
+            Assert.False((bool)Field(empty, "_startEmpty"));
+            Assert.Single(Tabs(empty));
+            Assert.Equal(path, Property(ActiveTab(empty), "Path"));
+            Assert.Equal("previous workspace content", Read<TextEditor>(ActiveTab(empty), "Editor").Text);
+            Assert.Equal(path, Assert.Single((await primaryStorage.LoadSessionAsync())!.Tabs).Path);
+            await CloseAsync(empty);
+
+            restartedEmpty = await OpenWorkspaceAsync();
+            Assert.Empty(Tabs(restartedEmpty));
+            Assert.Null(Field(restartedEmpty, "_workspaceLoadWarning"));
+            var closedDraft = Assert.Single(((System.Collections.IEnumerable)Field(restartedEmpty, "_closedTabs")).Cast<SessionTab>(), tab => tab.DraftRef is not null && tab.Path is null);
+            Assert.Equal(newDraftText, await ((StorageService)Property(restartedEmpty, "SessionStorage", Private)!).LoadDraftAsync(closedDraft));
+
+            var scratchPointer = Path.Combine(scratchStorage.RootDirectory, "session", "latest.json");
+            var pointerBeforeNoOpClose = await File.ReadAllTextAsync(scratchPointer);
+            await CloseAsync(restartedEmpty);
+            restartedEmpty = await OpenWorkspaceAsync();
+            Assert.Equal(pointerBeforeNoOpClose, await File.ReadAllTextAsync(scratchPointer));
+            var afterNoOpRestart = Assert.Single(((System.Collections.IEnumerable)Field(restartedEmpty, "_closedTabs")).Cast<SessionTab>(), tab => tab.DraftRef is not null && tab.Path is null);
+            await CallAsync(restartedEmpty, "RestoreClosedAsync", afterNoOpRestart);
+            Assert.Equal(newDraftText, Read<TextEditor>(ActiveTab(restartedEmpty), "Editor").Text);
+            Assert.Equal(path, Assert.Single((await primaryStorage.LoadSessionAsync())!.Tabs).Path);
+        }
+        finally
+        {
+            if (previous.IsVisible) await CloseAsync(previous);
+            if (empty is { IsVisible: true }) await CloseAsync(empty);
+            if (restartedEmpty is { IsVisible: true }) await CloseAsync(restartedEmpty);
+        }
+    });
+
+    [Fact]
+    public Task EmptyStartupPreservesMoreThanOneHundredOpenDraftsAcrossCheckpoints() => HeadlessTests.RunAsync(async profile =>
+    {
+        await StorageService.OpenForTesting(profile).SaveSettingsAsync(new UserSettings { WorkspaceStartupMode = WorkspaceStartupMode.Empty });
+        var seedWindow = await OpenWorkspaceAsync();
+        StorageService scratchStorage;
+        try
+        {
+            scratchStorage = Assert.IsType<StorageService>(Property(seedWindow, "SessionStorage", Private));
+            await CloseAsync(seedWindow);
+        }
+        finally
+        {
+            if (seedWindow.IsVisible) await CloseAsync(seedWindow);
+        }
+
+        const int count = 105;
+        var draftText = Enumerable.Range(1, count).ToDictionary(id => (long)id, id => $"draft {id}");
+        var tabs = draftText.Keys.Select(id => new SessionTab(id, null, TextEncodingKind.Utf8)).ToList();
+        await scratchStorage.SaveSessionAsync(new SessionState(tabs), draftText);
+
+        var empty = await OpenWorkspaceAsync();
+        MainWindow? restarted = null;
+        try
+        {
+            Assert.Empty(Tabs(empty));
+            Assert.Equal(count, ((System.Collections.IEnumerable)Field(empty, "_closedTabs")).Cast<SessionTab>().Count());
+            Invoke(empty, "NewTab", "new scratch draft");
+            await CallAsync(empty, "SaveSessionAsync");
+            var checkpoint = Assert.IsType<SessionState>(await scratchStorage.LoadSessionAsync());
+            Assert.Equal("new scratch draft", await scratchStorage.LoadDraftAsync(checkpoint.Tabs.Single()));
+            Assert.Equal(count, checkpoint.ClosedTabs!.Count);
+            Assert.Equal("draft 1", await scratchStorage.LoadDraftAsync(checkpoint.ClosedTabs.Single(tab => tab.Id == 1)));
+            await CloseAsync(empty);
+
+            restarted = await OpenWorkspaceAsync();
+            Assert.Empty(Tabs(restarted));
+            Assert.Equal(count + 1, ((System.Collections.IEnumerable)Field(restarted, "_closedTabs")).Cast<SessionTab>().Count());
+            var lastRetainedDraft = ((System.Collections.IEnumerable)Field(restarted, "_closedTabs")).Cast<SessionTab>().Single(tab => tab.Id == 105);
+            Assert.Equal("draft 105", await scratchStorage.LoadDraftAsync(lastRetainedDraft));
+        }
+        finally
+        {
+            if (empty.IsVisible) await CloseAsync(empty);
+            if (restarted is { IsVisible: true }) await CloseAsync(restarted);
+        }
+    });
     [Fact]
     public Task CorruptNamedWorkspaceIsReportedAndItsFilesAreNotOverwritten() => HeadlessTests.RunAsync(async profile =>
     {

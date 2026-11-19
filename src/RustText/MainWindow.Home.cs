@@ -46,9 +46,16 @@ public partial class MainWindow
         var workspaceButtons = new WrapPanel { ItemSpacing = 5, LineSpacing = 4 };
         foreach (var workspace in _workspace.Catalog.Workspaces)
         {
-            var label = workspace.Id == _workspaceId ? workspace.Name + " · открыто" : workspace.Name;
+            var label = workspace.Id == _workspaceId && !_startEmpty ? workspace.Name + " · открыто" : workspace.Name;
             workspaceButtons.Children.Add(FocusButton(Button(label,
                 () => Run(() => SwitchWorkspaceAsync(workspace.Id)))));
+        }
+        if (_windowId == WorkspaceCatalogStore.PrimaryWindowId)
+        {
+            var emptyStart = FocusButton(Button(_startEmpty ? "Пустое окно · открыто" : "Пустое окно",
+                () => Run(EnterEmptyStartupAsync)));
+            emptyStart.IsEnabled = !_startEmpty;
+            workspaceButtons.Children.Add(emptyStart);
         }
         workspaceButtons.Children.Add(FocusButton(Button("Управление…", () => Run(ShowWorkspacesAsync))));
         head.Children.Add(new Border
@@ -83,7 +90,7 @@ public partial class MainWindow
         _lastHomeRefresh = DateTimeOffset.Now;
         _refreshHome = Rebuild;
         Rebuild();
-        SetStatus("История файлов");
+        SetStatus(_workspaceLoadWarning ?? "История файлов");
         FormatText.Text = "";
 
         void Rebuild()

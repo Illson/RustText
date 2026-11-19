@@ -125,7 +125,9 @@ public partial class MainWindow
 
     private async Task SwitchWorkspaceCoreAsync(string workspaceId)
     {
-        if (workspaceId == _workspaceId) return;
+        var enteringEmpty = workspaceId == EmptyStartupWindowId;
+        var sourceId = _startEmpty ? EmptyStartupWindowId : _workspaceId;
+        if (workspaceId == sourceId || (enteringEmpty && _windowId != WorkspaceCatalogStore.PrimaryWindowId)) return;
         if (_closedTabRestoreOperations > 0
             || _tabs.Values.Any(tab => tab.Closing || tab.Loading || tab.CheckingSession
                 || tab.Saving || tab.Log?.HasPendingEdit == true))
@@ -161,25 +163,28 @@ public partial class MainWindow
         }
 
         _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-        if (!_workspace.Catalog.Workspaces.Any(item => item.Id == workspaceId))
+        if (!enteringEmpty && !_workspace.Catalog.Workspaces.Any(item => item.Id == workspaceId))
             throw new KeyNotFoundException("Рабочее пространство не найдено.");
         var cachedView = _workspaceViews.TryGetValue(workspaceId, out var existingView) ? existingView : null;
-        var targetStorage = _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession);
+        var targetWindowId = _windowId;
+        var targetStorage = enteringEmpty
+            ? _workspace.GetStorage(WorkspaceCatalogStore.DefaultWorkspaceId, EmptyStartupWindowId)
+            : _workspace.GetStorage(workspaceId, targetWindowId, _shareDefaultSession);
         var targetState = cachedView is null ? await targetStorage.LoadSessionAsync(_lifetime.Token) : null;
         if (cachedView is null && targetState is null && targetStorage.HasSessionCheckpoint)
         {
             _workspace.UnavailableSessions.Add(StorageCacheKey(targetStorage));
             throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
         }
-        if (cachedView is null && targetState is null && _windowId != WorkspaceCatalogStore.PrimaryWindowId)
+        if (cachedView is null && targetState is null && targetWindowId != WorkspaceCatalogStore.PrimaryWindowId)
         {
             var primaryState = await _workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId)
                 .LoadSessionAsync(_lifetime.Token);
             if (primaryState is not null)
             {
                 await CopyWorkspaceSessionAsync(_workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId),
-                    _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession));
-                targetState = await _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession).LoadSessionAsync(_lifetime.Token);
+                    _workspace.GetStorage(workspaceId, targetWindowId, _shareDefaultSession));
+                targetState = await _workspace.GetStorage(workspaceId, targetWindowId, _shareDefaultSession).LoadSessionAsync(_lifetime.Token);
             }
             else if (_workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId).HasSessionCheckpoint)
             {
@@ -188,16 +193,21 @@ public partial class MainWindow
             }
         }
 
+        _workspaceLoadWarning = null;
         await SaveWorkspaceSessionAsync(excludeWindow: null);
-        await _workspace.CatalogStore.SetWindowWorkspaceAsync(_windowId, workspaceId, _lifetime.Token);
-        _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-        _workspaceViews[_workspaceId] = CaptureWorkspaceView();
+        if (!enteringEmpty)
+        {
+            await _workspace.CatalogStore.SetWindowWorkspaceAsync(targetWindowId, workspaceId, _lifetime.Token);
+            _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        }
+        if (!_startEmpty || _tabs.Count > 0) _workspaceViews[sourceId] = CaptureWorkspaceView();
         CloseSearchPanel();
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids) grid.Children.Clear();
         _splitGrids.Clear();
 
-        _workspaceId = workspaceId;
+        _workspaceId = enteringEmpty ? WorkspaceCatalogStore.DefaultWorkspaceId : workspaceId;
+        _startEmpty = enteringEmpty;
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
 
         if (cachedView is { } view)
@@ -205,6 +215,7 @@ public partial class MainWindow
             _tabs = view.Tabs;
             _root = view.Root;
             _active = view.Active;
+            _workspaceViews.Remove(workspaceId);
             Width = Math.Clamp(view.Width, MinWidth, 4000);
             Height = Math.Clamp(view.Height, MinHeight, 2400);
             WindowState = view.Maximized ? WindowState.Maximized : WindowState.Normal;
@@ -212,14 +223,18 @@ public partial class MainWindow
             else ShowGroups();
             ApplyTextAppearance();
             RefreshHistoryMenus();
-            _workspaceViews.Remove(workspaceId);
             return;
         }
 
         _tabs = [];
         _root = _active = MakeGroup();
         _closedTabs.Clear();
-        if (targetState is not null)
+        if (enteringEmpty)
+        {
+            if (targetState is not null) AddEmptyStartupHistory(targetState);
+            await ShowHomeAsync();
+        }
+        else if (targetState is not null)
         {
             _closedTabs.AddRange((targetState.ClosedTabs ?? []).Take(100));
             MountSessionTabs(targetState, pending: false);
@@ -234,6 +249,8 @@ public partial class MainWindow
         RefreshHistoryMenus();
     }
 
+    private Task EnterEmptyStartupAsync() => SwitchWorkspaceAsync(EmptyStartupWindowId);
+
     private async Task OpenWorkspaceWindowAsync(string workspaceId)
     {
         await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
@@ -243,7 +260,7 @@ public partial class MainWindow
             if (!_workspace.Catalog.Workspaces.Any(item => item.Id == workspaceId))
                 throw new KeyNotFoundException("Рабочее пространство не найдено.");
             StorageService sourceStorage;
-            if (_workspaceId == workspaceId)
+            if (!_startEmpty && _workspaceId == workspaceId)
             {
                 await SaveWorkspaceSessionAsync(excludeWindow: null);
                 sourceStorage = SessionStorage;

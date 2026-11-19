@@ -13,6 +13,7 @@ namespace RustText.Demo;
 
 public partial class MainWindow
 {
+    private const string EmptyStartupWindowId = "window:fffffffffffffffffffffffffffffff0";
     private readonly StorageService _storage;
     private List<SessionTab> _closedTabs = [];
     private IReadOnlyList<RecentFileEntry> _recent = [];
@@ -25,6 +26,7 @@ public partial class MainWindow
     private SessionState? _pendingSession;
     private bool _validatingStartupSession;
     private bool _mountingSessionTabs;
+    private bool _emptyStartupPreserveAllHistory;
 
     private async Task RestoreSessionAsync()
     {
@@ -52,16 +54,27 @@ public partial class MainWindow
         {
             _workspaceId = assignedWorkspace;
         }
-        _closedTabs = _workspace.GetClosedTabs(SessionStorage);
         _startEmpty = _windowId == WorkspaceCatalogStore.PrimaryWindowId
             && _settings.WorkspaceStartupMode == WorkspaceStartupMode.Empty;
+        if (_startEmpty)
+        {
+            _workspaceId = WorkspaceCatalogStore.DefaultWorkspaceId;
+        }
+        _closedTabs = _workspace.GetClosedTabs(SessionStorage);
 
         var restore = _startEmpty
-            ? Task.FromResult<SessionState?>(null)
+            ? SessionStorage.LoadSessionAsync(_lifetime.Token)
             : SessionStorage.LoadSessionAsync(_lifetime.Token, ShowPendingSessionAsync);
 
         SessionState? state;
         try { state = await restore; }
+        catch (Exception error) when (_startEmpty && IsUserError(error))
+        {
+            state = null;
+            _workspace.UnavailableSessions.Add(WorkspaceCacheKey);
+            _workspaceLoadWarning = $"Черновики пустого окна не удалось прочитать. {error.Message}";
+            SetStatus(_workspaceLoadWarning);
+        }
         finally { _validatingStartupSession = false; }
         if (_closed) return;
 
@@ -78,6 +91,24 @@ public partial class MainWindow
         {
             _settings = migratedSettings;
             await _storage.SaveSettingsAsync(_settings, _lifetime.Token);
+        }
+
+        if (_startEmpty)
+        {
+            if (state is null && SessionStorage.HasSessionCheckpoint)
+            {
+                _workspace.UnavailableSessions.Add(WorkspaceCacheKey);
+                _workspaceLoadWarning ??= "Черновики пустого окна не удалось прочитать. Их файлы оставлены без изменений.";
+                SetStatus(_workspaceLoadWarning);
+            }
+            else if (state is not null)
+            {
+                _workspaceLoadWarning = null;
+                AddEmptyStartupHistory(state);
+            }
+            else _workspaceLoadWarning = null;
+            RefreshHistoryMenus();
+            return;
         }
 
         if (state is null && _pendingSession is null)
@@ -112,6 +143,29 @@ public partial class MainWindow
 
         RefreshHistoryMenus();
     }
+
+    private void AddEmptyStartupHistory(SessionState state)
+    {
+        _emptyStartupPreserveAllHistory |= state.Tabs.Count > 0 || (state.ClosedTabs?.Count ?? 0) > 100;
+        _workspace.NextId = Math.Max(_workspace.NextId,
+            state.Tabs.Concat(state.ClosedTabs ?? []).Select(tab => tab.Id).DefaultIfEmpty().Max());
+        var existingIds = _closedTabs.Select(tab => tab.Id).ToHashSet();
+        var reopenedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var tab in state.Tabs)
+        {
+            if (existingIds.Add(tab.Id))
+                _closedTabs.Insert(0, tab with { ClosedAtMs = tab.ClosedAtMs ?? reopenedAt });
+        }
+        foreach (var tab in state.ClosedTabs ?? [])
+        {
+            if (existingIds.Add(tab.Id)) _closedTabs.Add(tab);
+        }
+        if (!_emptyStartupPreserveAllHistory && _closedTabs.Count > 100) _closedTabs.RemoveRange(100, _closedTabs.Count - 100);
+    }
+
+    private bool PreserveEmptyHistory(StorageService storage) =>
+        _emptyStartupPreserveAllHistory && _workspace.SessionStores.TryGetValue(
+            (WorkspaceCatalogStore.DefaultWorkspaceId, EmptyStartupWindowId), out var scratch) && ReferenceEquals(scratch, storage);
 
     private async Task ShowPendingSessionAsync(SessionState state)
     {
@@ -273,7 +327,7 @@ public partial class MainWindow
     {
         var activeStorage = SessionStorage;
         var activeTabs = _tabs;
-        if (forgetClosedTab is null && ((!_restoreFinished && !_closing) || (_startEmpty && _tabs.Count == 0)))
+        if (forgetClosedTab is null && !_restoreFinished && !_closing)
             return;
 
         await _workspace.SaveGate.WaitAsync();
@@ -285,6 +339,7 @@ public partial class MainWindow
             {
                 if (_workspace.UnavailableSessions.Contains(StorageCacheKey(storage))) continue;
                 var isActive = ReferenceEquals(storage, activeStorage);
+                if (isActive && _startEmpty && _tabs.Count == 0 && forgetClosedTab is null) continue;
                 var views = SessionViews(storage, isActive ? excludeWindow : null).ToList();
                 if (views.Count == 0) continue;
                 await SaveSessionViewsAsync(storage, views, isActive ? forgetClosedTab : null, isActive && _closing);
@@ -324,7 +379,8 @@ public partial class MainWindow
         var state = entries.Select(entry => entry.Owner.CaptureTab(entry.Tab)).ToList();
         var selected = home.Tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, home.Active.Tabs.SelectedItem));
         var history = _workspace.GetClosedTabs(storage);
-        var capturedHistory = history.Where(tab => tab.Id != forget?.Id).Take(100).ToList();
+        var preserveHistory = owner.PreserveEmptyHistory(storage);
+        var capturedHistory = history.Where(tab => tab.Id != forget?.Id).Take(preserveHistory ? int.MaxValue : 100).ToList();
         var session = new SessionState(state, capturedHistory, Math.Max(0, Array.IndexOf(tabs, selected)),
             double.IsFinite(home.Width) ? home.Width : 1080, double.IsFinite(home.Height) ? home.Height : 700,
             home.Maximized, home.WordWrap, home.FontSize, owner.CaptureLayout(home.Root, home.Tabs), home.Active.Id);
@@ -348,7 +404,7 @@ public partial class MainWindow
                 readers.Add(tab.Id, document.CreateSnapshot().CreateReader);
         }
 
-        var committed = await storage.SaveSessionWithDraftReadersAsync(session, readers, _lifetime.Token);
+        var committed = await storage.SaveSessionWithDraftReadersAsync(session, readers, _lifetime.Token, preserveAllClosedTabs: preserveHistory);
         existing.Clear();
         for (var i = 0; i < tabs.Length; i++)
         {
@@ -708,7 +764,7 @@ public partial class MainWindow
 
             _closedTabs.RemoveAll(item => item.Id == saved.Id);
             _closedTabs.Insert(0, saved);
-            if (!deferHistoryLimit && _closedTabs.Count > 100) _closedTabs.RemoveAt(_closedTabs.Count - 1);
+            if (!deferHistoryLimit && !(_startEmpty && _emptyStartupPreserveAllHistory) && _closedTabs.Count > 100) _closedTabs.RemoveAt(_closedTabs.Count - 1);
         }
         finally { _workspace.SaveGate.Release(); }
 

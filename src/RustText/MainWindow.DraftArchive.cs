@@ -25,7 +25,7 @@ public partial class MainWindow
                 await ArchiveWorkspaceDraftsAsync(SessionStorage, _closedTabs, active: true);
                 foreach (var (id, view) in _workspaceViews.ToArray())
                 {
-                    if (id == _workspaceId || _workspace.Catalog?.Workspaces.Any(entry => entry.Id == id) != true
+                    if ((id != EmptyStartupWindowId && _workspace.Catalog?.Workspaces.Any(entry => entry.Id == id) != true)
                         || _workspace.Windows.Any(window => !window._closed && ReferenceEquals(window.SessionStorage, view.Storage)))
                         continue;
                     await ArchiveWorkspaceDraftsAsync(view.Storage, view.ClosedTabs, active: false);
@@ -93,7 +93,8 @@ public partial class MainWindow
             {
                 if (await storage.LoadSessionAsync(token) is not { } checkpoint) return;
                 var remaining = history.Where(tab => tab.Id != archived?.Id).ToList();
-                var updated = await storage.SaveSessionWithDraftReadersAsync(checkpoint with { ClosedTabs = remaining }, null, token);
+                var updated = await storage.SaveSessionWithDraftReadersAsync(checkpoint with { ClosedTabs = remaining }, null, token,
+                    preserveAllClosedTabs: PreserveEmptyHistory(storage));
                 history.Clear();
                 history.AddRange(updated.ClosedTabs ?? []);
                 if (archived is not null)
