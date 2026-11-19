@@ -35,16 +35,14 @@ git status --short --branch
 - Запусти целевые тесты и затем `dotnet test RustText.slnx` из корня на Windows x64. При изменении поставки запусти Native AOT по [README](../README.md#запуск-и-сборка) и скопируй EXE в пустой каталог для ручной проверки. Папка публикации должна содержать один `rusttext.exe`.
 - Тестируй окно с временным профилем `RUSTTEXT_PROFILE_DIR` и копиями файлов. Для фоновых проверок используй отдельный неактивный рабочий стол. Фикстуры и сценарии описаны в [отчёте о проверках](verification.md). При проверке обновлений используй временную копию установки и тестовый ZIP с контрольной суммой.
 
-Для пакета обновления создай ZIP из одного опубликованного EXE и запиши рядом его SHA-256. Пример из корня worktree.
+Собери обе пары архивов и контрольных сумм из одного опубликованного EXE. Используй новый каталог для каждого прогона. Пример из корня worktree.
 
 ~~~powershell
 $exe = 'src/RustText/bin/Release/net11.0/win-x64/publish/rusttext.exe'
-$zip = 'target/RustText.NET-win-x64.zip'
-New-Item -ItemType Directory -Path target -Force | Out-Null
-Compress-Archive -LiteralPath $exe -DestinationPath $zip -Force
-$hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-"$hash  RustText.NET-win-x64.zip" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
+./tools/Package-RustText.ps1 -Executable $exe -OutputDirectory 'target/release-assets'
 ~~~
+
+Приложи к стабильному релизу четыре файла из `target/release-assets`. RustText 0.2.2 ожидает `RustText.zip` и `RustText.zip.sha256`. Сборки .NET ожидают `RustText.NET-win-x64.zip` и `RustText.NET-win-x64.zip.sha256`. Контрольные суммы архивов совпадают, а имя в каждом файле SHA-256 соответствует своему архиву.
 
 ## Коммит, push и проверка на GitHub
 
