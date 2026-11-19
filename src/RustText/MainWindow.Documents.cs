@@ -70,13 +70,33 @@ public partial class MainWindow
 
     private async Task OpenPathsAsync(IEnumerable<string> paths, bool asLog = false, TextEncodingKind? encoding = null)
     {
+        var pending = new List<OpenRequest>();
+        WorkTab? last = null;
         foreach (var path in paths)
         {
-            await GuardAsync(() => OpenPathAsync(path, asLog, encoding));
+            try
+            {
+                var request = PrepareOpen(path, asLog, encoding);
+                last = request.Tab;
+                if (request.IsNew || encoding is not null) pending.Add(request);
+            }
+            catch (Exception error) when (IsUserError(error)) { SetStatus(error.Message); }
         }
+        if (last is null) return;
+        Select(last);
+        await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
+        foreach (var request in pending)
+            await GuardAsync(() => LoadOpenRequestAsync(request, encoding));
     }
 
     private async Task OpenPathAsync(string path, bool asLog = false, TextEncodingKind? encoding = null)
+    {
+        var request = PrepareOpen(path, asLog, encoding);
+        Select(request.Tab);
+        await LoadOpenRequestAsync(request, encoding);
+    }
+
+    private OpenRequest PrepareOpen(string path, bool asLog, TextEncodingKind? encoding)
     {
         var fullPath = Path.GetFullPath(path);
         var file = new FileInfo(fullPath);
@@ -89,23 +109,34 @@ public partial class MainWindow
         var existing = _tabs.Values.FirstOrDefault(tab => SamePath(tab.Path, fullPath) && tab.IsLog == useLog);
         if (existing is not null)
         {
-            Select(existing);
-            if (encoding is not null && (existing.Editor is not null || existing.Log is not null) && !existing.Dirty)
-            {
-                await ReloadAsync(existing, encoding);
-            }
-
-            return;
+            return new(existing, false, useLog);
         }
 
-        var tab = AddTab();
+        var tab = AddTab(select: false);
         tab.Path = fullPath;
         tab.Encoding = encoding ?? TextEncodingKind.Utf8;
+        tab.PendingLog = useLog;
+        tab.Loading = true;
+        tab.Item.Content = new TextBlock { Text = "Ожидание загрузки…", Margin = new Thickness(18) };
+        UpdateTab(tab);
+        return new(tab, true, useLog);
+    }
+
+    private async Task LoadOpenRequestAsync(OpenRequest request, TextEncodingKind? encoding)
+    {
+        var tab = request.Tab;
+        if (_closed || !_tabs.TryGetValue(tab.Id, out var current) || !ReferenceEquals(tab, current)) return;
+        if (!request.IsNew)
+        {
+            if (encoding is not null && !tab.Loading && !tab.Dirty)
+                await ReloadAsync(tab, encoding);
+            return;
+        }
         try
         {
-            if (useLog)
+            if (request.AsLog)
             {
-                AttachLog(tab, fullPath, encoding);
+                AttachLog(tab, tab.Path!, encoding);
             }
             else
             {
@@ -116,10 +147,17 @@ public partial class MainWindow
         }
         catch
         {
-            RemoveTab(tab);
+            if (_tabs.TryGetValue(tab.Id, out current) && ReferenceEquals(tab, current)) RemoveTab(tab);
             throw;
         }
+        finally
+        {
+            tab.PendingLog = false;
+            tab.Loading = false;
+        }
     }
+
+    private sealed record OpenRequest(WorkTab Tab, bool IsNew, bool AsLog);
 
     private async Task LoadFileAsync(WorkTab tab, TextEncodingKind? encoding = null)
     {
@@ -170,6 +208,7 @@ public partial class MainWindow
         _ = DetachEditor(tab);
         tab.Log?.Close();
         tab.Log = null;
+        tab.OpeningPage = false;
         tab.LastWorked = DateTimeOffset.Now;
         var editor = new TextEditor
         {
@@ -625,6 +664,15 @@ public partial class MainWindow
         _ = DetachEditor(tab);
         log.SetTextSize(_fontSize);
         tab.Log = log;
+        tab.OpeningPage = !log.InitialPageLoad.IsCompleted;
+        if (tab.OpeningPage)
+        {
+            Run(async () =>
+            {
+                try { await log.InitialPageLoad; }
+                finally { if (ReferenceEquals(tab.Log, log)) tab.OpeningPage = false; }
+            });
+        }
         log.StatusChanged += status =>
         {
             if (ReferenceEquals(tab, ActiveTab))
@@ -775,7 +823,7 @@ public partial class MainWindow
 
     private async Task CloseTabAsync(WorkTab tab)
     {
-        if (_closing || !_tabs.ContainsKey(tab.Id) || _confirmingTabClose || tab.Closing)
+        if (_closing || !_tabs.ContainsKey(tab.Id) || _confirmingTabClose || tab.Closing || tab.CheckingSession)
         {
             return;
         }
@@ -891,7 +939,7 @@ public partial class MainWindow
     {
         var title = tab.Path is { } path ? Path.GetFileName(path) : UntitledName(tab);
         tab.Label.Text = title;
-        tab.DirtyMark.Opacity = tab.Dirty ? 1 : 0;
+        tab.RefreshHeaderMark();
         AutomationProperties.SetName(tab.Item, title + (tab.Dirty ? ", изменено" : ""));
         ToolTip.SetTip(tab.Label, tab.Path ?? title);
         if (ReferenceEquals(tab, ActiveTab))
@@ -1028,11 +1076,14 @@ public partial class MainWindow
         public TabItem Item { get; } = new();
         public TextBlock Label { get; set; } = null!;
         public TextBlock DirtyMark { get; set; } = null!;
+        public TextBlock LoadMark { get; set; } = null!;
+        public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }
         public TextEditor? Editor { get; set; }
         public LogView? Log { get; set; }
-        public bool IsLog => Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
-        public SessionTab? Deferred { get; set; }
+        public bool IsLog => PendingLog || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
+        public bool PendingLog { get; set; }
+        public SessionTab? Deferred { get => field; set { field = value; RefreshHeaderMark(); } }
         public SessionTab? Recovery { get; set; }
         public TextEncodingKind Encoding { get; set; }
         public LineEndingKind Ending { get; set; } = OperatingSystem.IsWindows() ? LineEndingKind.CrLf : LineEndingKind.Lf;
@@ -1041,7 +1092,9 @@ public partial class MainWindow
         public string? DiskStatus { get; set; }
         public bool Dirty { get; set; }
         public bool RestoredDirty { get; set; }
-        public bool Loading { get; set; }
+        public bool Loading { get => field; set { field = value; RefreshHeaderMark(); } }
+        public bool CheckingSession { get => field; set { field = value; RefreshHeaderMark(); } }
+        public bool OpeningPage { get => field; set { field = value; RefreshHeaderMark(); } }
         public bool Closing { get; set; }
         public bool Saving { get; set; }
         public bool AutoRefresh { get; set; } = true;
@@ -1057,5 +1110,17 @@ public partial class MainWindow
         public TextBlock? JsonMessage { get; set; }
         public CancellationTokenSource? JsonCancellation { get; set; }
         public CancellationTokenSource? LoadCancellation { get; set; }
+
+        public void RefreshHeaderMark()
+        {
+            var loading = Loading || CheckingSession || OpeningPage;
+            var waiting = Deferred is not null;
+            LoadMark.IsVisible = loading || waiting;
+            LoadMark.Text = loading ? "↻" : "◷";
+            DirtyMark.Opacity = !LoadMark.IsVisible && Dirty ? 1 : 0;
+            var status = loading ? "Загрузка вкладки" : waiting ? "Загрузится при выборе" : null;
+            AutomationProperties.SetName(LoadMark, status);
+            ToolTip.SetTip(HeaderMarks, status);
+        }
     }
 }

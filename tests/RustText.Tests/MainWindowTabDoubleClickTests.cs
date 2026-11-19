@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Input;
+using Avalonia.Media;
 using Avalonia.VisualTree;
 using RustText.Demo;
 using Xunit;
@@ -13,6 +14,93 @@ namespace RustText.Tests;
 public sealed class MainWindowTabDoubleClickTests
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    [Fact]
+    public Task BatchOpenShowsAllLoadingHeadersBeforeReadingFiles() => HeadlessTests.RunAsync(async profile =>
+    {
+        var paths = new[] { Path.Combine(profile, "one.txt"), Path.Combine(profile, "two.txt"), Path.Combine(profile, "three.txt") };
+        foreach (var path in paths) await File.WriteAllTextAsync(path, path);
+        var window = new MainWindow();
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_restoreFinished"));
+        try
+        {
+            var open = (Task)Invoke(window, "OpenPathsAsync", paths, false, null)!;
+            var tabs = ((System.Collections.IDictionary)Field<object>(window, "_tabs")).Values.Cast<object>().ToArray();
+            Assert.Equal(3, tabs.Length);
+            Assert.All(tabs, tab =>
+            {
+                var mark = (TextBlock)Property(tab, "LoadMark")!;
+                Assert.True(mark.IsVisible);
+                Assert.Equal("↻", mark.Text);
+                Assert.Null(Property(tab, "Editor"));
+            });
+            await open;
+            Assert.All(tabs, tab =>
+            {
+                Assert.NotNull(Property(tab, "Editor"));
+                Assert.False(((TextBlock)Property(tab, "LoadMark")!).IsVisible);
+            });
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task DragFromTabPaddingAnimatesReorderingAndCanBeCancelledOrDetached() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = new MainWindow { Width = 1050, Height = 720 };
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_restoreFinished"));
+        var workspace = Field<object>(window, "_workspace");
+        var windows = (System.Collections.IList)Property(workspace, "Windows")!;
+        try
+        {
+            foreach (var text in new[] { "first tab", "second tab", "third tab" }) Invoke(window, "NewTab", text);
+            var tabs = (WorkspaceTabs)Property(Field<object>(window, "_active"), "Tabs")!;
+            var original = tabs.Items.OfType<TabItem>().ToArray();
+            await HeadlessTests.WaitForAsync(() => original.All(tab => tab.Bounds.Width > 0));
+            Point Padding(TabItem tab) => tab.TranslatePoint(new Point(3, tab.Bounds.Height - 3), window)!.Value;
+            var afterLast = original[^1].TranslatePoint(new Point(original[^1].Bounds.Width + 12, 16), window)!.Value;
+            var start = Padding(original[0]);
+            window.MouseDown(start, MouseButton.Left, RawInputModifiers.None);
+            window.MouseMove(afterLast, RawInputModifiers.LeftMouseButton);
+            var drag = workspace.GetType().GetField("Drag")!.GetValue(workspace);
+            Assert.NotNull(drag);
+            Assert.True(((Window)Property(drag, "Preview")!).IsVisible);
+            await HeadlessTests.WaitForAsync(() => original[1].RenderTransform is TranslateTransform { X: < -1 });
+            window.MouseUp(afterLast, MouseButton.Left, RawInputModifiers.None);
+            Assert.Equal(new[] { original[1], original[2], original[0] }, tabs.Items.OfType<TabItem>());
+
+            await HeadlessTests.WaitForAsync(() => Padding(original[0]).X > Padding(original[2]).X);
+            var outside = new Point(window.Bounds.Width + 120, Padding(original[0]).Y + 90);
+            start = Padding(original[0]);
+            window.MouseDown(start, MouseButton.Left, RawInputModifiers.None);
+            window.MouseMove(outside, RawInputModifiers.LeftMouseButton);
+            drag = workspace.GetType().GetField("Drag")!.GetValue(workspace);
+            Assert.NotNull(drag);
+            var preview = (Window)Property(drag, "Preview")!;
+            Assert.Equal("first tab  ●", Assert.IsType<TextBlock>(Assert.IsType<Border>(preview.Content).Child).Text);
+            window.KeyPress(Key.Escape, RawInputModifiers.None, PhysicalKey.Escape, "");
+            window.KeyRelease(Key.Escape, RawInputModifiers.None, PhysicalKey.Escape, "");
+            window.MouseUp(outside, MouseButton.Left, RawInputModifiers.None);
+            Assert.False(preview.IsVisible);
+            Assert.Single(windows);
+
+            window.MouseDown(start, MouseButton.Left, RawInputModifiers.None);
+            window.MouseMove(outside, RawInputModifiers.LeftMouseButton);
+            Assert.NotNull(workspace.GetType().GetField("Drag")!.GetValue(workspace));
+            Assert.Null(Invoke(window, "DropWindowAt", window.PointToScreen(outside)));
+            window.MouseUp(outside, MouseButton.Left, RawInputModifiers.None);
+            Assert.Equal(2, windows.Count);
+            Assert.Equal(2, tabs.Items.Count);
+            var detached = Assert.IsType<MainWindow>(windows[1]);
+            Assert.Equal(1, TabCount(detached));
+        }
+        finally
+        {
+            foreach (var open in windows.Cast<MainWindow>().Reverse().ToArray()) await CloseAsync(open);
+        }
+    });
 
     [Fact]
     public Task DoubleClickOnBlankTabStripCreatesTabButContentAndToolbarDoNot() =>
@@ -107,6 +195,14 @@ public sealed class MainWindowTabDoubleClickTests
     }
 
     private static int TabCount(MainWindow window) => ((System.Collections.IDictionary)Field<object>(window, "_tabs")).Count;
+
+    private static object? Property(object owner, string name) => owner.GetType().GetProperty(name)!.GetValue(owner);
+
+    private static async Task CloseAsync(MainWindow window)
+    {
+        window.Close();
+        await HeadlessTests.WaitForAsync(() => Field<bool>(window, "_closed"));
+    }
 
     private static T Field<T>(object owner, string name) =>
         (T)owner.GetType().GetField(name, Private)!.GetValue(owner)!;

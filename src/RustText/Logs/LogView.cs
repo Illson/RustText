@@ -224,7 +224,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _logText.LayoutUpdated += OnLogTextLayoutUpdated;
         RefreshButtons();
 
-        _ = LoadPageAsync(Math.Max(_hiddenOffset, restoreState?.Offset ?? _hiddenOffset), saveHistory: false, allowFollowEnd: bookmarkRestorable);
+        InitialPageLoad = LoadPageAsync(Math.Max(_hiddenOffset, restoreState?.Offset ?? _hiddenOffset), saveHistory: false, allowFollowEnd: bookmarkRestorable);
         LoadMinimapSamples();
         StartIndexIfNeeded();
         if (_autoRefresh)
@@ -236,6 +236,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     public event Action<string>? StatusChanged;
 
     public string Path => _path;
+    public Task InitialPageLoad { get; }
     public bool IsReadOnly => _pageEdit is null;
     public bool AutoRefresh => _autoRefresh;
     public long? CurrentOffset => _page?.StartOffset;

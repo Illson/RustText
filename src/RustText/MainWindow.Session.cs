@@ -21,9 +21,14 @@ public partial class MainWindow
     private MenuItem? _closedDraftsMenu;
     private Action? _refreshHome;
     private DateTimeOffset _lastHomeRefresh;
+    private SessionState? _pendingSession;
+    private bool _validatingStartupSession;
+    private bool _mountingSessionTabs;
 
     private async Task RestoreSessionAsync()
     {
+        _validatingStartupSession = true;
+        var restore = _storage.LoadSessionAsync(_lifetime.Token, ShowPendingSessionAsync);
         try
         {
             _settings = await _storage.LoadSettingsAsync(_lifetime.Token);
@@ -35,57 +40,99 @@ public partial class MainWindow
             SetStatus(error.Message);
         }
 
-        var state = await _storage.LoadSessionAsync(_lifetime.Token);
-        if (state is null)
+        SessionState? state;
+        try { state = await restore; }
+        finally { _validatingStartupSession = false; }
+        if (_closed) return;
+
+        if (state is null && _pendingSession is null)
         {
             RefreshHistoryMenus();
             return;
         }
 
-        Width = Math.Clamp(state.WindowWidth, MinWidth, 4000);
-        Height = Math.Clamp(state.WindowHeight, MinHeight, 2400);
-        if (state.Maximized)
+        if (state is not null) _closedTabs.AddRange((state.ClosedTabs ?? []).Take(100));
+        if (state is null || !ReferenceEquals(state, _pendingSession))
         {
-            WindowState = WindowState.Maximized;
+            MountSessionTabs(state ?? new SessionState([]), pending: false);
         }
-
-        _wordWrap = state.Wrap;
-        _fontSize = Math.Clamp(state.FontSize, 8, 48);
-        _closedTabs.AddRange((state.ClosedTabs ?? []).Take(100));
-        _workspace.NextId = Math.Max(_workspace.NextId, state.Tabs.Concat(_closedTabs).Select(tab => tab.Id).DefaultIfEmpty().Max());
-        _root = state.Layout is { } layout ? RestoreLayout(layout) : MakeGroup();
-        var groups = Groups().ToArray();
-        _active = groups.FirstOrDefault(group => group.Id == state.ActiveGroupId) ?? groups[0];
-        foreach (var saved in state.Tabs)
+        else
         {
-            if (!_tabs.ContainsKey(saved.Id))
+            foreach (var tab in _tabs.Values.Where(tab => tab.CheckingSession))
             {
-                var group = FindSavedGroup(state.Layout, saved.Id);
-                var tab = AddTab(saved.Id, groups.FirstOrDefault(current => current.Id == group) ?? _active, false);
-                SetDeferred(tab, saved);
+                tab.CheckingSession = false;
+                tab.Item.Content = DeferredContent(tab);
             }
         }
+        _pendingSession = null;
 
-        foreach (var group in groups)
-        {
-            if (FindSavedSelection(state.Layout, group.Id) is { } id && _tabs.TryGetValue(id, out var tab))
-            {
-                group.Tabs.SelectedItem = tab.Item;
-            }
-        }
-
-        ShowGroups();
         if (SelectedIn(_active) is { } selected)
-        {
             await GuardAsync(() => ActivateDeferredAsync(selected));
-        }
-        else if (state.Active >= 0 && state.Active < state.Tabs.Count
-            && _tabs.TryGetValue(state.Tabs[state.Active].Id, out var active))
-        {
-            Select(active);
-        }
 
         RefreshHistoryMenus();
+    }
+
+    private async Task ShowPendingSessionAsync(SessionState state)
+    {
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            if (_closed || _pendingSession is not null) return;
+            _pendingSession = state;
+            MountSessionTabs(state, pending: true);
+        });
+        await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
+    }
+
+    private void MountSessionTabs(SessionState state, bool pending)
+    {
+        _mountingSessionTabs = true;
+        try
+        {
+            foreach (var tab in _tabs.Values.Where(tab => tab.CheckingSession).ToArray()) RemoveTab(tab);
+            var liveTabs = TabsInVisualOrder().ToArray();
+            foreach (var tab in liveTabs) tab.Group.Tabs.Items.Remove(tab.Item);
+
+            Width = Math.Clamp(state.WindowWidth, MinWidth, 4000);
+            Height = Math.Clamp(state.WindowHeight, MinHeight, 2400);
+            WindowState = state.Maximized ? WindowState.Maximized : WindowState.Normal;
+
+            _wordWrap = state.Wrap;
+            _fontSize = Math.Clamp(state.FontSize, 8, 48);
+            _workspace.NextId = Math.Max(_workspace.NextId, state.Tabs.Concat(state.ClosedTabs ?? []).Select(tab => tab.Id).DefaultIfEmpty().Max());
+            _root = state.Layout is { } layout ? RestoreLayout(layout) : MakeGroup();
+            var groups = Groups().ToArray();
+            _active = groups.FirstOrDefault(group => group.Id == state.ActiveGroupId) ?? groups[0];
+            foreach (var saved in state.Tabs)
+            {
+                if (_tabs.ContainsKey(saved.Id)) continue;
+                var group = FindSavedGroup(state.Layout, saved.Id);
+                var tab = AddTab(saved.Id, groups.FirstOrDefault(current => current.Id == group) ?? _active, false);
+                tab.CheckingSession = pending;
+                SetDeferred(tab, saved);
+            }
+
+            foreach (var group in groups)
+            {
+                if (FindSavedSelection(state.Layout, group.Id) is { } id && _tabs.TryGetValue(id, out var tab))
+                    group.Tabs.SelectedItem = tab.Item;
+            }
+
+            if (state.ActiveGroupId is null && state.Active >= 0 && state.Active < state.Tabs.Count
+                && _tabs.TryGetValue(state.Tabs[state.Active].Id, out var active))
+            {
+                _active = active.Group;
+                _active.Tabs.SelectedItem = active.Item;
+            }
+
+            foreach (var tab in liveTabs)
+            {
+                tab.Group = _active;
+                _active.Tabs.Items.Add(tab.Item);
+            }
+            if (liveTabs.LastOrDefault() is { } live) _active.Tabs.SelectedItem = live.Item;
+            ShowGroups();
+        }
+        finally { _mountingSessionTabs = false; }
     }
 
     private Group RestoreLayout(WorkspaceLayout state)
@@ -153,7 +200,8 @@ public partial class MainWindow
         }
 
         var editor = tab.Editor;
-        var log = tab.Log?.CaptureState();
+        var log = tab.Log?.CaptureState() ?? (tab.PendingLog
+            ? new LogTabState(tab.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh) : null);
         var caret = editor?.CaretOffset ?? 0;
         var selectionStart = editor?.SelectionStart ?? 0;
         var selectionLength = editor?.SelectionLength ?? 0;
@@ -310,13 +358,17 @@ public partial class MainWindow
         tab.AutoRefresh = saved.AutoRefresh ?? true;
         tab.LastWorked = saved.LastWorkedMs is { } ms ? DateTimeOffset.FromUnixTimeMilliseconds(ms) : DateTimeOffset.Now;
         tab.Deferred = saved;
-        tab.Item.Content = FocusButton(Button("Загрузить вкладку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
+        tab.Item.Content = DeferredContent(tab);
         UpdateTab(tab);
     }
 
+    private Control DeferredContent(WorkTab tab) => tab.CheckingSession
+        ? new TextBlock { Text = "Проверка сохранённой вкладки…", Margin = new Thickness(18) }
+        : FocusButton(Button("Загрузить вкладку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
+
     private async Task ActivateDeferredAsync(WorkTab tab)
     {
-        if (tab.Deferred is not { } saved || tab.Loading)
+        if (tab.Deferred is not { } saved || tab.Loading || tab.CheckingSession || _closed)
         {
             return;
         }
@@ -330,6 +382,7 @@ public partial class MainWindow
             var token = source.Token;
             var previousDeferred = saved;
             saved = await _storage.ResolveCurrentDraftAsync(saved, token);
+            token.ThrowIfCancellationRequested();
             if (ReferenceEquals(tab.Deferred, previousDeferred))
             {
                 tab.Deferred = saved;

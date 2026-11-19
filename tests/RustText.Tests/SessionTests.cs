@@ -59,9 +59,17 @@ public sealed class SessionTests
         var latest = await storage.LoadSessionAsync();
         Assert.NotNull(latest);
         var latestDraft = storage.GetDraftPath(latest.Tabs.Single())!;
-        await File.WriteAllTextAsync(latestDraft, "corrupted bytes");
-
-        var recovered = await storage.LoadSessionAsync();
+        var pending = new List<SessionState>();
+        var recovered = await storage.LoadSessionAsync(showPendingTabs: async state =>
+        {
+            pending.Add(state);
+            if (pending.Count == 1)
+            {
+                Assert.Equal(latest.Tabs.Single().DraftRef, state.Tabs.Single().DraftRef);
+                await File.WriteAllTextAsync(latestDraft, "corrupted bytes");
+            }
+        });
+        Assert.Equal(2, pending.Count);
         Assert.NotNull(recovered);
         Assert.Equal("known-good draft", await storage.LoadDraftAsync(recovered.Tabs.Single()));
     }

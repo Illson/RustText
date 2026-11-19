@@ -110,14 +110,18 @@ internal sealed class StorageService
         return info.Exists ? (info.Length, info.LastWriteTimeUtc.Ticks) : (-1, -1);
     }
 
-    public async Task<SessionState?> LoadSessionAsync(CancellationToken cancellationToken = default)
+    public async Task<SessionState?> LoadSessionAsync(CancellationToken cancellationToken = default,
+        Func<SessionState, Task>? showPendingTabs = null)
     {
         var current = Path.Combine(_checkpoints, "latest.json");
         var backup = Path.Combine(_checkpoints, "previous.json");
         foreach (var (path, isLatest) in new[] { (current, true), (backup, false) })
         {
-            if (await ReadValidCheckpointAsync(path, cancellationToken).ConfigureAwait(false) is { } state)
+            if (await ReadCheckpointAsync(path, cancellationToken).ConfigureAwait(false) is { } state)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (showPendingTabs is not null) await showPendingTabs(state).ConfigureAwait(false);
+                if (!await ValidateSessionDraftsAsync(state, cancellationToken).ConfigureAwait(false)) continue;
                 CacheSession(state, isLatest);
                 return state;
             }
@@ -446,7 +450,7 @@ internal sealed class StorageService
         return true;
     }
 
-    private async Task<SessionState?> ReadValidCheckpointAsync(string pointerPath, CancellationToken cancellationToken)
+    private async Task<SessionState?> ReadCheckpointAsync(string pointerPath, CancellationToken cancellationToken)
     {
         try
         {
@@ -456,8 +460,7 @@ internal sealed class StorageService
             var manifest = Path.Combine(_checkpoints, checkpointName, "manifest.json");
             await using var stream = File.OpenRead(manifest);
             var state = await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.SessionState, cancellationToken).ConfigureAwait(false);
-            return state is not null && state.Tabs is not null
-                && await ValidateSessionDraftsAsync(state, cancellationToken).ConfigureAwait(false) ? state : null;
+            return state?.Tabs is not null ? state : null;
         }
         catch (Exception error) when (IsInvalidCheckpointException(error))
         {

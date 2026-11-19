@@ -4,12 +4,12 @@
         x:Class="RustText.Demo.MainWindow"
         Icon="avares://rusttext/Assets/rusttext.ico" Title="RustText" Width="1080" Height="700" MinWidth="650" MinHeight="360"
         WindowStartupLocation="CenterScreen"
-        WindowDecorations="Full"
+        WindowDecorations="BorderOnly"
         Background="{x:Static local:FocusTheme.Editor}" Foreground="{x:Static local:FocusTheme.Text}" FontSize="13">
     <Grid RowDefinitions="Auto,*,Auto,Auto">
         <Border Background="{x:Static local:FocusTheme.Chrome}" BorderBrush="{x:Static local:FocusTheme.Border}"
                 BorderThickness="0,0,0,1" MinHeight="36">
-            <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="6" Margin="8,0,0,0">
+            <Grid ColumnDefinitions="Auto,Auto,*,Auto" Margin="8,0,0,0">
                 <Button Classes="focus-quiet" Foreground="{x:Static local:FocusTheme.Text}" Padding="5,3"
                         AutomationProperties.Name="Главный экран RustText" Click="HomeClicked">
                     <StackPanel Orientation="Horizontal" Spacing="7">
@@ -21,7 +21,24 @@
                         <TextBlock Text="RustText" FontWeight="SemiBold" VerticalAlignment="Center" />
                     </StackPanel>
                 </Button>
-                <Menu Grid.Column="1" x:Name="TopMenu" Classes="focus-menu" VerticalAlignment="Center" />
+                <Menu Grid.Column="1" x:Name="TopMenu" Classes="focus-menu" Margin="6,0,0,0" VerticalAlignment="Center" />
+                <Border Grid.Column="2" Background="Transparent" PointerPressed="WindowDragPressed" />
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Stretch">
+                    <Button x:Name="CaptionMinimize" Classes="focus-caption" AutomationProperties.Name="Свернуть" Click="MinimizeWindowClicked">
+                        <Path Width="12" Height="12" Data="M 1,8 L 11,8" Stroke="{x:Static local:FocusTheme.Text}" StrokeThickness="1.4" />
+                    </Button>
+                    <Button x:Name="CaptionMaximize" Classes="focus-caption" AutomationProperties.Name="Развернуть" Click="MaximizeWindowClicked">
+                        <Grid Width="12" Height="12">
+                            <Path x:Name="MaximizeGlyph" Data="M 1,1 L 11,1 11,11 1,11 Z" Stroke="{x:Static local:FocusTheme.Text}" StrokeThickness="1.25" />
+                            <Path x:Name="RestoreGlyph" IsVisible="False" Data="M 4,1 L 11,1 11,8 M 1,4 L 8,4 8,11 1,11 Z"
+                                  Stroke="{x:Static local:FocusTheme.Text}" StrokeThickness="1.25" />
+                        </Grid>
+                    </Button>
+                    <Button x:Name="CaptionClose" Classes="focus-caption focus-caption-close" AutomationProperties.Name="Закрыть окно" Click="CloseWindowClicked">
+                        <Path Width="12" Height="12" Data="M 1,1 L 11,11 M 11,1 L 1,11" Stroke="{x:Static local:FocusTheme.Text}"
+                              StrokeThickness="1.5" StrokeLineCap="Round" />
+                    </Button>
+                </StackPanel>
             </Grid>
         </Border>
         <ContentControl Grid.Row="1" x:Name="WorkspaceHost"

@@ -66,6 +66,18 @@ public partial class MainWindow
 
     private void OnWorkspaceKey(object? sender, KeyEventArgs e)
     {
+        if (e.Key == Key.F4 && e.KeyModifiers == KeyModifiers.Alt)
+        {
+            e.Handled = true;
+            Close();
+            return;
+        }
+        if (e.Key == Key.Escape && CancelTabDrag())
+        {
+            e.Handled = true;
+            return;
+        }
+
         if (e.Key == Key.F3)
         {
             if (ActiveTab?.Log is { } log)
