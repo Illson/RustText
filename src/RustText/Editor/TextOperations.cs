@@ -148,23 +148,51 @@ internal static class TextOperations
         }
     }
 
-    public static bool LooksLikeJson(string text, string? path) =>
-        string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase)
-        || text.AsSpan().TrimStart().TrimStart('\uFEFF').TrimStart() is ['{' or '[', ..];
+    public static bool IsJsonPath(string? path) =>
+        string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase) || IsJsonLinesPath(path);
 
-    public static JsonProblem? ValidateJson(string text)
+    public static bool LooksLikeJson(string text, string? path) =>
+        IsJsonPath(path) || text.AsSpan().TrimStart().TrimStart('\uFEFF').TrimStart() is ['{' or '[', ..];
+
+    public static JsonProblem? ValidateJson(string text, string? path, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var input = JsonInput(text);
+        CheckJsonSize(input);
+        var start = text.Length - input.Length;
+        if (!UsesJsonLines(input, path))
+        {
+            return ValidateJsonValue(input, start, 1);
+        }
+
+        for (var line = 1; !input.IsEmpty; line++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var consumed = ReadJsonLine(input, out var record);
+            if (ValidateJsonValue(record, start, line) is { } problem)
+            {
+                return problem;
+            }
+
+            input = input[consumed..];
+            start += consumed;
+        }
+
+        return null;
+    }
+
+    private static JsonProblem? ValidateJsonValue(ReadOnlyMemory<char> input, int start, int lineNumber)
     {
         try
         {
-            using var parsed = ParseJson(text);
+            using var parsed = ParseJson(input);
             return null;
         }
         catch (JsonException exception)
         {
             var line = (int)(exception.LineNumber ?? 0);
             var bytes = exception.BytePositionInLine ?? 0;
-            var start = text.StartsWith('\uFEFF') ? 1 : 0;
-            var rest = text.AsSpan(start);
+            var rest = input.Span;
             for (var i = 0; i < line; i++)
             {
                 var separator = rest.IndexOf('\n');
@@ -189,41 +217,115 @@ internal static class TextOperations
                 column += rune.Utf16SequenceLength;
             }
 
-            return new JsonProblem(start + column, line + 1, column + 1, exception.Message);
+            return new JsonProblem(start + column, lineNumber + line, column + 1, exception.Message);
         }
     }
 
-    public static string FormatJson(string text)
+    public static string FormatJson(string text, string? path, string? containingText = null,
+        CancellationToken cancellationToken = default)
     {
-        using var document = ParseJson(text);
+        cancellationToken.ThrowIfCancellationRequested();
+        var input = JsonInput(text);
+        CheckJsonSize(input);
+        var jsonLines = UsesJsonLines(containingText is null ? input : JsonInput(containingText), path);
         using var memory = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(memory, new JsonWriterOptions
+        using var writer = new Utf8JsonWriter(memory, new JsonWriterOptions
         {
-            Indented = true,
+            Indented = !jsonLines,
             Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
             MaxDepth = 128
-        }))
-        {
-            document.WriteTo(writer);
-        }
+        });
 
-        if (memory.Length > JsonByteLimit)
+        if (jsonLines)
         {
-            throw new InvalidDataException("Форматированный JSON превышает 64 МиБ.");
+            while (!input.IsEmpty)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var consumed = ReadJsonLine(input, out var record);
+                using var document = ParseJson(record);
+                document.WriteTo(writer);
+                writer.Flush();
+                foreach (var separator in input.Span[record.Length..consumed])
+                {
+                    memory.WriteByte((byte)separator);
+                }
+
+                CheckFormattedJsonSize(memory.Length);
+                writer.Reset();
+                input = input[consumed..];
+            }
+        }
+        else
+        {
+            using var document = ParseJson(input);
+            document.WriteTo(writer);
+            writer.Flush();
+            CheckFormattedJsonSize(memory.Length);
         }
 
         return Encoding.UTF8.GetString(memory.GetBuffer().AsSpan(0, (int)memory.Length));
     }
 
-    private static JsonDocument ParseJson(string text)
+    private static bool IsJsonLinesPath(string? path)
     {
-        var input = text.AsSpan().TrimStart('\uFEFF');
-        if (Encoding.UTF8.GetByteCount(input) > JsonByteLimit)
+        var extension = Path.GetExtension(path.AsSpan());
+        return extension.Equals(".jsonl", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".ndjson", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool UsesJsonLines(ReadOnlyMemory<char> input, string? path)
+    {
+        if (IsJsonLinesPath(path))
+        {
+            return true;
+        }
+
+        if (string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var consumed = ReadJsonLine(input, out var first);
+        return first.Span.Trim() is ['{' or '[', .., '}' or ']']
+            && !input.Span[consumed..].IsWhiteSpace()
+            && Encoding.UTF8.GetByteCount(first.Span) <= JsonByteLimit
+            && ValidateJsonValue(first, 0, 1) is null;
+    }
+
+    private static int ReadJsonLine(ReadOnlyMemory<char> input, out ReadOnlyMemory<char> record)
+    {
+        var span = input.Span;
+        var separator = span.IndexOfAny('\r', '\n');
+        if (separator < 0)
+        {
+            record = input;
+            return input.Length;
+        }
+
+        record = input[..separator];
+        return separator + (span[separator..] is ['\r', '\n', ..] ? 2 : 1);
+    }
+
+    private static ReadOnlyMemory<char> JsonInput(string text) =>
+        text.AsMemory(text.Length - text.AsSpan().TrimStart('\uFEFF').Length);
+
+    private static JsonDocument ParseJson(ReadOnlyMemory<char> input) =>
+        JsonDocument.Parse(input, new JsonDocumentOptions { MaxDepth = 128 });
+
+    private static void CheckJsonSize(ReadOnlyMemory<char> input)
+    {
+        if (Encoding.UTF8.GetByteCount(input.Span) > JsonByteLimit)
         {
             throw new InvalidDataException("JSON превышает 64 МиБ.");
         }
+    }
 
-        return JsonDocument.Parse(input.ToString(), new JsonDocumentOptions { MaxDepth = 128 });
+    private static void CheckFormattedJsonSize(long length)
+    {
+        if (length > JsonByteLimit)
+        {
+            throw new InvalidDataException("Форматированный JSON превышает 64 МиБ.");
+        }
     }
 
     public static ListComparison CompareLists(string left, string right)

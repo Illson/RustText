@@ -40,7 +40,7 @@ internal sealed class JsonColorizer : DocumentColorizingTransformer
 
     internal static bool Applies(string? path, TextDocument document) => path is null
         ? NextNonWhitespace(document, 0) is '{' or '['
-        : string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase);
+        : TextOperations.IsJsonPath(path);
 
     internal static IEnumerable<JsonToken> Tokenize(string line, Func<bool>? colonOnNextLine = null)
     {

@@ -203,8 +203,11 @@ public partial class MainWindow
         var start = editor.SelectionLength > 0 ? editor.SelectionStart : 0;
         var length = editor.SelectionLength > 0 ? editor.SelectionLength : editor.Document.TextLength;
         var revision = tab.Revision;
-        var input = editor.Document.GetText(start, length);
-        var formatted = await Task.Run(() => TextOperations.FormatJson(input), _lifetime.Token);
+        var document = editor.Text;
+        var input = document.Substring(start, length);
+        var path = tab.Path;
+        var token = _lifetime.Token;
+        var formatted = await Task.Run(() => TextOperations.FormatJson(input, path, document, token), token);
         if (revision != tab.Revision)
         {
             throw new InvalidOperationException("Текст изменился во время форматирования.");

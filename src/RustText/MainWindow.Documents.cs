@@ -25,7 +25,7 @@ public partial class MainWindow
     // AvaloniaEdit keeps a document line object for every line, including empty ones.
     private const int MaxEditorLines = 50_000;
     private const int MaxEditorLineLength = 64 * 1024;
-    private static readonly FilePickerFileType TextFiles = new("Текст и логи") { Patterns = ["*.txt", "*.log", "*.json", "*.xml"] };
+    private static readonly FilePickerFileType TextFiles = new("Текст и логи") { Patterns = ["*.txt", "*.log", "*.json", "*.jsonl", "*.ndjson", "*.xml"] };
     private bool _confirmingTabClose;
 
     private void NewTab(string text = "")
@@ -1211,12 +1211,13 @@ public partial class MainWindow
         {
             await Task.Delay(270, source.Token);
             var text = editor.Text;
-            if (!TextOperations.LooksLikeJson(text, tab.Path))
+            var path = tab.Path;
+            if (!TextOperations.LooksLikeJson(text, path))
             {
                 return;
             }
 
-            var problem = await Task.Run(() => TextOperations.ValidateJson(text), source.Token);
+            var problem = await Task.Run(() => TextOperations.ValidateJson(text, path, source.Token), source.Token);
             if (!source.IsCancellationRequested && ReferenceEquals(tab.Editor, editor) && problem is not null)
             {
                 tab.JsonError = problem;
