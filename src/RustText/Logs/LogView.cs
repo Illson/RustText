@@ -184,6 +184,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private bool _minimapLoading;
     private bool _minimapDragging;
     private double? _pendingMinimapRatio;
+    private long _minimapRequest;
     private string _lastSearchText = string.Empty;
     private long _dataGeneration;
     private int[] _displayRowStarts = [];
@@ -1027,7 +1028,8 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task NavigateMinimapToRatioAsync(double ratio)
     {
-        if (PageNavigationBlocked) return;
+        if (_closed || PageNavigationBlocked) return;
+        var request = ++_minimapRequest;
         ratio = Math.Clamp(ratio, 0, 1);
         if (_busy)
         {
@@ -1040,17 +1042,26 @@ internal sealed partial class LogView : UserControl, IDisposable
         var target = ratio >= 1
             ? _reader.GetEndOffset(_closing.Token)
             : _hiddenOffset + (long)(available * ratio);
+        var reader = _reader;
+        var token = _closing.Token;
         try
         {
-            var aligned = await Task.Run(() => _reader.AlignToNextLine(target, _closing.Token), _closing.Token);
+            var aligned = await Task.Run(() => reader.AlignToNextLine(target, token), token);
+            if (_closed || request != _minimapRequest || !ReferenceEquals(reader, _reader)) return;
+            if (_busy)
+            {
+                _pendingMinimapRatio = ratio;
+                return;
+            }
             await LoadPageAsync(Math.Max(_hiddenOffset, aligned), saveHistory: true, allowFollowEnd: false);
         }
         catch (OperationCanceledException) when (_closing.IsCancellationRequested)
         {
         }
+        catch (ObjectDisposedException) when (_closed || !ReferenceEquals(reader, _reader)) { }
         catch (IOException error)
         {
-            SetStatus($"Переход по миникарте остановлен. {error.Message}");
+            if (!_closed && request == _minimapRequest) SetStatus($"Переход по миникарте остановлен. {error.Message}");
         }
     }
 

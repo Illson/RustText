@@ -333,8 +333,11 @@ public sealed class LogUiTests
             window.MouseUp(At(0.8), MouseButton.Left, RawInputModifiers.None);
             Assert.True(whileDragging > afterTrackPress + 500);
 
-            window.MouseMove(At(0.98));
-            window.MouseDown(At(0.98), MouseButton.Left, RawInputModifiers.None);
+            // These input events can all arrive before the first background alignment completes.
+            window.MouseMove(At(0.33));
+            window.MouseDown(At(0.33), MouseButton.Left, RawInputModifiers.None);
+            foreach (var ratio in new[] { .62, .11, .75, .21, .98 })
+                window.MouseMove(At(ratio), RawInputModifiers.LeftMouseButton);
             window.MouseUp(At(0.98), MouseButton.Left, RawInputModifiers.None);
             await HeadlessTests.WaitForAsync(() => FirstRowNumber(text.Text) > 1850);
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));
