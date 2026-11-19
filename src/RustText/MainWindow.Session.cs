@@ -215,12 +215,17 @@ public partial class MainWindow
             : FindSavedSelection(state.First, groupId) ?? FindSavedSelection(state.Second, groupId);
     }
 
-    private WorkspaceLayout CaptureLayout(Group group) => group.Axis is { } axis
-        ? new WorkspaceLayout(group.Id, Split: axis.ToString(), Ratio: group.Ratio,
-            First: CaptureLayout(group.First!), Second: CaptureLayout(group.Second!))
-        : new WorkspaceLayout(group.Id, group.Tabs.Items.OfType<TabItem>()
-            .Select(item => _tabs.Values.First(tab => ReferenceEquals(tab.Item, item)).Id).ToArray(),
-            SelectedIn(group)?.Id);
+    private WorkspaceLayout CaptureLayout(Group group, Dictionary<long, WorkTab>? tabs = null)
+    {
+        tabs ??= _tabs;
+        return group.Axis is { } axis
+            ? new WorkspaceLayout(group.Id, Split: axis.ToString(), Ratio: group.Ratio,
+                First: CaptureLayout(group.First!, tabs), Second: CaptureLayout(group.Second!, tabs))
+            : new WorkspaceLayout(group.Id, group.Tabs.Items.OfType<TabItem>()
+                .Select(item => tabs.Values.First(tab => ReferenceEquals(tab.Item, item)).Id).ToArray(),
+                group.Tabs.SelectedItem is TabItem selected
+                    ? tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, selected))?.Id : null);
+    }
 
     private SessionTab CaptureTab(WorkTab tab)
     {
@@ -310,7 +315,11 @@ public partial class MainWindow
                 Math.Max(0, index), width, height, homeWindow.WindowState == WindowState.Maximized,
                 homeWindow._wordWrap, homeWindow._fontSize, homeWindow.CaptureLayout(homeWindow._root), homeWindow._active.Id);
             var fingerprint = CheckpointFingerprint(session, tabs);
-            if (forgetClosedId is null && !_closing && _workspace.GetLastCheckpoint(cacheKey) == fingerprint) return;
+            if (forgetClosedId is null && !_closing && _workspace.GetLastCheckpoint(cacheKey) == fingerprint)
+            {
+                await SaveCachedWorkspaceViewsAsync();
+                return;
+            }
 
             var drafts = new Dictionary<long, Func<TextReader>>();
             var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
@@ -365,10 +374,80 @@ public partial class MainWindow
                 await storage.RemoveHistoryFromPreviousCheckpointAsync(removed.Id, removeBackupDraft);
                 _workspace.SetLastCheckpoint(cacheKey, fingerprint);
             }
+            await SaveCachedWorkspaceViewsAsync();
         }
         finally
         {
             _workspace.SaveGate.Release();
+        }
+    }
+
+    private async Task SaveCachedWorkspaceViewsAsync()
+    {
+        foreach (var (workspaceId, view) in _workspaceViews.ToArray())
+        {
+            var storage = _workspace.GetStorage(workspaceId, _windowId, _shareDefaultSession);
+            var cacheKey = StorageCacheKey(storage);
+            if (_workspace.UnavailableSessions.Contains(cacheKey)) continue;
+
+            var byItem = view.Tabs.Values.ToDictionary(tab => tab.Item);
+            var tabs = Groups(view.Root).SelectMany(group => group.Tabs.Items.OfType<TabItem>())
+                .Select(item => byItem[item]).ToArray();
+            if (tabs.Length == 0) continue;
+
+            var stateTabs = tabs.Select(CaptureTab).ToList();
+            var activeTab = view.Active.Tabs.SelectedItem is TabItem activeItem
+                ? view.Tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, activeItem)) : null;
+            var index = Array.IndexOf(tabs, activeTab);
+            if (index < 0) index = 0;
+            var closedTabs = _workspace.GetClosedTabs(storage).ToArray();
+            var session = new SessionState(stateTabs, closedTabs.Take(100).ToList(), index,
+                double.IsFinite(view.Width) ? view.Width : 1080, double.IsFinite(view.Height) ? view.Height : 700,
+                view.Maximized, view.WordWrap, view.FontSize, CaptureLayout(view.Root, view.Tabs), view.Active.Id);
+            var fingerprint = CheckpointFingerprint(session, tabs);
+            if (_workspace.GetLastCheckpoint(cacheKey) == fingerprint) continue;
+
+            var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
+            var draftReaders = new Dictionary<long, Func<TextReader>>();
+            var existingDrafts = _workspace.GetLiveDrafts(cacheKey);
+            for (var i = 0; i < tabs.Length; i++)
+            {
+                var tab = tabs[i];
+                if (tab.Editor is not { } editor || !(tab.Dirty || tab.Path is null)) continue;
+                var document = editor.Document;
+                liveDrafts.Add(tab.Id, (document, tab.Revision));
+                if (existingDrafts.TryGetValue(tab.Id, out var previous)
+                    && previous.Revision == tab.Revision && previous.Document.TryGetTarget(out var priorDocument)
+                    && ReferenceEquals(priorDocument, document))
+                {
+                    stateTabs[i] = stateTabs[i] with { DraftRef = previous.Saved.DraftRef, DraftSha256 = previous.Saved.DraftSha256 };
+                }
+                else
+                {
+                    var snapshot = document.CreateSnapshot();
+                    draftReaders.Add(tab.Id, snapshot.CreateReader);
+                }
+            }
+
+            var committed = await storage.SaveSessionWithDraftReadersAsync(session, draftReaders, _lifetime.Token);
+            existingDrafts.Clear();
+            for (var i = 0; i < tabs.Length; i++)
+            {
+                var captured = stateTabs[i];
+                var saved = committed.Tabs[i];
+                if (ReferenceEquals(tabs[i].Deferred, captured)) tabs[i].Deferred = saved;
+                if (tabs[i].Recovery is { } recovery && ReferenceEquals(recovery, captured)) tabs[i].Recovery = saved;
+                if (saved.DraftRef is not null && liveDrafts.TryGetValue(saved.Id, out var live))
+                    existingDrafts.Add(saved.Id, new(new(live.Document), live.Revision, saved));
+            }
+            for (var i = 0; i < Math.Min(closedTabs.Length, committed.ClosedTabs?.Count ?? 0); i++)
+            {
+                var closedIndex = _workspace.GetClosedTabs(storage).FindIndex(item => ReferenceEquals(item, closedTabs[i]));
+                var history = _workspace.GetClosedTabs(storage);
+                if (closedIndex >= 0 && closedIndex < history.Count && ReferenceEquals(history[closedIndex], closedTabs[i]))
+                    history[closedIndex] = committed.ClosedTabs![i];
+            }
+            _workspace.SetLastCheckpoint(cacheKey, fingerprint);
         }
     }
 

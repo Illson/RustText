@@ -84,6 +84,87 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task ClosingThirdWorkspaceCheckpointsLatestSharedDocumentToHiddenWorkspaces() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "shared-hidden.txt");
+            await File.WriteAllTextAsync(path, "original");
+            var window = await OpenWorkspaceAsync(path);
+            try
+            {
+                await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Workspace A");
+                var firstWorkspace = (string)Field(window, "_workspaceId");
+                await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Workspace B");
+                var activeWorkspace = (string)Field(window, "_workspaceId");
+
+                var allTabs = ((System.Collections.IEnumerable)Invoke(window, "LoadedWorkspaceTabs")!).Cast<object>()
+                    .Where(tab => Equals(Property(tab, "Path"), path)).ToArray();
+                Assert.Equal(3, allTabs.Length);
+                var activeTab = Tabs(window).Single(tab => Equals(Property(tab, "Path"), path));
+                var document = Read<TextEditor>(activeTab, "Editor").Document;
+                Assert.All(allTabs, tab => Assert.Same(document, Read<TextEditor>(tab, "Editor").Document));
+                foreach (var tab in allTabs) Invoke(window, "SetTabAutoRefresh", tab, false);
+
+                document.Insert(document.TextLength, " + saved");
+                await CallAsync(window, "SaveEditorAsync", activeTab, Read<TextEditor>(activeTab, "Editor"), false);
+                var savedStamp = Property(activeTab, "Stamp");
+                document.Insert(document.TextLength, " + dirty");
+                Assert.All(allTabs, tab => Assert.True(Read<bool>(tab, "Dirty")));
+
+                await CloseAsync(window);
+
+                foreach (var workspaceId in new[] { WorkspaceCatalogStore.DefaultWorkspaceId, firstWorkspace, activeWorkspace })
+                {
+                    var storage = workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
+                        ? StorageService.OpenForTesting(profile)
+                        : StorageService.OpenWorkspace(profile, workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+                    var session = await storage.LoadSessionAsync();
+                    var savedTab = Assert.Single(session!.Tabs, tab => tab.Path == path);
+                    Assert.Equal(savedStamp, savedTab.Stamp);
+                    Assert.NotNull(savedTab.DraftRef);
+                    var draftPath = storage.GetDraftPath(savedTab);
+                    Assert.NotNull(draftPath);
+                    Assert.Equal("original + saved + dirty", await File.ReadAllTextAsync(draftPath!));
+                }
+            }
+            finally
+            {
+                if (window.IsVisible) await CloseAsync(window);
+            }
+        });
+
+    [Fact]
+    public Task DeletingAWorkspaceEvictsCachedEditorsAndUnsubscribesTheirViews() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "deleted-cache.txt");
+            await File.WriteAllTextAsync(path, "shared");
+            var window = await OpenWorkspaceAsync(path);
+            try
+            {
+                await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Workspace to delete");
+                var deletedWorkspace = (string)Field(window, "_workspaceId");
+                await CallAsync(window, "CreateWorkspaceFromCurrentAsync", "Active workspace");
+                var views = (System.Collections.IDictionary)Field(window, "_workspaceViews");
+                var deletedView = views[deletedWorkspace]!;
+                var deletedTab = ((System.Collections.IDictionary)Property(deletedView, "Tabs")!).Values.Cast<object>()
+                    .Single(tab => Equals(Property(tab, "Path"), path));
+                var revision = Read<long>(deletedTab, "Revision");
+
+                Invoke(window, "ForgetCachedWorkspaceViews", deletedWorkspace);
+                Assert.False(views.Contains(deletedWorkspace));
+                Assert.Null(Property(deletedTab, "Editor"));
+                var activeTab = Tabs(window).Single(tab => Equals(Property(tab, "Path"), path));
+                Read<TextEditor>(activeTab, "Editor").Document.Insert(0, "changed ");
+                Assert.Equal(revision, Read<long>(deletedTab, "Revision"));
+            }
+            finally
+            {
+                if (window.IsVisible) await CloseAsync(window);
+            }
+        });
+
+    [Fact]
     public Task EmptyStartupLeavesTheLastSavedWorkspaceAvailable() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "kept-session.txt");
