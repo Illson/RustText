@@ -1,5 +1,4 @@
 using Avalonia.Media;
-using Avalonia.Media.Immutable;
 using AvaloniaEdit.Document;
 using AvaloniaEdit.Rendering;
 
@@ -11,12 +10,12 @@ internal readonly record struct JsonToken(int Start, int Length, JsonTokenKind K
 
 internal sealed class JsonColorizer : DocumentColorizingTransformer
 {
-    private static readonly IBrush[] Palette =
+    private readonly IBrush[] _palette =
     [
-        new ImmutableSolidColorBrush(Color.Parse("#AEC9E1")),
-        new ImmutableSolidColorBrush(Color.Parse("#BDD3AA")),
-        FocusTheme.Warning,
-        new ImmutableSolidColorBrush(Color.Parse("#CDB9E1")),
+        FocusTheme.JsonKey,
+        FocusTheme.JsonString,
+        FocusTheme.JsonNumber,
+        FocusTheme.JsonLiteral,
         FocusTheme.Text
     ];
 
@@ -34,7 +33,7 @@ internal sealed class JsonColorizer : DocumentColorizingTransformer
             () => NextNonWhitespace(document, line.EndOffset) == ':'))
         {
             ChangeLinePart(line.Offset + token.Start, line.Offset + token.Start + token.Length,
-                element => element.TextRunProperties.SetForegroundBrush(Palette[(int)token.Kind]));
+                element => element.TextRunProperties.SetForegroundBrush(_palette[(int)token.Kind]));
         }
     }
 

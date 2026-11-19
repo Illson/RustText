@@ -1,6 +1,7 @@
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:chrome="using:Avalonia.Controls.Chrome"
+             xmlns:aeRendering="using:AvaloniaEdit.Rendering"
              xmlns:local="using:RustText.Demo"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
@@ -71,12 +72,6 @@
                 </ControlTemplate>
             </Setter>
         </ControlTheme>
-
-        <SolidColorBrush x:Key="TextControlBackground" Color="{x:Static local:FocusTheme.FieldColor}" />
-        <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="{x:Static local:FocusTheme.FieldColor}" />
-        <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="{x:Static local:FocusTheme.FieldColor}" />
-        <SolidColorBrush x:Key="TextControlBorderBrush" Color="{x:Static local:FocusTheme.BorderColor}" />
-        <SolidColorBrush x:Key="TextControlPlaceholderForeground" Color="{x:Static local:FocusTheme.MutedColor}" />
     </Application.Resources>
 
     <Application.Styles>
@@ -106,6 +101,9 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
         </Style>
         <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
+        <Style Selector="aeRendering|TextView">
+            <Setter Property="LinkTextForegroundBrush" Value="{x:Static local:FocusTheme.Link}" />
+        </Style>
         <Style Selector="TabItem.focus-tab">
             <Setter Property="Theme" Value="{StaticResource FocusDocumentTab}" />
         </Style>

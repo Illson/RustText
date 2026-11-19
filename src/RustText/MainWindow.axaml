@@ -13,7 +13,7 @@
                 <Button Classes="focus-quiet" Foreground="{x:Static local:FocusTheme.Text}" Padding="5,3"
                         AutomationProperties.Name="Главный экран RustText" Click="HomeClicked">
                     <StackPanel Orientation="Horizontal" Spacing="7">
-                        <Border Width="22" Height="21" CornerRadius="5" Background="#37302C" BorderBrush="#5E544A" BorderThickness="1">
+                        <Border Width="22" Height="21" CornerRadius="5" Background="{x:Static local:FocusTheme.UpdateIconSurface}" BorderBrush="{x:Static local:FocusTheme.UpdateBorder}" BorderThickness="1">
                             <TextBlock Text="›_" FontFamily="Consolas" FontWeight="Bold"
                                        Foreground="{x:Static local:FocusTheme.Warning}"
                                        HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -42,22 +42,22 @@
             </Grid>
         </Border>
         <Border Grid.Row="1" x:Name="UpdateNotice" IsVisible="False"
-                Background="#342E28" BorderBrush="#6B5742" BorderThickness="0,0,0,1" Padding="12,6">
+                Background="{x:Static local:FocusTheme.UpdateSurface}" BorderBrush="{x:Static local:FocusTheme.UpdateBorder}" BorderThickness="0,0,0,1" Padding="12,6">
             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="7">
                 <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
-                    <Border Width="25" Height="25" CornerRadius="5" Background="#47392C">
+                    <Border Width="25" Height="25" CornerRadius="5" Background="{x:Static local:FocusTheme.UpdateIconSurface}">
                         <Path Width="12" Height="12" Data="M 6,1 L 6,8 M 2.5,4.5 L 6,8 L 9.5,4.5 M 2,11 L 10,11"
                               HorizontalAlignment="Center" VerticalAlignment="Center"
                               Stroke="{x:Static local:FocusTheme.Warning}" StrokeThickness="1.35" />
                     </Border>
-                    <TextBlock x:Name="UpdateNoticeText" Foreground="#F3E4D2" FontWeight="SemiBold"
+                    <TextBlock x:Name="UpdateNoticeText" Foreground="{x:Static local:FocusTheme.UpdateText}" FontWeight="SemiBold"
                                VerticalAlignment="Center" />
                 </StackPanel>
                 <Button Grid.Column="1" x:Name="UpdateNoticeDetails" Classes="focus-quiet" Padding="9,3"
-                        Background="#47392C" Foreground="{x:Static local:FocusTheme.Warning}"
+                        Background="{x:Static local:FocusTheme.UpdateIconSurface}" Foreground="{x:Static local:FocusTheme.Warning}"
                         Content="Подробнее" Click="UpdateNoticeDetailsClicked" />
                 <Button Grid.Column="2" x:Name="UpdateNoticeDismiss" Classes="focus-quiet" Padding="6,2"
-                        Foreground="#F3E4D2" FontSize="17" Content="×"
+                        Foreground="{x:Static local:FocusTheme.UpdateText}" FontSize="17" Content="×"
                         AutomationProperties.Name="Закрыть уведомление об обновлении" Click="UpdateNoticeDismissClicked" />
             </Grid>
         </Border>

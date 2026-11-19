@@ -14,7 +14,15 @@ internal sealed class App : Application
     private static MainWindow? _window;
     private static bool _drainingRequests;
 
-    public override void Initialize() => AvaloniaXamlLoader.Load(this);
+    public override void Initialize()
+    {
+        AvaloniaXamlLoader.Load(this);
+        Resources["TextControlBackground"] = FocusTheme.Field;
+        Resources["TextControlBackgroundPointerOver"] = FocusTheme.Field;
+        Resources["TextControlBackgroundFocused"] = FocusTheme.Field;
+        Resources["TextControlBorderBrush"] = FocusTheme.Border;
+        Resources["TextControlPlaceholderForeground"] = FocusTheme.Muted;
+    }
 
     public override void OnFrameworkInitializationCompleted()
     {

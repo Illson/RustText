@@ -16,7 +16,6 @@ public partial class MainWindow
     private readonly StorageService _storage;
     private readonly List<SessionTab> _closedTabs;
     private IReadOnlyList<RecentFileEntry> _recent = [];
-    private UserSettings _settings = new();
     private MenuItem? _recentMenu;
     private MenuItem? _closedFilesMenu;
     private MenuItem? _closedDraftsMenu;
@@ -32,8 +31,15 @@ public partial class MainWindow
         var restore = _storage.LoadSessionAsync(_lifetime.Token, ShowPendingSessionAsync);
         try
         {
-            _settings = await _storage.LoadSettingsAsync(_lifetime.Token);
-            _titleLimit = _settings.UntitledTabLimit;
+            try
+            {
+                _workspace.Settings = await _storage.LoadSettingsAsync(_lifetime.Token);
+            }
+            finally
+            {
+                _workspace.SettingsReady = true;
+                ApplyWorkspaceTheme();
+            }
             _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
         }
         catch (Exception error) when (IsUserError(error))
@@ -859,7 +865,7 @@ public partial class MainWindow
         }
 
         var builder = new StringBuilder();
-        foreach (var rune in line.EnumerateRunes().Take(_titleLimit))
+        foreach (var rune in line.EnumerateRunes().Take(Settings.UntitledTabLimit))
         {
             builder.Append(rune);
         }

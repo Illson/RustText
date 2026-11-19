@@ -14,6 +14,9 @@ public partial class MainWindow
         public StorageService Storage { get; } = StorageService.OpenDefault();
         public SemaphoreSlim SaveGate { get; } = new(1, 1);
         public SemaphoreSlim CloseGate { get; } = new(1, 1);
+        public SemaphoreSlim SettingsGate { get; } = new(1, 1);
+        public UserSettings Settings { get; set; } = new();
+        public bool SettingsReady { get; set; }
         public List<MainWindow> Windows { get; } = [];
         public List<SessionTab> ClosedTabs { get; } = [];
         public HashSet<long> ClosedTabOperations { get; } = [];
@@ -42,8 +45,6 @@ public partial class MainWindow
         {
             _fontSize = _fontSize,
             _wordWrap = _wordWrap,
-            _settings = _settings,
-            _titleLimit = _titleLimit,
             _recent = _recent
         };
         if (dropPoint is { } point)

@@ -29,8 +29,21 @@ internal sealed class DocumentMinimap : Control, IDisposable
         ToolTip.SetTip(this, "Перейти к области документа");
     }
 
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        FocusTheme.ThemeChanged += OnThemeChanged;
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        FocusTheme.ThemeChanged -= OnThemeChanged;
+        base.OnDetachedFromVisualTree(e);
+    }
+
     public void Dispose()
     {
+        FocusTheme.ThemeChanged -= OnThemeChanged;
         _editor.TextChanged -= _textChanged;
         _editor.TextArea.TextView.VisualLinesChanged -= _visualLinesChanged;
     }
@@ -120,6 +133,8 @@ internal sealed class DocumentMinimap : Control, IDisposable
     }
 
     private ScrollViewer? FindScrollViewer() => _editor.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
+
+    private void OnThemeChanged() => InvalidateVisual();
 
     private static void ScrollTo(ScrollViewer scroll, double y) => scroll.SetCurrentValue(
         ScrollViewer.OffsetProperty, new Vector(scroll.Offset.X, y));

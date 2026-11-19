@@ -2,7 +2,6 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
-using Avalonia.Media.Immutable;
 
 namespace RustText.Demo.Logs;
 
@@ -23,7 +22,7 @@ internal sealed partial class LogView
 
     private sealed class LogMinimap : Control
     {
-        private static readonly ImmutablePen ViewportBorder = new(FocusTheme.AccentColor.ToUInt32(), 1);
+        private readonly Pen _viewportBorder = new(FocusTheme.Accent, 1);
         private double _start;
         private double _end;
         private bool _hasPage;
@@ -34,6 +33,18 @@ internal sealed partial class LogView
         {
             Cursor = new Cursor(StandardCursorType.Hand);
             ToolTip.SetTip(this, "Щёлкните или перетащите для перехода по файлу");
+        }
+
+        protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+        {
+            base.OnAttachedToVisualTree(e);
+            FocusTheme.ThemeChanged += OnThemeChanged;
+        }
+
+        protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+        {
+            FocusTheme.ThemeChanged -= OnThemeChanged;
+            base.OnDetachedFromVisualTree(e);
         }
 
         internal Rect ViewportMarker
@@ -69,7 +80,9 @@ internal sealed partial class LogView
                 var width = Math.Clamp(Samples[index].Length, 3, 32) / 32d * Math.Max(0, Bounds.Width - 12);
                 context.FillRectangle(FocusTheme.Muted, new Rect(6, (index + .5) * rowHeight, width, 1));
             }
-            if (marker.Height > 0) context.DrawRectangle(null, ViewportBorder, marker);
+            if (marker.Height > 0) context.DrawRectangle(null, _viewportBorder, marker);
         }
+
+        private void OnThemeChanged() => InvalidateVisual();
     }
 }

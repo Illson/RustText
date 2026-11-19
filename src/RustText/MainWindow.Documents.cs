@@ -120,7 +120,7 @@ public partial class MainWindow
 
             if (file.Length > LargeFilePromptBytes)
             {
-                var useLog = _settings.OpenLargeFilesAsLog ?? await ChooseLargeFileModeAsync(file);
+                var useLog = Settings.OpenLargeFilesAsLog ?? await ChooseLargeFileModeAsync(file);
                 if (useLog is null || _closed || _closing) return null;
                 mode = useLog == true ? FileOpenMode.Log : FileOpenMode.PagedEditor;
             }
@@ -167,7 +167,7 @@ public partial class MainWindow
 
         var useLog = await dialog.ShowDialog<bool?>(this);
         if (useLog is not null && remember.IsChecked == true)
-            await SaveWorkspaceSettingsAsync(_settings with { OpenLargeFilesAsLog = useLog });
+            await SaveWorkspaceSettingsAsync(settings => settings with { OpenLargeFilesAsLog = useLog });
         return useLog;
     }
 
@@ -413,8 +413,12 @@ public partial class MainWindow
             Run(() => PasteSafelyAsync(tab, editor, multiCaret, pasteQueue));
         }
         editor.TextArea.AddHandler(KeyDownEvent, PasteKeyDown, RoutingStrategies.Tunnel);
+        // AvaloniaEdit caches the formatted colors of the visible text.
+        Action redrawForTheme = editor.TextArea.TextView.Redraw;
+        FocusTheme.ThemeChanged += redrawForTheme;
         tab.EditorSubscriptions =
         [
+            () => FocusTheme.ThemeChanged -= redrawForTheme,
             () => undoStack.PropertyChanged -= undoHandler,
             () => editor.TextChanged -= textChangedHandler,
             () => editor.TextArea.Caret.PositionChanged -= caretHandler,
@@ -1114,7 +1118,7 @@ public partial class MainWindow
         }
 
         var builder = new StringBuilder();
-        foreach (var rune in raw.EnumerateRunes().Take(_titleLimit))
+        foreach (var rune in raw.EnumerateRunes().Take(Settings.UntitledTabLimit))
         {
             builder.Append(rune);
         }

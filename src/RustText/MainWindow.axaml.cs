@@ -30,7 +30,7 @@ public partial class MainWindow : Window
     private bool _closeAfterStartupValidation;
     private bool _wordWrap = true;
     private double _fontSize = FocusTheme.EditorFontSize;
-    private int _titleLimit = 10;
+    private UserSettings Settings => _workspace.Settings;
 
 
 
@@ -113,7 +113,7 @@ public partial class MainWindow : Window
         if (_closed || _closing) return;
         _restoreFinished = true;
         _checkpoint.Start();
-        if (_settings.AutoCheckUpdates && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
+        if (Settings.AutoCheckUpdates && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
         {
             Run(() => CheckUpdatesAsync(manual: false));
         }
