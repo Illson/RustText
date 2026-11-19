@@ -1271,7 +1271,7 @@ public sealed class WorkspaceTests
             };
             typeof(MainWindow).GetField("_settings", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, updated);
             await CallAsync(window, "SaveWorkspaceSettingsAsync", updated);
-            await CallAsync(window, "ArchiveClosedDraftsAsync");
+            await CallAsync(window, "HandleIdleUnloadTimerTickAsync");
 
             Assert.Empty((List<SessionTab>)Field(window, "_closedTabs")!);
             Assert.Equal("leave this tab open", Read<TextEditor>(ActiveTab(window), "Editor").Text);
