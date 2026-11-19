@@ -26,6 +26,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
     private readonly TextArea _area;
     private readonly Func<IReadOnlyList<CaretEdit>, bool> _canEdit;
     private readonly Action<string> _status;
+    private AltClick? _altClick;
     private TextDocument Document => _area.Document;
     private MultiSelection? Current => _area.Selection as MultiSelection;
     public bool IsActive => Current is not null;
@@ -38,6 +39,8 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         _status = status;
         area.AddHandler(InputElement.KeyDownEvent, KeyDown, RoutingStrategies.Tunnel);
         area.AddHandler(InputElement.PointerPressedEvent, PointerPressed, RoutingStrategies.Tunnel);
+        area.AddHandler(InputElement.PointerMovedEvent, PointerMoved, RoutingStrategies.Tunnel);
+        area.AddHandler(InputElement.PointerReleasedEvent, PointerReleased, RoutingStrategies.Bubble, handledEventsToo: true);
         area.GotFocus += FocusChanged;
         area.LostFocus += FocusChanged;
         area.TextView.BackgroundRenderers.Add(this);
@@ -47,6 +50,8 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
     {
         _area.RemoveHandler(InputElement.KeyDownEvent, KeyDown);
         _area.RemoveHandler(InputElement.PointerPressedEvent, PointerPressed);
+        _area.RemoveHandler(InputElement.PointerMovedEvent, PointerMoved);
+        _area.RemoveHandler(InputElement.PointerReleasedEvent, PointerReleased);
         _area.GotFocus -= FocusChanged;
         _area.LostFocus -= FocusChanged;
         _area.TextView.BackgroundRenderers.Remove(this);
@@ -56,8 +61,10 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
     {
         if (area.Selection is MultiSelection multi) return multi.Primary;
         if (area.Selection.IsEmpty) return new(area.Caret.Offset, area.Caret.Offset);
-        return new(area.Document.GetOffset(area.Selection.StartPosition.Location),
-            area.Document.GetOffset(area.Selection.EndPosition.Location));
+        var segment = area.Selection.SurroundingSegment;
+        return area.Caret.Offset < segment.EndOffset
+            ? new(segment.EndOffset, segment.Offset)
+            : new(segment.Offset, segment.EndOffset);
     }
 
     public static void CollapseToPrimary(TextArea area)
@@ -116,6 +123,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
 
     private void PointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        _altClick = null;
         var view = _area.TextView;
         if (e.Source is not Visual source || !view.IsVisualAncestorOf(source) && !ReferenceEquals(view, source)
             || !e.GetCurrentPoint(view).Properties.IsLeftButtonPressed)
@@ -124,28 +132,62 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         }
         if (e.KeyModifiers == KeyModifiers.Alt)
         {
-            if (view.GetPosition(e.GetPosition(view) + view.ScrollOffset) is not { } position) return;
-            var offset = Document.GetOffset(position.Location);
-            var primary = Primary(_area);
-            var ranges = Current?.Ranges ?? [primary];
-            var existing = Array.FindIndex(ranges, range => offset >= range.Start && offset <= range.End);
-            if (existing < 0)
-            {
-                SetCarets([.. ranges, new(offset, offset)], ranges.Length);
-            }
-            else if (ranges.Length > 1)
-            {
-                var remaining = ranges.Where((_, index) => index != existing).ToArray();
-                var primaryIndex = Array.IndexOf(remaining, primary);
-                SetCarets(remaining, primaryIndex < 0 ? Math.Min(existing, remaining.Length - 1) : primaryIndex);
-            }
-            _area.Focus();
-            e.Handled = true;
+            var point = e.GetPosition(view);
+            if (view.GetPosition(point + view.ScrollOffset) is not { } position) return;
+
+            // Let AvaloniaEdit handle the drag as a rectangular selection. Only a click
+            // (resolved after release) replaces it with the saved carets plus the clicked one.
+            _altClick = new(e.Pointer, point, Document.Version, Document.GetOffset(position.Location),
+                Current?.Ranges ?? [Primary(_area)], Current?.PrimaryIndex ?? 0);
+            _area.ClearSelection();
             return;
         }
 
         CollapseToPrimary(_area);
     }
+
+    private void PointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (_altClick is { } click && click.Pointer == e.Pointer && MovedSincePress(e, click))
+            _altClick = null;
+    }
+
+    private void PointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (_altClick is not { } click || click.Pointer != e.Pointer || e.InitialPressMouseButton != MouseButton.Left) return;
+        _altClick = null;
+        if (MovedSincePress(e, click) || !ReferenceEquals(click.Version, Document.Version)) return;
+
+        var ranges = click.Ranges;
+        var existing = Array.FindIndex(ranges, range => click.Offset >= range.Start && click.Offset <= range.End);
+        if (existing < 0)
+        {
+            SetCarets([.. ranges, new(click.Offset, click.Offset)], ranges.Length);
+        }
+        else if (ranges.Length > 1)
+        {
+            var remaining = ranges.Where((_, index) => index != existing).ToArray();
+            var primary = click.PrimaryIndex == existing ? Math.Min(existing, remaining.Length - 1)
+                : existing < click.PrimaryIndex ? click.PrimaryIndex - 1 : click.PrimaryIndex;
+            SetCarets(remaining, primary);
+        }
+        else
+        {
+            SetCarets(ranges, primaryIndex: 0);
+        }
+
+        _area.Focus();
+        e.Handled = true;
+    }
+
+    private bool MovedSincePress(PointerEventArgs e, AltClick click)
+    {
+        var movement = e.GetPosition(_area.TextView) - click.Point;
+        return Math.Abs(movement.X) > 2 || Math.Abs(movement.Y) > 2;
+    }
+
+    private sealed record AltClick(IPointer Pointer, Point Point, ITextSourceVersion Version, int Offset,
+        CaretRange[] Ranges, int PrimaryIndex);
 
     private void AddVertical(int direction)
     {

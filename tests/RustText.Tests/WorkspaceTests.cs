@@ -11,6 +11,7 @@ using Avalonia.Media;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Rendering;
+using AvaloniaEdit.Editing;
 using RustText.Demo;
 using RustText.Demo.Editor;
 using RustText.Demo.Logs;
@@ -390,6 +391,18 @@ public sealed class WorkspaceTests
             Assert.Equal(2, MultiCaretEditing.Count(editor.TextArea));
             window.KeyTextInput("!");
             Assert.Equal("aaa\nb!bb\nc!cc", editor.Text);
+            var dragStart = AtTextPosition(1, 1);
+            var dragEnd = AtTextPosition(3, 2);
+            window.MouseDown(dragStart, MouseButton.Left, RawInputModifiers.Alt);
+            window.MouseMove(dragEnd, RawInputModifiers.Alt | RawInputModifiers.LeftMouseButton);
+            window.MouseUp(dragEnd, MouseButton.Left, RawInputModifiers.Alt);
+            var rectangle = Assert.IsType<RectangleSelection>(editor.TextArea.Selection);
+            Assert.Equal(3, rectangle.Segments.Count());
+            Assert.All(rectangle.Segments, segment => Assert.Equal(1, segment.Length));
+
+            Point AtTextPosition(int line, int column) =>
+                view.TranslatePoint(view.GetVisualPosition(new TextViewPosition(line, column),
+                    VisualYPosition.LineMiddle) - view.ScrollOffset, window)!.Value;
         }
         finally { await CloseAsync(window); }
     });
