@@ -143,32 +143,34 @@ public sealed class LogUiTests
         finally { await CloseMainWindowAsync(window); }
     });
 
-    [Fact]
-    public Task CtrlXInWritablePageEditorCutsTheLastLineAndUndoRestoresIt() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData("first\r\nlast", 11, "first", "last")]
+    [InlineData("first\r\n\r\nlast", 7, "first\r\nlast", "\r\n")]
+    public Task CtrlXInWritablePageEditorCutsTheCurrentLineAndUndoRestoresIt(string original, int caret, string expected, string cut) => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "cut-page.log");
-        await File.WriteAllTextAsync(path, "first\r\nlast");
+        await File.WriteAllTextAsync(path, original);
         var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
         try
         {
             var text = (TextBox)Field(log, "_logText");
-            text.CaretIndex = text.Text!.Length;
+            text.CaretIndex = caret;
             window.KeyPress(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
             window.KeyRelease(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
-            Assert.Equal("first\r\nlast", text.Text);
+            Assert.Equal(original, text.Text);
 
             await InvokeTask(log, "TogglePageEditAsync");
             Assert.False(log.IsReadOnly);
-            text.CaretIndex = text.Text!.Length;
+            text.CaretIndex = caret;
             window.KeyPress(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
             window.KeyRelease(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
-            await HeadlessTests.WaitForAsync(() => text.Text == "first");
+            await HeadlessTests.WaitForAsync(() => text.Text == expected);
             var clipboard = await window.Clipboard!.TryGetDataAsync();
             Assert.NotNull(clipboard);
-            Assert.Equal("last", await clipboard.TryGetTextAsync());
+            Assert.Equal(cut, await clipboard.TryGetTextAsync());
 
             text.Undo();
-            Assert.Equal("first\r\nlast", text.Text);
+            Assert.Equal(original, text.Text);
         }
         finally { await CloseLogAsync(window, log); }
     });

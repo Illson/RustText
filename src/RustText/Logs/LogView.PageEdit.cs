@@ -150,8 +150,7 @@ internal sealed partial class LogView
         var previousLineBreak = caret == 0 ? -1 : LastLineBreak(text, caret - 1);
         var lineStart = previousLineBreak + 1;
         var lineEnd = NextLineBreak(text, caret);
-        var lineContentEnd = lineEnd < 0 ? text.Length : lineEnd;
-        if (lineContentEnd == lineStart)
+        if (lineEnd < 0 && lineStart == text.Length)
         {
             return;
         }
@@ -162,7 +161,7 @@ internal sealed partial class LogView
         if (lineEnd < 0 && lineStart > 0)
         {
             deleteStart--;
-            if (deleteStart > 0 && text[deleteStart - 1] == '\r')
+            if (deleteStart > 0 && text[deleteStart] == '\n' && text[deleteStart - 1] == '\r')
             {
                 deleteStart--;
             }
