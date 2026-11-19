@@ -52,7 +52,7 @@ public partial class MainWindow
         {
             _workspaceId = assignedWorkspace;
         }
-        _closedTabs = _workspace.GetClosedTabs(_workspaceId, _windowId);
+        _closedTabs = _workspace.GetClosedTabs(SessionStorage);
         _startEmpty = _windowId == WorkspaceCatalogStore.PrimaryWindowId
             && _settings.WorkspaceStartupMode == WorkspaceStartupMode.Empty;
 
@@ -311,7 +311,7 @@ public partial class MainWindow
                 Math.Max(0, index), width, height, homeWindow.WindowState == WindowState.Maximized,
                 homeWindow._wordWrap, homeWindow._fontSize, homeWindow.CaptureLayout(homeWindow._root), homeWindow._active.Id);
             var fingerprint = CheckpointFingerprint(session, tabs);
-            if (forgetClosedId is null && !_closing && _workspace.GetLastCheckpoint(WorkspaceCacheKey) == fingerprint) return;
+            if (forgetClosedId is null && !_closing && _workspace.GetLastCheckpoint(cacheKey) == fingerprint) return;
 
             var drafts = new Dictionary<long, Func<TextReader>>();
             var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();

@@ -56,7 +56,7 @@ public partial class MainWindow : Window
         _workspaceId = workspaceId ?? WorkspaceCatalogStore.DefaultWorkspaceId;
         _windowId = windowId ?? WorkspaceCatalogStore.PrimaryWindowId;
         _shareDefaultSession = shareDefaultSession;
-        _closedTabs = _workspace.GetClosedTabs(_workspaceId, _windowId);
+        _closedTabs = _workspace.GetClosedTabs(SessionStorage);
         _restoreWorkspace = workspace is null;
         _workspace.Windows.Add(this);
         Closed += async (_, _) =>

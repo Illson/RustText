@@ -27,9 +27,10 @@ public partial class MainWindow
         public long NextId;
         public TabDrag? Drag;
 
-        public StorageService GetStorage(string workspaceId, string windowId)
+        public StorageService GetStorage(string workspaceId, string windowId, bool shareDefaultSession = false)
         {
-            if (workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId && windowId == WorkspaceCatalogStore.PrimaryWindowId)
+            if (workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
+                && (windowId == WorkspaceCatalogStore.PrimaryWindowId || shareDefaultSession))
                 return Storage;
             var key = (workspaceId, windowId);
             if (SessionStores.TryGetValue(key, out var storage)) return storage;
@@ -38,10 +39,9 @@ public partial class MainWindow
             return storage;
         }
 
-        public List<SessionTab> GetClosedTabs(string workspaceId, string windowId)
+        public List<SessionTab> GetClosedTabs(StorageService storage)
         {
-            var key = workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
-                ? workspaceId : workspaceId + ":" + windowId;
+            var key = StorageCacheKey(storage);
             if (!ClosedTabs.TryGetValue(key, out var tabs)) ClosedTabs.Add(key, tabs = []);
             return tabs;
         }
@@ -62,10 +62,10 @@ public partial class MainWindow
     private sealed record WorkspaceViewState(Dictionary<long, WorkTab> Tabs, Group Root, Group Active, bool Home,
         Control? HomeContent, double Width, double Height, bool Maximized, StorageService Storage, List<SessionTab> ClosedTabs);
 
-    private StorageService SessionStorage => _workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId
-        && (_windowId == WorkspaceCatalogStore.PrimaryWindowId || _shareDefaultSession)
-        ? _workspace.Storage : _workspace.GetStorage(_workspaceId, _windowId);
-    private string WorkspaceCacheKey => _workspaceId + ":" + _windowId;
+    private StorageService SessionStorage => _workspace.GetStorage(_workspaceId, _windowId, _shareDefaultSession);
+    private static string StorageCacheKey(StorageService storage) => Path.GetFullPath(storage.RootDirectory)
+        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant();
+    private string WorkspaceCacheKey => StorageCacheKey(SessionStorage);
 
     private IEnumerable<WorkTab> LoadedWorkspaceTabs() =>
         _tabs.Values.Concat(_workspaceViews.Values.SelectMany(view => view.Tabs.Values)).Distinct();
