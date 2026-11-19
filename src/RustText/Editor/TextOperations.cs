@@ -7,13 +7,14 @@ namespace RustText.Demo.Editor;
 
 internal sealed record SearchOptions(string Pattern, bool IsRegex, bool MatchCase, bool WholeWord);
 internal sealed record SearchHit(int Offset, int Length, int Line, string Preview);
-internal sealed record SearchSummary(IReadOnlyList<SearchHit> Hits, int Count, bool TimedOut);
+internal sealed record SearchSummary(IReadOnlyList<SearchHit> Hits, int Count, bool TimedOut, IReadOnlyList<CaretRange>? Carets);
 internal sealed record JsonProblem(int Offset, int Line, int Column, string Message);
 internal sealed record ListComparison(string Common, string LeftOnly, string RightOnly);
 
 internal static class TextOperations
 {
     internal const int JsonByteLimit = 64 * 1024 * 1024;
+    internal const long AutomaticSearchMaxBytes = 1024L * 1024 * 1024;
     private static readonly TimeSpan SearchBudget = TimeSpan.FromMilliseconds(400);
 
     public static Regex BuildRegex(SearchOptions options)
@@ -38,24 +39,27 @@ internal static class TextOperations
         return new Regex(pattern, flags, SearchBudget);
     }
 
-    public static SearchSummary Find(string text, Regex regex, int resultLimit, CancellationToken cancellationToken)
+    public static SearchSummary Find(string text, Regex regex, int resultLimit, CancellationToken cancellationToken, int caretLimit = 0)
     {
         var hits = new List<SearchHit>(Math.Min(resultLimit, 100));
+        var carets = caretLimit > 0 ? new List<CaretRange>() : null;
         var count = 0;
         var line = 1;
         var lineStart = 0;
         var started = Stopwatch.GetTimestamp();
         try
         {
-            for (var match = regex.Match(text); match.Success; match = match.NextMatch())
+            foreach (var match in regex.EnumerateMatches(text))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (Stopwatch.GetElapsedTime(started) >= SearchBudget)
                 {
-                    return new SearchSummary(hits, count, true);
+                    return new SearchSummary(hits, count, true, carets);
                 }
 
                 count++;
+                if (carets is not null && carets.Count < caretLimit)
+                    carets.Add(new CaretRange(match.Index, match.Index + match.Length));
                 if (hits.Count >= resultLimit)
                 {
                     continue;
@@ -77,10 +81,10 @@ internal static class TextOperations
         }
         catch (RegexMatchTimeoutException)
         {
-            return new SearchSummary(hits, count, true);
+            return new SearchSummary(hits, count, true, carets);
         }
 
-        return new SearchSummary(hits, count, false);
+        return new SearchSummary(hits, count, false, carets);
     }
 
     public static Match? FindNext(string text, Regex regex, int offset, bool backward)

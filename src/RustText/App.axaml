@@ -159,6 +159,39 @@
             <Setter Property="Padding" Value="3,0" />
             <Setter Property="HorizontalContentAlignment" Value="Center" />
         </Style>
+        <Style Selector="Button.search-command, Button.search-primary, ToggleButton.search-option">
+            <Setter Property="MinHeight" Value="26" />
+            <Setter Property="Padding" Value="7,2" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Field}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Border}" />
+            <Setter Property="CornerRadius" Value="3" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+        <Style Selector="Button.search-primary">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="ToggleButton.search-option">
+            <Setter Property="MinWidth" Value="26" />
+            <Setter Property="Padding" Value="4,1" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+        </Style>
+        <Style Selector="ToggleButton.search-option:checked /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Accent}" />
+        </Style>
+        <Style Selector="TextBox.search-input">
+            <Setter Property="MinWidth" Value="78" />
+            <Setter Property="MinHeight" Value="26" />
+            <Setter Property="Padding" Value="6,2" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="CornerRadius" Value="3" />
+        </Style>
         <Style Selector="Button.focus-quiet:pointerover /template/ ContentPresenter#PART_ContentPresenter,
                          Button.focus-icon:pointerover /template/ ContentPresenter#PART_ContentPresenter">
             <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />

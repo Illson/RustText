@@ -295,6 +295,7 @@ public partial class MainWindow
         var undoStack = document.UndoStack;
         var multiCaret = new MultiCaretEditing(editor.TextArea,
             edits => !WouldExceedEditorLimits(document, edits), SetStatus);
+        tab.MultiCaret = multiCaret;
         var pasteQueue = new SemaphoreSlim(1);
 
         var warning = new TextBlock
@@ -357,9 +358,9 @@ public partial class MainWindow
             }
             UpdateTab(tab);
             ScheduleJsonValidation(tab);
-            if (ReferenceEquals(tab, ActiveTab))
+            if (PanelHost.IsVisible && (ReferenceEquals(tab, ActiveTab) || _allTabs.IsChecked == true))
             {
-                RefreshSearchHighlights();
+                ScheduleSearch();
             }
         };
         editor.TextChanged += textChangedHandler;
@@ -427,6 +428,7 @@ public partial class MainWindow
         WatchEditorFile(tab);
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
+        if (PanelHost.IsVisible && ReferenceEquals(tab, ActiveTab) && _searchCancellation is null) ScheduleSearch();
     }
 
     private async Task PasteSafelyAsync(WorkTab tab, TextEditor editor, MultiCaretEditing multiCaret, SemaphoreSlim queue)
@@ -763,6 +765,7 @@ public partial class MainWindow
         var document = editor.Document;
         editor.Document = new TextDocument();
         tab.Editor = null;
+        tab.MultiCaret = null;
         tab.JsonBanner = null;
         tab.JsonMessage = null;
         return document;
@@ -1225,6 +1228,7 @@ public partial class MainWindow
         public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }
         public TextEditor? Editor { get; set; }
+        public MultiCaretEditing? MultiCaret { get; set; }
         public LogView? Log { get; set; }
         public bool IsLog => PendingFileOpenMode is FileOpenMode.PagedEditor or FileOpenMode.Log
             || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;

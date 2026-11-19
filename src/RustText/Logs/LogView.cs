@@ -17,6 +17,7 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Microsoft.Win32.SafeHandles;
 using RustText.Demo;
+using RustText.Demo.Editor;
 
 namespace RustText.Demo.Logs;
 
@@ -61,6 +62,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private LogDataReader _reader;
     private readonly CancellationTokenSource _closing = new();
     private readonly DispatcherTimer _refreshTimer;
+    private readonly DispatcherTimer _searchDebounce = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly List<long> _previousOffsets = [];
     private readonly ObservableCollection<SearchResult> _searchResults = [];
     private readonly List<string> _miniSamples = [];
@@ -84,6 +86,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private readonly TextBox _percentBox = new()
     {
         Width = 76,
+        FontSize = 12,
         PlaceholderText = "%",
         Text = "0",
         Background = FocusTheme.Field,
@@ -91,22 +94,22 @@ internal sealed partial class LogView : UserControl, IDisposable
         BorderBrush = FocusTheme.Border,
     };
     private readonly TextBox _searchBox = new() { PlaceholderText = "Текст или регулярное выражение" };
-    private readonly CheckBox _regexBox = new() { Content = "Регулярное выражение" };
-    private readonly CheckBox _caseBox = new() { Content = "Учитывать регистр" };
-    private readonly CheckBox _wholeWordBox = new() { Content = "Целое слово" };
+    private readonly ToggleButton _regexBox = SearchBar.Option(".*", "Регулярное выражение");
+    private readonly ToggleButton _caseBox = SearchBar.Option("Aa", "Учитывать регистр");
+    private readonly ToggleButton _wholeWordBox = SearchBar.Option("«»", "Целое слово");
     private readonly Button _pauseButton = new();
     private readonly Button _followButton = new();
     private readonly Button _indexButton = new();
     private readonly Button _searchButton = new() { Content = "Найти" };
     private readonly Button _moreButton = new() { Content = "Ещё" };
-    private readonly Button _cancelSearchButton = new() { Content = "Отменить поиск" };
+    private Button _cancelSearchButton = null!;
+    private readonly TextBlock _searchStatusText = SearchBar.Status();
     private readonly Button _cancelIndexButton = new() { Content = "Остановить индекс" };
     private readonly Button _wrapButton = new();
     private readonly Button _hideButton = new() { Content = "Скрыть начало" };
     private readonly Button _revealButton = new() { Content = "Показать весь файл" };
     private readonly Button _trimButton = new() { Content = "Удалить начало…" };
     private readonly Button _cancelTrimButton = new() { Content = "Отменить обрезку", IsVisible = false };
-    private readonly Button _searchCloseButton = new() { Content = "Закрыть поиск" };
     private readonly Button _timeButton = new() { Content = "Ко времени" };
     private readonly Button _previousButton = new() { Content = "Назад" };
     private readonly Button _nextButton = new() { Content = "Дальше" };
@@ -138,8 +141,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private readonly LogMinimap _minimap = new() { Width = 54 };
     private readonly StackPanel _searchPanel = new()
     {
-        Spacing = 7,
-        Margin = new Thickness(0, 5, 0, 0),
+        Spacing = 2,
         Background = FocusTheme.Panel,
         IsVisible = false,
     };
@@ -384,7 +386,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     public async Task NavigateMatchAsync(bool backward)
     {
-        if (string.IsNullOrWhiteSpace(_searchBox.Text))
+        if (string.IsNullOrEmpty(_searchBox.Text))
         {
             FocusSearch();
             return;
@@ -446,8 +448,24 @@ internal sealed partial class LogView : UserControl, IDisposable
     public void FocusSearch()
     {
         if (PageNavigationBlocked) return;
+        if (!_searchBox.IsKeyboardFocusWithin && _logText.SelectedText is { Length: > 0 } selected)
+        {
+            _regexBox.IsChecked = false;
+            _searchBox.Text = selected;
+        }
         _searchPanel.IsVisible = true;
         _searchBox.Focus();
+        _searchBox.SelectAll();
+        if (_searchResults.Count == 0 && _searchCancellation is null) ScheduleSearch();
+    }
+
+    public bool CloseSearch()
+    {
+        if (!_searchPanel.IsVisible) return false;
+        _searchPanel.IsVisible = false;
+        StopSearch();
+        _logText.Focus();
+        return true;
     }
 
     public void Close()
@@ -459,7 +477,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         _closed = true;
         _closing.Cancel();
-        _searchCancellation?.Cancel();
+        StopSearch();
         _indexCancellation?.Cancel();
         _trimCancellation?.Cancel();
         _refreshTimer.Stop();
@@ -552,41 +570,12 @@ internal sealed partial class LogView : UserControl, IDisposable
         content.Children.Add(_minimap);
         root.Children.Add(content);
 
-        var searchRow = new WrapPanel
-        {
-            Orientation = Orientation.Horizontal,
-            ItemSpacing = 4,
-        };
-        _searchBox.MinWidth = 180;
-        _searchBox.FontSize = 12;
-        _searchBox.Background = FocusTheme.Field;
-        _searchBox.Foreground = FocusTheme.Text;
-        _searchBox.BorderBrush = FocusTheme.Border;
-        _percentBox.FontSize = 12;
-        _regexBox.FontSize = 12;
-        _caseBox.FontSize = 12;
-        _wholeWordBox.FontSize = 12;
-        AutomationProperties.SetName(_regexBox, "Регулярное выражение");
-        ToolTip.SetTip(_regexBox, "Регулярное выражение");
-        AutomationProperties.SetName(_caseBox, "Учитывать регистр");
-        ToolTip.SetTip(_caseBox, "Учитывать регистр");
-        _regexBox.Foreground = FocusTheme.Muted;
-        _caseBox.Foreground = FocusTheme.Muted;
-        _wholeWordBox.Foreground = FocusTheme.Muted;
-        searchRow.Children.Add(_searchBox);
-        searchRow.Children.Add(_regexBox);
-        searchRow.Children.Add(_caseBox);
-        searchRow.Children.Add(_wholeWordBox);
-        SetButtonStyle(_searchButton, "focus-primary");
-        SetButtonStyle(_moreButton, "focus-quiet");
-        SetButtonStyle(_cancelSearchButton, "focus-quiet");
-        SetButtonStyle(_searchCloseButton, "focus-icon");
-        AutomationProperties.SetName(_searchCloseButton, "Закрыть поиск");
-        ToolTip.SetTip(_searchCloseButton, "Закрыть поиск");
-        searchRow.Children.Add(_searchButton);
-        searchRow.Children.Add(_moreButton);
-        searchRow.Children.Add(_cancelSearchButton);
-        searchRow.Children.Add(_searchCloseButton);
+        var searchRow = SearchBar.MakeRows();
+        SearchBar.StyleInput(_searchBox);
+        SearchBar.StyleCommand(_searchButton, primary: true);
+        SearchBar.StyleCommand(_moreButton);
+        SearchBar.AddRow(searchRow, 0, SearchBar.Options(_regexBox, _caseBox, _wholeWordBox),
+            _searchBox, _searchButton, _moreButton, SearchBar.Icon("×", "Закрыть поиск (Esc)", () => CloseSearch()));
         _searchPanel.Children.Add(searchRow);
         var searchResults = new ScrollViewer
         {
@@ -596,9 +585,20 @@ internal sealed partial class LogView : UserControl, IDisposable
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
         };
         root.SizeChanged += (_, e) => searchResults.MaxHeight = Math.Clamp(e.NewSize.Height / 8, 32, 48);
+        _cancelSearchButton = SearchBar.Icon("■", "Остановить поиск", StopSearch);
+        _searchPanel.Children.Add(SearchBar.Footer(_searchStatusText, _cancelSearchButton, SearchBar.ResultsToggle(searchResults)));
         _searchPanel.Children.Add(searchResults);
-        Grid.SetRow(_searchPanel, 2);
-        root.Children.Add(_searchPanel);
+        var searchFrame = new Border
+        {
+            Padding = new Thickness(6, 3),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            BorderBrush = FocusTheme.Border,
+            Background = FocusTheme.Panel,
+            Child = _searchPanel,
+            [!IsVisibleProperty] = _searchPanel[!IsVisibleProperty],
+        };
+        Grid.SetRow(searchFrame, 2);
+        root.Children.Add(searchFrame);
 
         SetNavigationIcon(_startButton, "В начало лога");
         SetNavigationIcon(_previousButton, "Предыдущая страница");
@@ -740,8 +740,21 @@ internal sealed partial class LogView : UserControl, IDisposable
         _cancelTrimButton.Click += (_, _) => _trimCancellation?.Cancel();
         _searchButton.Click += async (_, _) => await SearchAsync(false);
         _moreButton.Click += async (_, _) => await SearchAsync(true);
-        _cancelSearchButton.Click += (_, _) => _searchCancellation?.Cancel();
-        _searchCloseButton.Click += (_, _) => _searchPanel.IsVisible = false;
+        _searchBox.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == TextBox.TextProperty) ScheduleSearch();
+        };
+        _regexBox.IsCheckedChanged += (_, _) => ScheduleSearch();
+        _caseBox.IsCheckedChanged += (_, _) => ScheduleSearch();
+        _wholeWordBox.IsCheckedChanged += (_, _) => ScheduleSearch();
+        _searchDebounce.Tick += async (_, _) =>
+        {
+            if (_busy) return;
+            _searchDebounce.Stop();
+            if (!_searchPanel.IsVisible || PageNavigationBlocked) return;
+            if (_file.Length < TextOperations.AutomaticSearchMaxBytes) await SearchAsync(false);
+            else ScheduleSearch();
+        };
         _timeButton.Click += async (_, _) => await JumpToTimeAsync();
         _searchBox.KeyDown += async (_, e) =>
         {
@@ -1070,45 +1083,73 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
     }
 
+    private void ScheduleSearch()
+    {
+        StopSearch();
+        _searchCancellation = null;
+        ClearSearchResults();
+        _searchStatusText.Text = "";
+        ToolTip.SetTip(_searchStatusText, null);
+        RefreshButtons();
+        if (!_searchPanel.IsVisible || string.IsNullOrEmpty(_searchBox.Text) || _closed) return;
+        if (_file.Length < TextOperations.AutomaticSearchMaxBytes)
+            _searchDebounce.Start();
+        else
+            _searchStatusText.Text = "Нажмите «Найти» для поиска по большому файлу";
+    }
+
+    private void StopSearch()
+    {
+        _searchDebounce.Stop();
+        _searchCancellation?.Cancel();
+    }
+
+    private void ClearSearchResults()
+    {
+        _searchOffset = _hiddenOffset;
+        _searchResults.Clear();
+        _searchResultButtons.Children.Clear();
+        _searchHasMore = false;
+        _activeSearchResult = -1;
+        _lastSearchText = "";
+    }
+
+    private void SetSearchStatus(string message)
+    {
+        _searchStatusText.Text = message;
+        ToolTip.SetTip(_searchStatusText, message);
+        SetStatus(message);
+    }
+
     private async Task SearchAsync(bool continueSearch)
     {
-        var query = _searchBox.Text?.Trim() ?? string.Empty;
+        _searchDebounce.Stop();
+        var query = _searchBox.Text ?? string.Empty;
         if (query.Length == 0)
         {
-            SetStatus("Введите текст для поиска.");
+            SetSearchStatus("Введите текст для поиска.");
             return;
         }
 
-        if (_busy)
-        {
-            return;
-        }
+        if (_closed || _busy || PageNavigationBlocked) return;
         _searchCancellation?.Cancel();
-        _searchCancellation?.Dispose();
-        _searchCancellation = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
-        var token = _searchCancellation.Token;
+        using var source = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
+        _searchCancellation = source;
+        var token = source.Token;
         var generation = _dataGeneration;
         if (!continueSearch || !string.Equals(query, _lastSearchText, StringComparison.Ordinal))
-        {
-            _searchOffset = Math.Max(_hiddenOffset, _page?.StartOffset ?? _hiddenOffset);
-            _searchResults.Clear();
-            _searchResultButtons.Children.Clear();
-            _activeSearchResult = -1;
-        }
+            ClearSearchResults();
         _lastSearchText = query;
         var startOffset = _searchOffset;
         var regex = _regexBox.IsChecked == true;
         var caseSensitive = _caseBox.IsChecked == true;
         var wholeWord = _wholeWordBox.IsChecked == true;
-        _searchButton.IsEnabled = false;
-        SetStatus("Поиск в логе…");
+        RefreshButtons();
+        SetSearchStatus("Поиск в логе…");
         try
         {
             var result = await Task.Run(() => SearchFile(query, regex, caseSensitive, wholeWord, startOffset, token), token);
-            if (_closed || token.IsCancellationRequested || generation != _dataGeneration)
-            {
-                return;
-            }
+            if (_closed || token.IsCancellationRequested || generation != _dataGeneration) return;
             foreach (var hit in result.Results)
             {
                 _searchResults.Add(hit);
@@ -1130,28 +1171,28 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
             _searchOffset = result.NextOffset;
             _searchHasMore = result.HasMore;
-            _moreButton.IsEnabled = _searchHasMore;
-            SetStatus(result.Message ?? (result.Results.Count == 0 ? "Совпадений не найдено." : $"Найдено {result.Results.Count} совпадений. Нажмите «Ещё» для продолжения."));
+            var count = _searchResults.Count;
+            var status = count == 0 ? "Совпадений не найдено." : $"Найдено {count:N0}";
+            if (_searchHasMore) status += " · нажмите «Ещё»";
+            if (result.Message is not null) status += $" · {result.Message}";
+            SetSearchStatus(status);
         }
-        catch (ObjectDisposedException) when (token.IsCancellationRequested)
+        catch (Exception error) when (token.IsCancellationRequested && error is OperationCanceledException or ObjectDisposedException)
         {
-            // Rotation or shutdown released the file handle of this search.
-        }
-        catch (OperationCanceledException) when (token.IsCancellationRequested)
-        {
-            if (!_closed)
-            {
-                SetStatus("Поиск отменён.");
-            }
+            if (!_closed && _searchPanel.IsVisible && ReferenceEquals(_searchCancellation, source))
+                SetSearchStatus("Поиск остановлен");
         }
         catch (Exception error) when (error is IOException or ArgumentException or RegexMatchTimeoutException)
         {
-            SetStatus($"Поиск остановлен. {error.Message}");
+            if (ReferenceEquals(_searchCancellation, source)) SetSearchStatus($"Поиск остановлен. {error.Message}");
         }
         finally
         {
-            _searchButton.IsEnabled = true;
-            _moreButton.IsEnabled = _searchHasMore;
+            if (ReferenceEquals(_searchCancellation, source))
+            {
+                _searchCancellation = null;
+                RefreshButtons();
+            }
         }
     }
 
@@ -1590,12 +1631,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         _totalLineCount = null;
         RefreshLineCount();
         _skippedSearchLines.Clear();
-        _searchResults.Clear();
-        _searchResultButtons.Children.Clear();
-        _searchOffset = 0;
-        _searchHasMore = false;
-        _activeSearchResult = -1;
-        _lastSearchText = "";
+        ClearSearchResults();
+        _searchStatusText.Text = "";
         _logText.SelectionStart = _logText.SelectionEnd = 0;
     }
 
@@ -2039,7 +2076,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         _hideButton.IsEnabled = enabled && _page?.Rows.Count > 0;
         _revealButton.IsEnabled = enabled && _hiddenOffset > 0;
         _trimButton.IsEnabled = enabled && _hiddenOffset > 0;
-        _searchButton.IsEnabled = enabled;
+        _searchButton.IsEnabled = enabled && _searchCancellation is null;
+        _moreButton.IsEnabled = _searchButton.IsEnabled && _searchHasMore;
+        _cancelSearchButton.IsVisible = _searchCancellation is not null;
         _openSearchButton.IsEnabled = enabled;
         _timeButton.IsEnabled = enabled;
     }

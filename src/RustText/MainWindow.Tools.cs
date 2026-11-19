@@ -101,6 +101,11 @@ public partial class MainWindow
             e.Handled = true;
             return;
         }
+        if (e.Key == Key.Escape && ActiveTab?.Log?.CloseSearch() == true)
+        {
+            e.Handled = true;
+            return;
+        }
 
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Alt))
         {

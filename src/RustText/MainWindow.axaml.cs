@@ -513,7 +513,7 @@ public partial class MainWindow : Window
         }
 
         UpdateStatus(tab);
-        RefreshSearchHighlights();
+        RefreshSearchForActiveTab();
     }
 
     private void OnWindowDragOver(object? sender, DragEventArgs e)

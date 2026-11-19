@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
@@ -227,6 +228,67 @@ public sealed class LogUiTests
             }
         });
     }
+
+    [Fact]
+    public Task LogSearchSeedsSelectionAndFindsAutomaticallyWithCollapsibleResults() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "auto-search.log");
+        const string query = " needle ";
+        await File.WriteAllTextAsync(path, "row needle one\nother\nrow needle two\n");
+        var window = new MainWindow();
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+        try
+        {
+            await InvokeTask(window, "OpenPathAsync", path, true, null);
+            var log = Assert.IsType<LogView>(ActiveLog(window));
+            await log.InitialPageLoad;
+            var text = (TextBox)Field(log, "_logText");
+            text.SelectionStart = 3;
+            text.SelectionEnd = 3 + query.Length;
+            log.FocusSearch();
+            Assert.Equal(query, ((TextBox)Field(log, "_searchBox")).Text);
+            var results = (StackPanel)Field(log, "_searchResultButtons");
+            await HeadlessTests.WaitForAsync(() => results.Children.Count == 2);
+
+            var toggle = Assert.Single(log.GetVisualDescendants().OfType<Button>(),
+                button => AutomationProperties.GetName(button) == "Скрыть список результатов");
+            var scroll = Assert.Single(log.GetVisualDescendants().OfType<ScrollViewer>(),
+                viewer => ReferenceEquals(viewer.Content, results));
+            toggle.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.False(scroll.IsVisible);
+            Assert.Equal(2, results.Children.Count);
+            toggle.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.True(scroll.IsVisible);
+        }
+        finally { await CloseMainWindowAsync(window); }
+    });
+
+    [Fact]
+    public Task GigabyteLogWaitsForTheFindCommand() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "gigabyte.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat("needle\n", 60)));
+        using (var file = File.OpenWrite(path)) file.SetLength(1024L * 1024 * 1024);
+        var window = new MainWindow();
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+        try
+        {
+            await InvokeTask(window, "OpenPathAsync", path, true, null);
+            var log = Assert.IsType<LogView>(ActiveLog(window));
+            await log.InitialPageLoad;
+            log.FocusSearch();
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            var results = (StackPanel)Field(log, "_searchResultButtons");
+            await Task.Delay(650);
+            Assert.Empty(results.Children);
+            ((Button)Field(log, "_searchButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => results.Children.Count == 32);
+        }
+        finally { await CloseMainWindowAsync(window); }
+    });
+
     [Fact]
     public async Task MinimapWheelTrackAndDragNavigateLiveAcrossLog()
     {

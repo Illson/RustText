@@ -1,6 +1,8 @@
 using System.Reflection;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -102,6 +104,81 @@ public sealed class WorkspaceTests
             await log.InitialPageLoad;
             Assert.StartsWith("first row", LogText(log).Text);
             Assert.False(log.IsReadOnly);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task EditorSearchSeedsLiteralSelectionAndRefreshesAsTheQueryChanges() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search.txt");
+        await File.WriteAllTextAsync(path, "a+b one\nother\nA+B two\nA+Bthree");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var input = (TextBox)Field(window, "_searchInput");
+            var regex = (ToggleButton)Field(window, "_regexOption");
+            var results = (ListBox)Field(window, "_searchResults");
+            regex.IsChecked = true;
+            editor.TextArea.Focus();
+            editor.Select(0, 4);
+            editor.CaretOffset = 4;
+            Press(window, Key.F, RawInputModifiers.Control, PhysicalKey.F, "f");
+
+            Assert.Equal("a+b ", input.Text);
+            Assert.False(regex.IsChecked);
+            await HeadlessTests.WaitForAsync(() => results.Items.Count == 2);
+            Assert.Equal(4, editor.SelectionLength);
+
+            ((ToggleButton)Field(window, "_caseOption")).IsChecked = true;
+            await HeadlessTests.WaitForAsync(() => results.Items.Count == 1);
+            Assert.Contains("a+b one", ((ListBoxItem)results.Items[0]!).Content!.ToString());
+            input.Text = "other";
+            input.Text = "A+Bthree";
+            await HeadlessTests.WaitForAsync(() => results.Items.Count == 1
+                && ((ListBoxItem)results.Items[0]!).Content!.ToString()!.Contains("A+Bthree", StringComparison.Ordinal));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task FindAllSelectsBeyondThePreviewListAndTheListCanBeCollapsed() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "find-all.txt");
+        await File.WriteAllTextAsync(path, string.Join('\n', Enumerable.Range(1, 140).Select(i => $"v{i:D3} keep")));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            window.Width = 650;
+            window.Height = 360;
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            Invoke(window, "OpenSearchPanel", true);
+            var input = (TextBox)Field(window, "_searchInput");
+            var replacement = (TextBox)Field(window, "_replacement");
+            var results = (ListBox)Field(window, "_searchResults");
+            var findAll = (Button)Field(window, "_findAll");
+            ((ToggleButton)Field(window, "_regexOption")).IsChecked = true;
+            input.Text = @"v\d+";
+            await HeadlessTests.WaitForAsync(() => results.Items.Count == 100
+                && input.Bounds.Width > 100 && replacement.IsVisible && replacement.Bounds.Width > 100);
+            Assert.Equal(input.Bounds.Width, replacement.Bounds.Width);
+            var toggle = Assert.Single(window.GetVisualDescendants().OfType<Button>(),
+                button => AutomationProperties.GetName(button) == "Скрыть список результатов");
+            Click(toggle);
+            Assert.False(results.IsVisible);
+            Assert.Equal(100, results.Items.Count);
+            Click(toggle);
+            Assert.True(results.IsVisible);
+
+            Click(findAll);
+            await HeadlessTests.WaitForAsync(() => MultiCaretEditing.Count(editor.TextArea) == 140);
+            Assert.True(editor.TextArea.IsKeyboardFocusWithin);
+            window.KeyTextInput("X");
+            Assert.Equal(string.Join('\n', Enumerable.Repeat("X keep", 140)), editor.Text);
+            editor.Undo();
+            Assert.StartsWith("v001 keep", editor.Text);
+            Assert.EndsWith("v140 keep", editor.Text);
         }
         finally { await CloseAsync(window); }
     });

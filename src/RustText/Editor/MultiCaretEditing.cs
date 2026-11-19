@@ -22,7 +22,7 @@ internal readonly record struct CaretEdit(CaretRange Range, string Text);
 
 internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
 {
-    private const int MaxCarets = 10_000;
+    internal const int MaxCarets = 10_000;
     private readonly TextArea _area;
     private readonly Func<IReadOnlyList<CaretEdit>, bool> _canEdit;
     private readonly Action<string> _status;
@@ -73,6 +73,21 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         var primary = multi.Primary;
         area.Caret.Offset = primary.Caret;
         area.Selection = Selection.Create(area, primary.Anchor, primary.Caret);
+    }
+
+    public void SelectMatches(IReadOnlyList<CaretRange> ranges)
+    {
+        if (ranges.Count == 0) return;
+        var primary = 0;
+        var caret = _area.Caret.Offset;
+        for (var index = 0; index < ranges.Count; index++)
+        {
+            if (ranges[index].End < caret) continue;
+            primary = index;
+            break;
+        }
+        SetCarets(ranges, primary);
+        _area.Focus();
     }
 
     public void Paste(string text)
