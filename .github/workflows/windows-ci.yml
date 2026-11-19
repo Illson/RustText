@@ -17,41 +17,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust:
-    name: Windows Rust checks
+  avalonia:
+    name: Windows .NET checks
     runs-on: windows-2025
-    timeout-minutes: 35
-    env:
-      RUSTUP_TOOLCHAIN: 1.100.0-x86_64-pc-windows-msvc
-      CARGO_INCREMENTAL: '0'
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        run: rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt --component clippy
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
 
-      # Добавленный шаг кеширования
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Build Debug
+        run: dotnet build RustText.slnx -c Debug --nologo
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Run .NET regression tests
+        run: dotnet test RustText.slnx -c Debug --no-build --nologo
 
-      - name: Run tests
-        run: cargo test --locked
+      - name: Publish and check the standalone Native AOT executable
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'rusttext-win-x64'
+          dotnet publish src/RustText/RustText.csproj -c Release -r win-x64 -o $output --nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-      - name: Test DirectWrite without Factory5
-        run: cargo test --locked -p gpui-pre-windows --lib direct_write::tests::build_14393_font_path_does_not_need_factory5 -- --exact
+          $files = @(Get-ChildItem -LiteralPath $output -Force)
+          if ($files.Count -ne 1 -or $files[0].Name -cne 'rusttext.exe' -or $files[0].PSIsContainer) {
+            throw 'The publish directory must contain exactly one rusttext.exe.'
+          }
 
-      - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+          $stream = [IO.File]::OpenRead($files[0].FullName)
+          $reader = [System.Reflection.PortableExecutable.PEReader]::new($stream)
+          try {
+            $headers = $reader.PEHeaders
+            if ($headers.CoffHeader.Machine -ne 'Amd64' -or $headers.CorHeader) {
+              throw 'rusttext.exe must be a native Windows x64 executable.'
+            }
+          } finally {
+            $reader.Dispose()
+          }
 
-      - name: Build portable Windows executable
-        env:
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
-
-      - name: Check portable Windows executable imports
-        run: ./tools/Check-ReleaseImports.ps1 -ExecutablePath target/x86_64-pc-windows-msvc/release/rusttext.exe
+          $managedInput = Resolve-Path -LiteralPath 'src/RustText/obj/Release/net11.0/win-x64/rusttext.dll'
+          $reader = [System.Reflection.PortableExecutable.PEReader]::new([IO.File]::OpenRead($managedInput.Path))
+          try {
+            $metadata = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($reader, 0, $null)
+            $resources = @(foreach ($handle in $metadata.ManifestResources) {
+              $metadata.GetString($metadata.GetManifestResource($handle).Name)
+            })
+            foreach ($name in 'av_libglesv2.dll', 'libHarfBuzzSharp.dll', 'libSkiaSharp.dll') {
+              if ($resources -cnotcontains "RustText.Demo.NativePayload.$name") {
+                throw "Missing embedded resource $name in the Native AOT compilation input."
+              }
+            }
+          } finally {
+            $reader.Dispose()
+          }

@@ -1,0 +1,219 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:chrome="using:Avalonia.Controls.Chrome"
+             xmlns:local="using:RustText.Demo"
+             x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
+    <Application.Resources>
+        <ControlTheme x:Key="FocusDocumentTab" TargetType="TabItem">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Panel}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Margin" Value="0,0,3,0" />
+            <Setter Property="Padding" Value="9,0,3,0" />
+            <Setter Property="MinWidth" Value="116" />
+            <Setter Property="MinHeight" Value="35" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Border Name="TabSurface"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="0,2,0,0"
+                            CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter Name="PART_ContentPresenter" Content="{TemplateBinding Header}"
+                                          ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                          HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center" />
+                    </Border>
+                </ControlTemplate>
+            </Setter>
+            <Style Selector="^:not(:selected):pointerover">
+                <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+                <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            </Style>
+            <Style Selector="^:selected">
+                <Setter Property="Background" Value="{x:Static local:FocusTheme.Editor}" />
+                <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Accent}" />
+                <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            </Style>
+            <Style Selector="^:disabled">
+                <Setter Property="Opacity" Value="0.55" />
+            </Style>
+        </ControlTheme>
+
+        <ControlTheme x:Key="{x:Type local:WorkspaceTabs}" TargetType="local:WorkspaceTabs">
+            <Setter Property="ItemsPanel">
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" />
+                </ItemsPanelTemplate>
+            </Setter>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
+                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,5,8,0">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <ScrollViewer Name="TabHeaderScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                                    <ItemsPresenter Name="PART_ItemsPresenter" ItemsPanel="{TemplateBinding ItemsPanel}" />
+                                </ScrollViewer>
+                                <ContentPresenter Grid.Column="1" Content="{TemplateBinding HeaderActions}"
+                                                  VerticalAlignment="Center" Margin="4,0,0,3" />
+                            </Grid>
+                        </Border>
+                        <Panel Grid.Row="1" ClipToBounds="True">
+                            <ContentPresenter Name="PART_SelectedContentHost2" IsVisible="False"
+                                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+                            <ContentPresenter Name="PART_SelectedContentHost"
+                                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Panel>
+                    </Grid>
+                </ControlTemplate>
+            </Setter>
+        </ControlTheme>
+
+        <SolidColorBrush x:Key="TextControlBackground" Color="{x:Static local:FocusTheme.FieldColor}" />
+        <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="{x:Static local:FocusTheme.FieldColor}" />
+        <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="{x:Static local:FocusTheme.FieldColor}" />
+        <SolidColorBrush x:Key="TextControlBorderBrush" Color="{x:Static local:FocusTheme.BorderColor}" />
+        <SolidColorBrush x:Key="TextControlPlaceholderForeground" Color="{x:Static local:FocusTheme.MutedColor}" />
+    </Application.Resources>
+
+    <Application.Styles>
+        <FluentTheme DensityStyle="Compact">
+            <FluentTheme.Palettes>
+                <ColorPaletteResources x:Key="Dark" Accent="{x:Static local:FocusTheme.AccentColor}"
+                                       RegionColor="{x:Static local:FocusTheme.ChromeColor}"
+                                       AltHigh="{x:Static local:FocusTheme.FieldColor}"
+                                       BaseHigh="{x:Static local:FocusTheme.TextColor}"
+                                       BaseMediumHigh="{x:Static local:FocusTheme.MutedColor}"
+                                       BaseMedium="{x:Static local:FocusTheme.MutedColor}"
+                                       BaseLow="{x:Static local:FocusTheme.BorderColor}"
+                                       ChromeLow="{x:Static local:FocusTheme.ChromeColor}"
+                                       ChromeMediumLow="{x:Static local:FocusTheme.PanelColor}"
+                                       ListLow="{x:Static local:FocusTheme.HoverColor}"
+                                       ListMedium="{x:Static local:FocusTheme.SelectionColor}" />
+            </FluentTheme.Palettes>
+        </FluentTheme>
+        <Style Selector="chrome|WindowDrawnDecorations /template/ Button#PART_FullScreenButton,
+                         chrome|WindowDrawnDecorations /template/ Button#PART_PopoverFullScreenButton,
+                         chrome|WindowDrawnDecorations /template/ Panel#PART_TitleTextPanel,
+                         chrome|WindowDrawnDecorations /template/ TextBlock#PART_PopoverTitleText">
+            <Setter Property="IsVisible" Value="False" />
+        </Style>
+        <Style Selector="Window">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Chrome}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
+        <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
+        <Style Selector="TabItem.focus-tab">
+            <Setter Property="Theme" Value="{StaticResource FocusDocumentTab}" />
+        </Style>
+        <Style Selector="Button.focus-caption">
+            <Setter Property="Width" Value="46" />
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Button.focus-caption:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+        </Style>
+        <Style Selector="Button.focus-caption-close:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.DangerSurface}" />
+        </Style>
+        <Style Selector="Window.focus-dialog">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Panel}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="FontSize" Value="13" />
+        </Style>
+        <Style Selector="TextBox.focus-log-editor">
+            <Setter Property="CornerRadius" Value="0" />
+            <Setter Property="BorderThickness" Value="0" />
+        </Style>
+        <Style Selector="TextBox.focus-log-editor:pointerover /template/ Border#PART_BorderElement,
+                         TextBox.focus-log-editor:focus /template/ Border#PART_BorderElement">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Editor}" />
+        </Style>
+        <Style Selector="Menu.focus-menu">
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+        <Style Selector="Menu.focus-menu > MenuItem">
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
+            <Setter Property="Padding" Value="9,5" />
+        </Style>
+        <Style Selector="Button.focus-quiet, Button.focus-icon">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="CornerRadius" Value="4" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
+        </Style>
+        <Style Selector="Button.focus-icon">
+            <Setter Property="MinWidth" Value="26" />
+            <Setter Property="MinHeight" Value="25" />
+            <Setter Property="Padding" Value="3,0" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Button.search-command, Button.search-primary, ToggleButton.search-option">
+            <Setter Property="MinHeight" Value="26" />
+            <Setter Property="Padding" Value="7,2" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Field}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Border}" />
+            <Setter Property="CornerRadius" Value="3" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+        <Style Selector="Button.search-primary">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="ToggleButton.search-option">
+            <Setter Property="MinWidth" Value="26" />
+            <Setter Property="Padding" Value="4,1" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+        </Style>
+        <Style Selector="ToggleButton.search-option:checked /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Accent}" />
+        </Style>
+        <Style Selector="TextBox.search-input">
+            <Setter Property="MinWidth" Value="78" />
+            <Setter Property="MinHeight" Value="26" />
+            <Setter Property="Padding" Value="6,2" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="CornerRadius" Value="3" />
+        </Style>
+        <Style Selector="Button.focus-quiet:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                         Button.focus-icon:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
+        <Style Selector="Button.focus-primary">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Accent}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Deep}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="Button.focus-primary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.AccentHover}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Deep}" />
+        </Style>
+        <Style Selector="Button.focus-danger">
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Danger}" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.DangerSurface}" />
+        </Style>
+        <Style Selector="Button.focus-danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Danger}" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.DangerSurface}" />
+        </Style>
+    </Application.Styles>
+</Application>
