@@ -16,7 +16,7 @@ public partial class MainWindow
         public SemaphoreSlim CloseGate { get; } = new(1, 1);
         public List<MainWindow> Windows { get; } = [];
         public List<SessionTab> ClosedTabs { get; } = [];
-        public HashSet<long> RestoringClosedTabs { get; } = [];
+        public HashSet<long> ClosedTabOperations { get; } = [];
         public Dictionary<long, SavedLiveDraft> LiveDrafts { get; } = [];
         public long NextId;
         public int? LastCheckpoint;

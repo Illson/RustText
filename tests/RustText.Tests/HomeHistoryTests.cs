@@ -1,4 +1,5 @@
 using System.Reflection;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
@@ -25,13 +26,13 @@ public sealed class HomeHistoryTests
 
             await HeadlessTests.WaitForAsync(() =>
                 window.GetVisualDescendants().OfType<TextBlock>().Any(text => text.Text == "Призрачные вкладки"));
-            Assert.Contains(HomeButtons(window), button => button.Content is string label && label.StartsWith(caption, StringComparison.Ordinal));
+            Assert.Contains(HomeButtons(window), button => AutomationProperties.GetName(button) == caption);
 
             await CloseAsync(window);
             window = await OpenWorkspaceAsync();
 
-            var closedDraft = Assert.Single(HomeButtons(window), button =>
-                button.Content is string label && label.StartsWith(caption, StringComparison.Ordinal));
+            await HeadlessTests.WaitForAsync(() => HasButton(window, caption));
+            var closedDraft = FindButton(window, caption);
             closedDraft.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
 
             await HeadlessTests.WaitForAsync(() => ActiveEditor(window) is { Text: draft });
@@ -46,8 +47,98 @@ public sealed class HomeHistoryTests
         }
     });
 
+    [Fact]
+    public Task HistoryCanCollapseAndRemoveEntriesWithoutDeletingAnOrdinaryFile() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenForTesting(profile);
+        var path = Path.Combine(profile, "recent.txt");
+        await File.WriteAllBytesAsync(path, new byte[2048]);
+        await storage.AddRecentAsync(new RecentFileEntry(path, TextEncodingKind.Utf8));
+        await storage.SaveSessionAsync(new SessionState([], [new SessionTab(11, path, TextEncodingKind.Utf8)]));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<Expander>().Count() == 3);
+            var headings = window.GetVisualDescendants().OfType<Expander>().ToArray();
+            Assert.Equal(new[] { "Недавние файлы", "Закрытые файлы", "Призрачные вкладки" }, headings.Select(AutomationProperties.GetName));
+            await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<TextBlock>().Any(text => text.Text == "2 КиБ"));
+            headings[0].IsExpanded = false;
+            await CallAsync(window, "ShowHomeAsync");
+            await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<Expander>().Count() == 3);
+            var recent = window.GetVisualDescendants().OfType<Expander>().First();
+            Assert.False(recent.IsExpanded);
+            recent.IsExpanded = true;
+            await HeadlessTests.WaitForAsync(() => HasButton(window, "Удалить из недавних: recent.txt"));
+            Click(FindButton(window, "Удалить из недавних: recent.txt"));
+            await HeadlessTests.WaitForAsync(() => !HasButton(window, "Удалить из недавних: recent.txt"));
+            Assert.Empty(await storage.GetRecentFilesAsync());
+            Click(FindButton(window, "Удалить из истории: recent.txt"));
+            await HeadlessTests.WaitForAsync(() => !HasButton(window, "Удалить из истории: recent.txt"));
+            Assert.Empty((await storage.LoadSessionAsync())!.ClosedTabs!);
+            Assert.Equal(2048, new FileInfo(path).Length);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ConfirmedDraftDeletionReleasesItsFileAndSurvivesCheckpointRecovery() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenForTesting(profile);
+        var deleted = await storage.SaveClosedDraftAsync(new SessionTab(27, null, TextEncodingKind.Utf8) { UntitledName = "Удаляемый" }, new string('x', 4096));
+        var kept = await storage.SaveClosedDraftAsync(new SessionTab(28, null, TextEncodingKind.Utf8) { UntitledName = "Соседний" }, "keep this draft");
+        var saved = await storage.SaveSessionAsync(new SessionState([], [deleted, kept]));
+        var file = storage.GetDraftPath(saved.ClosedTabs!.Single(item => item.Id == deleted.Id))!;
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<TextBlock>().Any(text => text.Text == "4 КиБ"));
+            Click(FindButton(window, "Удалить сохранённый черновик: Удаляемый"));
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count > 0);
+            var dialog = Assert.Single(window.OwnedWindows);
+            Click(dialog.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "Отмена")));
+            Assert.True(File.Exists(file));
+            var operations = (HashSet<long>)Property(Field(window, "_workspace")!, "ClosedTabOperations")!;
+            await HeadlessTests.WaitForAsync(() => !operations.Contains(deleted.Id));
+
+            Invoke(window, "ShowGroups");
+            Invoke(window, "NewTab", "Несохранённый текст из последней сессии");
+            await CallAsync(window, "ShowHomeAsync");
+            await HeadlessTests.WaitForAsync(() => HasButton(window, "Удалить сохранённый черновик: Удаляемый"));
+            Click(FindButton(window, "Удалить сохранённый черновик: Удаляемый"));
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count > 0);
+            dialog = Assert.Single(window.OwnedWindows);
+            Click(dialog.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "Удалить")));
+            await HeadlessTests.WaitForAsync(() => !HasButton(window, "Удалить сохранённый черновик: Удаляемый"));
+            Assert.False(File.Exists(file));
+            var checkpoints = Path.Combine(storage.RootDirectory, "session");
+            var current = (await File.ReadAllTextAsync(Path.Combine(checkpoints, "latest.json"))).Trim();
+            Assert.Single((await storage.LoadSessionAsync())!.Tabs);
+            var manifest = Path.Combine(checkpoints, current, "manifest.json");
+            var original = await File.ReadAllBytesAsync(manifest);
+            try
+            {
+                await File.WriteAllTextAsync(manifest, "corrupt checkpoint");
+                var backup = (await storage.LoadSessionAsync())!;
+                Assert.Empty(backup.Tabs);
+                var recovered = Assert.Single(backup.ClosedTabs!);
+                Assert.Equal(kept.Id, recovered.Id);
+                Assert.Equal("keep this draft", await storage.LoadDraftAsync(recovered));
+            }
+            finally { await File.WriteAllBytesAsync(manifest, original); }
+        }
+        finally { await CloseAsync(window); }
+    });
+
     private static IEnumerable<Button> HomeButtons(MainWindow window) =>
         window.GetVisualDescendants().OfType<Button>();
+
+    private static Button FindButton(MainWindow window, string label) =>
+        Assert.Single(HomeButtons(window), button => AutomationProperties.GetName(button) == label);
+
+    private static bool HasButton(MainWindow window, string label) =>
+        HomeButtons(window).Any(button => AutomationProperties.GetName(button) == label);
+
+    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
 
     private static TextEditor? ActiveEditor(MainWindow window) => Property(ActiveTab(window), "Editor") as TextEditor;
 

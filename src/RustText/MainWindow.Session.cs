@@ -220,9 +220,10 @@ public partial class MainWindow
 
     private Task SaveSessionAsync() => SaveWorkspaceSessionAsync(excludeWindow: null);
 
-    private async Task SaveWorkspaceSessionAsync(MainWindow? excludeWindow)
+    private async Task SaveWorkspaceSessionAsync(MainWindow? excludeWindow, SessionTab? forgetClosedTab = null)
     {
-        if (!_restoreFinished && !_closing)
+        var forgetClosedId = forgetClosedTab?.Id;
+        if (!_restoreFinished && !_closing && forgetClosedId is null)
         {
             return;
         }
@@ -240,11 +241,11 @@ public partial class MainWindow
             var index = homeWindow.ActiveTab is { } active ? Array.IndexOf(tabs, active) : 0;
             var width = double.IsFinite(homeWindow.Width) ? homeWindow.Width : 1080;
             var height = double.IsFinite(homeWindow.Height) ? homeWindow.Height : 700;
-            var session = new SessionState(state, _closedTabs.Take(100).ToList(),
+            var session = new SessionState(state, _closedTabs.Where(tab => tab.Id != forgetClosedId).Take(100).ToList(),
                 Math.Max(0, index), width, height, homeWindow.WindowState == WindowState.Maximized,
                 homeWindow._wordWrap, homeWindow._fontSize, homeWindow.CaptureLayout(homeWindow._root), homeWindow._active.Id);
             var fingerprint = CheckpointFingerprint(session, tabs);
-            if (!_closing && _workspace.LastCheckpoint == fingerprint) return;
+            if (forgetClosedId is null && !_closing && _workspace.LastCheckpoint == fingerprint) return;
 
             var drafts = new Dictionary<long, Func<TextReader>>();
             var liveDrafts = new Dictionary<long, (AvaloniaEdit.Document.TextDocument Document, long Revision)>();
@@ -287,6 +288,14 @@ public partial class MainWindow
                 if (closedIndex >= 0) _closedTabs[closedIndex] = committed.ClosedTabs![i];
             }
             _workspace.LastCheckpoint = fingerprint;
+            if (forgetClosedTab is { } removed)
+            {
+                _closedTabs.RemoveAll(tab => tab.Id == removed.Id);
+                _workspace.LastCheckpoint = null;
+                var removeBackupDraft = removed.DraftRef is not null && committed.Tabs.All(tab => tab.Id != removed.Id);
+                await _storage.RemoveHistoryFromPreviousCheckpointAsync(removed.Id, removeBackupDraft);
+                _workspace.LastCheckpoint = fingerprint;
+            }
         }
         finally
         {
@@ -579,26 +588,28 @@ public partial class MainWindow
         bool preserveUnsavedText = false,
         bool deferHistoryLimit = false)
     {
-        var saved = CaptureTab(tab);
-        if (tab.Editor is { } editor && (tab.Path is null || (preserveUnsavedText && tab.Dirty)))
+        await _workspace.SaveGate.WaitAsync(_lifetime.Token);
+        try
         {
-            if (FindSavedLiveDraft(tab) is { } existingDraft)
+            var saved = CaptureTab(tab);
+            if (tab.Editor is { } editor && (tab.Path is null || (preserveUnsavedText && tab.Dirty)))
             {
-                saved = saved with { DraftRef = existingDraft.DraftRef, DraftSha256 = existingDraft.DraftSha256 };
+                if (FindSavedLiveDraft(tab) is { } existingDraft)
+                {
+                    saved = saved with { DraftRef = existingDraft.DraftRef, DraftSha256 = existingDraft.DraftSha256 };
+                }
+                else
+                {
+                    var snapshot = editor.Document.CreateSnapshot();
+                    saved = await _storage.SaveClosedDraftAsync(saved, snapshot.CreateReader, _lifetime.Token);
+                }
             }
-            else
-            {
-                var snapshot = editor.Document.CreateSnapshot();
-                saved = await _storage.SaveClosedDraftAsync(saved, snapshot.CreateReader, _lifetime.Token);
-            }
-        }
 
-        _closedTabs.RemoveAll(item => item.Id == saved.Id);
-        _closedTabs.Insert(0, saved);
-        if (!deferHistoryLimit && _closedTabs.Count > 100)
-        {
-            _closedTabs.RemoveAt(_closedTabs.Count - 1);
+            _closedTabs.RemoveAll(item => item.Id == saved.Id);
+            _closedTabs.Insert(0, saved);
+            if (!deferHistoryLimit && _closedTabs.Count > 100) _closedTabs.RemoveAt(_closedTabs.Count - 1);
         }
+        finally { _workspace.SaveGate.Release(); }
 
         RefreshHistoryMenus();
     }
@@ -607,7 +618,7 @@ public partial class MainWindow
 
     private async Task RestoreClosedAsync(SessionTab saved)
     {
-        if (!_workspace.RestoringClosedTabs.Add(saved.Id))
+        if (!_closedTabs.Any(tab => tab.Id == saved.Id) || !_workspace.ClosedTabOperations.Add(saved.Id))
         {
             return;
         }
@@ -618,7 +629,7 @@ public partial class MainWindow
         }
         finally
         {
-            _workspace.RestoringClosedTabs.Remove(saved.Id);
+            _workspace.ClosedTabOperations.Remove(saved.Id);
         }
     }
 
@@ -765,144 +776,13 @@ public partial class MainWindow
         }
     }
 
-    private async Task ShowHomeAsync()
-    {
-        _home = true;
-        SetCaption(null);
-        _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
-        if (!_home)
-        {
-            return;
-        }
-
-        var input = new TextBox
-        {
-            PlaceholderText = "Поиск по имени или пути",
-            Background = FocusTheme.Field,
-            Foreground = FocusTheme.Text,
-            BorderBrush = FocusTheme.Border
-        };
-        var recentRows = new StackPanel { Spacing = 3 };
-        var closedFileRows = new StackPanel { Spacing = 3 };
-        var ghostRows = new StackPanel { Spacing = 3 };
-        var footer = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
-        var index = 0;
-        var closedFilesSection = new StackPanel { Spacing = 5 };
-        closedFilesSection.Children.Add(new TextBlock { Text = "Закрытые файлы", Foreground = FocusTheme.Text, FontSize = 16 });
-        closedFilesSection.Children.Add(closedFileRows);
-        var ghostsSection = new StackPanel { Spacing = 5 };
-        ghostsSection.Children.Add(new TextBlock { Text = "Призрачные вкладки", Foreground = FocusTheme.Text, FontSize = 16 });
-        ghostsSection.Children.Add(ghostRows);
-        void Rebuild()
-        {
-            recentRows.Children.Clear();
-            closedFileRows.Children.Clear();
-            ghostRows.Children.Clear();
-            var term = input.Text?.Trim() ?? "";
-            var closedFiles = _closedTabs
-                .Where(item => item.Path is not null)
-                .Select(item => (Item: item, Name: ClosedTabDisplayName(item)))
-                .Where(entry => entry.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
-                    || entry.Item.Path?.Contains(term, StringComparison.OrdinalIgnoreCase) == true)
-                .ToArray();
-            foreach (var (item, name) in closedFiles)
-            {
-                var label = FocusButton(Button($"{name}   {DescribeWork(item.LineCount, item.LastWorkedMs)}",
-                    () => Run(() => RestoreClosedAsync(item))));
-                label.HorizontalAlignment = HorizontalAlignment.Stretch;
-                label.HorizontalContentAlignment = HorizontalAlignment.Left;
-                if (item.Path is { } path)
-                {
-                    ToolTip.SetTip(label, path);
-                }
-
-                closedFileRows.Children.Add(label);
-            }
-            closedFilesSection.IsVisible = closedFileRows.Children.Count > 0;
-
-            var ghosts = _closedTabs
-                .Where(item => item.Path is null)
-                .Select(item => (Item: item, Name: ClosedTabDisplayName(item)))
-                .Where(entry => entry.Name.Contains(term, StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-            foreach (var (item, name) in ghosts)
-            {
-                var label = FocusButton(Button($"{name}   {DescribeWork(item.LineCount, item.LastWorkedMs)}",
-                    () => Run(() => RestoreClosedAsync(item))));
-                label.HorizontalAlignment = HorizontalAlignment.Stretch;
-                label.HorizontalContentAlignment = HorizontalAlignment.Left;
-                ghostRows.Children.Add(label);
-            }
-            ghostsSection.IsVisible = ghostRows.Children.Count > 0;
-
-            var visible = _recent.Where(item => item.Path.Contains(term, StringComparison.OrdinalIgnoreCase)).ToArray();
-            var count = Math.Max(1, (visible.Length + 15) / 16);
-            index = Math.Clamp(index, 0, count - 1);
-            foreach (var entry in visible.Skip(index * 16).Take(16))
-            {
-                var label = FocusButton(Button($"{Path.GetFileName(entry.Path)}   {DescribeWork(entry.LineCount, entry.LastWorkedMs)}",
-                    () => Run(() => OpenRecentAsync(entry))));
-                label.HorizontalAlignment = HorizontalAlignment.Stretch;
-                label.HorizontalContentAlignment = HorizontalAlignment.Left;
-                ToolTip.SetTip(label, entry.Path);
-                recentRows.Children.Add(label);
-            }
-
-            footer.Text = $"Страница {index + 1} из {count}";
-        }
-
-        input.TextChanged += (_, _) => { index = 0; Rebuild(); };
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        actions.Children.Add(FocusButton(Button("Назад", () => { index--; Rebuild(); })));
-        actions.Children.Add(footer);
-        actions.Children.Add(FocusButton(Button("Дальше", () => { index++; Rebuild(); })));
-        var surface = new Grid
-        {
-            MaxWidth = 840,
-            Margin = new Thickness(18),
-            RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"),
-            RowSpacing = 10,
-            Background = FocusTheme.Editor
-        };
-        var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        head.Children.Add(new TextBlock { Text = "История файлов", FontSize = 20, Foreground = FocusTheme.Text });
-        head.Children.Add(FocusButton(Button("Открыть…", () => Run(() => OpenDialogAsync())), primary: true));
-        head.Children.Add(FocusButton(Button("Новый документ", () => { ShowGroups(); NewTab(); })));
-        if (_tabs.Count > 0)
-        {
-            head.Children.Add(FocusButton(Button("К вкладкам", ShowGroups)));
-        }
-
-        surface.Children.Add(head);
-        Grid.SetRow(input, 1);
-        surface.Children.Add(input);
-        var historyRows = new StackPanel { Spacing = 14 };
-        historyRows.Children.Add(ghostsSection);
-        historyRows.Children.Add(closedFilesSection);
-
-        var recentSection = new StackPanel { Spacing = 5 };
-        recentSection.Children.Add(new TextBlock { Text = "Недавние файлы", Foreground = FocusTheme.Text, FontSize = 16 });
-        recentSection.Children.Add(recentRows);
-        historyRows.Children.Add(recentSection);
-        var scroll = new ScrollViewer { Content = historyRows };
-        Grid.SetRow(scroll, 2);
-        surface.Children.Add(scroll);
-        Grid.SetRow(actions, 3);
-        surface.Children.Add(actions);
-        WorkspaceHost.Content = surface;
-        _lastHomeRefresh = DateTimeOffset.Now;
-        _refreshHome = Rebuild;
-        Rebuild();
-        SetStatus("История файлов");
-        FormatText.Text = "";
-    }
-
     private void RefreshHistoryMenus()
     {
         foreach (var window in _workspace.Windows.ToArray())
         {
             window._recent = _recent;
             window.RefreshHistoryMenusLocal();
+            window._refreshHome?.Invoke();
         }
     }
 

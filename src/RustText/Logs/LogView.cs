@@ -463,6 +463,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _trimCancellation?.Cancel();
         _refreshTimer.Stop();
         _logText.LayoutUpdated -= OnLogTextLayoutUpdated;
+        AttachLogScrollbar(null);
         _file.Dispose();
         _closing.Dispose();
     }
@@ -750,7 +751,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
         };
         _logText.AddHandler(KeyDownEvent, OnLogKeyDown, RoutingStrategies.Tunnel);
-        _logText.AddHandler(PointerWheelChangedEvent, OnLogPointerWheel, RoutingStrategies.Tunnel);
+        AddHandler(PointerWheelChangedEvent, OnLogPointerWheel, RoutingStrategies.Tunnel, handledEventsToo: true);
         _minimap.PointerPressed += OnMinimapPointerPressed;
         _minimap.PointerMoved += OnMinimapPointerMoved;
         _minimap.PointerReleased += OnMinimapPointerReleased;
@@ -787,23 +788,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             e.Handled = true;
             FocusSearch();
-        }
-    }
-
-    private async void OnLogPointerWheel(object? sender, PointerWheelEventArgs e)
-    {
-        if (_busy || _closed || _pageEdit is not null || _page is not { } page || _logScrollViewer is not { } scroll
-            || e.KeyModifiers != KeyModifiers.None || Math.Abs(e.Delta.Y) < Math.Abs(e.Delta.X)) return;
-
-        if (e.Delta.Y < 0 && page.HasMore && scroll.Offset.Y >= scroll.Extent.Height - scroll.Viewport.Height - 1)
-        {
-            e.Handled = true;
-            await NavigateAsync(page.NextOffset, saveHistory: false);
-        }
-        else if (e.Delta.Y > 0 && page.StartOffset > _hiddenOffset && scroll.Offset.Y <= 1)
-        {
-            e.Handled = true;
-            await NavigatePreviousAsync(scrollToEnd: true, adjacent: true);
         }
     }
 
@@ -1880,6 +1864,11 @@ internal sealed partial class LogView : UserControl, IDisposable
     private void AttachLogScrollViewer()
     {
         var scrollViewer = _logText.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
+        if (!ReferenceEquals(scrollViewer, _logScrollViewer) || _verticalLogScrollbar is null)
+        {
+            AttachLogScrollbar(scrollViewer?.GetVisualDescendants().OfType<ScrollBar>()
+                .FirstOrDefault(bar => bar.Orientation == Orientation.Vertical));
+        }
         if (ReferenceEquals(scrollViewer, _logScrollViewer))
         {
             return;
@@ -1891,6 +1880,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _logScrollViewer = scrollViewer;
         if (_logScrollViewer is not null)
         {
+            _logScrollViewer.AllowAutoHide = false;
             _logScrollViewer.ScrollChanged += OnLogScrollChanged;
             _lineGutterScrollViewer.Offset = new Vector(0, _logScrollViewer.Offset.Y);
         }

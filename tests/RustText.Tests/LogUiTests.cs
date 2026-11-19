@@ -2,8 +2,10 @@ using System.Reflection;
 using System.Text;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Input;
+using Avalonia.Layout;
 using Avalonia.VisualTree;
 using RustText.Demo;
 using RustText.Demo.Logs;
@@ -20,6 +22,58 @@ public sealed class LogUiTests
     public LogUiTests(ITestOutputHelper output) => _output = output;
 
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task RegularScrollContinuesAtTheNextChunk(bool dragThumb) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "continuous.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(1, 240).Select(row => $"row-{row:D4}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            window.Width = 760;
+            window.Height = 470;
+            var text = (TextBox)Field(log, "_logText");
+            await HeadlessTests.WaitForAsync(() => Field(log, "_logScrollViewer") is ScrollViewer scroll
+                && scroll.Viewport.Height > 0 && scroll.Extent.Height > scroll.Viewport.Height);
+            var pointer = text.TranslatePoint(new Point(100, 80), window)!.Value;
+            if (dragThumb)
+            {
+                var bar = text.GetVisualDescendants().OfType<ScrollBar>().Single(item => item.Orientation == Orientation.Vertical);
+                var thumb = bar.GetVisualDescendants().OfType<Thumb>().Single();
+                await HeadlessTests.WaitForAsync(() => thumb.Bounds.Width > 0 && thumb.Bounds.Height > 0);
+                Point ThumbCenter() => thumb.TranslatePoint(new Point(thumb.Bounds.Width / 2, thumb.Bounds.Height / 2), window)!.Value;
+                window.MouseMove(ThumbCenter());
+                await HeadlessTests.WaitForAsync(() => window.InputHitTest(ThumbCenter()) is Visual hit
+                    && (ReferenceEquals(hit, thumb) || thumb.IsVisualAncestorOf(hit)));
+                var start = ThumbCenter();
+                var bottom = bar.TranslatePoint(new Point(bar.Bounds.Width / 2, bar.Bounds.Height + 50), window)!.Value;
+                window.MouseDown(start, MouseButton.Left, RawInputModifiers.None);
+                window.MouseMove(bottom, RawInputModifiers.LeftMouseButton);
+                window.MouseUp(bottom, MouseButton.Left, RawInputModifiers.None);
+            }
+            else
+            {
+                for (var i = 0; i < 60 && Page(log)?.StartOffset == 0; i++)
+                {
+                    window.MouseWheel(pointer, new Vector(0, -1));
+                    await Task.Delay(12);
+                }
+            }
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 80 * 9);
+            Assert.StartsWith("row-0081", text.Text);
+            Assert.Equal("Строки 81–160", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
+            var viewer = (ScrollViewer)Field(log, "_logScrollViewer");
+            await HeadlessTests.WaitForAsync(() => viewer.Offset.Y <= 1);
+            window.MouseWheel(pointer, new Vector(0, 1));
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 0
+                && viewer.Offset.Y >= viewer.Extent.Height - viewer.Viewport.Height - 1);
+            Assert.EndsWith("row-0080", text.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
 
     [Fact]
     public Task PageEditPreservesTheBomAndSurroundingPagesAndRejectsExternalChanges() => HeadlessTests.RunAsync(async profile =>

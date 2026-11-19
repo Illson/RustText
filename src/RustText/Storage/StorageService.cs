@@ -15,6 +15,7 @@ internal sealed class StorageService
     private readonly string _drafts;
     private readonly string _versions;
     private readonly bool _hasProfileOverride;
+    private readonly SemaphoreSlim _recentGate = new(1, 1);
     private SessionState? _cachedSession;
     private bool _hasCachedSession;
     private bool _cachedSessionWasLatest;
@@ -347,17 +348,34 @@ internal sealed class StorageService
             if (!File.Exists(legacyPath)) return [];
             return await ReadLegacyRecentAsync(legacyPath, cancellationToken).ConfigureAwait(false);
         }
-        await using var stream = File.OpenRead(path);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
         return await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.ListRecentFileEntry, cancellationToken).ConfigureAwait(false) ?? [];
     }
 
     public async Task AddRecentAsync(RecentFileEntry entry, CancellationToken cancellationToken = default)
     {
-        var entries = (await GetRecentFilesAsync(cancellationToken).ConfigureAwait(false)).ToList();
-        entries.RemoveAll(e => string.Equals(e.Path, entry.Path, StringComparison.OrdinalIgnoreCase));
-        entries.Insert(0, entry with { LastWorkedMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
-        entries = entries.Take(MaxRecentFiles).ToList();
-        await WriteJsonAsync(Path.Combine(_root, "recent-files.json"), entries, StorageJsonContext.Default.ListRecentFileEntry, cancellationToken).ConfigureAwait(false);
+        _ = await UpdateRecentAsync(entry.Path, entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<IReadOnlyList<RecentFileEntry>> RemoveRecentAsync(string path, CancellationToken token = default) =>
+        UpdateRecentAsync(path, null, token);
+
+    private async Task<IReadOnlyList<RecentFileEntry>> UpdateRecentAsync(string path, RecentFileEntry? replacement, CancellationToken token)
+    {
+        await _recentGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var entries = (await GetRecentFilesAsync(token).ConfigureAwait(false)).ToList();
+            entries.RemoveAll(entry => string.Equals(entry.Path, path, StringComparison.OrdinalIgnoreCase));
+            if (replacement is not null)
+            {
+                entries.Insert(0, replacement with { LastWorkedMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+                if (entries.Count > MaxRecentFiles) entries.RemoveRange(MaxRecentFiles, entries.Count - MaxRecentFiles);
+            }
+            await WriteJsonAsync(Path.Combine(_root, "recent-files.json"), entries, StorageJsonContext.Default.ListRecentFileEntry, token).ConfigureAwait(false);
+            return entries;
+        }
+        finally { _recentGate.Release(); }
     }
 
     public Task<JsonDocument?> ReadLegacyProfileFileAsync(string fileName, CancellationToken cancellationToken = default)
@@ -454,18 +472,48 @@ internal sealed class StorageService
     {
         try
         {
-            if (!File.Exists(pointerPath)) return null;
-            var checkpointName = (await File.ReadAllTextAsync(pointerPath, cancellationToken).ConfigureAwait(false)).Trim();
-            if (Path.GetFileName(checkpointName) != checkpointName || !checkpointName.StartsWith("checkpoint-", StringComparison.Ordinal)) return null;
-            var manifest = Path.Combine(_checkpoints, checkpointName, "manifest.json");
-            await using var stream = File.OpenRead(manifest);
-            var state = await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.SessionState, cancellationToken).ConfigureAwait(false);
-            return state?.Tabs is not null ? state : null;
+            var manifest = await FindCheckpointManifestAsync(pointerPath, cancellationToken).ConfigureAwait(false);
+            return manifest is null ? null : await ReadSessionManifestAsync(manifest, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) when (IsInvalidCheckpointException(error))
         {
             return null;
         }
+    }
+
+    private async Task<string?> FindCheckpointManifestAsync(string pointerPath, CancellationToken token)
+    {
+        if (!File.Exists(pointerPath)) return null;
+        var name = (await File.ReadAllTextAsync(pointerPath, token).ConfigureAwait(false)).Trim();
+        return Path.GetFileName(name) == name && name.StartsWith("checkpoint-", StringComparison.Ordinal)
+            ? Path.Combine(_checkpoints, name, "manifest.json") : null;
+    }
+
+    private static async Task<SessionState?> ReadSessionManifestAsync(string path, CancellationToken token)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        var state = await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.SessionState, token).ConfigureAwait(false);
+        return state?.Tabs is not null ? state : null;
+    }
+
+    public async Task RemoveHistoryFromPreviousCheckpointAsync(long tabId, bool removeBackupDraft, CancellationToken token = default)
+    {
+        using var writerLock = AcquireSessionLock();
+        var previous = Path.Combine(_checkpoints, "previous.json");
+        var manifest = await FindCheckpointManifestAsync(previous, token).ConfigureAwait(false);
+        if (!File.Exists(manifest)) return;
+        EnsureNoReparsePoints(manifest, Path.GetFullPath(_checkpoints));
+        if (await ReadSessionManifestAsync(manifest, token).ConfigureAwait(false) is not { } backup) return;
+
+        var closed = backup.ClosedTabs?.Where(tab => tab.Id != tabId).ToList();
+        var tabs = removeBackupDraft ? backup.Tabs.Where(tab => tab.Id != tabId).ToList() : backup.Tabs;
+        if (tabs.Count == backup.Tabs.Count && closed?.Count == backup.ClosedTabs?.Count) return;
+
+        var active = backup.Active - backup.Tabs.Take(backup.Active).Count(tab => removeBackupDraft && tab.Id == tabId);
+        backup = backup with { Tabs = tabs, ClosedTabs = closed, Active = Math.Clamp(active, 0, Math.Max(0, tabs.Count - 1)) };
+        await WriteJsonAsync(manifest, backup, StorageJsonContext.Default.SessionState, token).ConfigureAwait(false);
+        await PruneUnreferencedDraftsAsync(Path.Combine(_checkpoints, "latest.json"), previous, token).ConfigureAwait(false);
+        if (_cachedSessionWasLatest) CacheSession(_cachedSession, isLatest: true);
     }
 
     private static bool IsInvalidCheckpointException(Exception error) =>
