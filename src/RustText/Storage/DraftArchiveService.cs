@@ -87,6 +87,105 @@ internal sealed class DraftArchiveService
         finally { _gate.Release(); }
     }
 
+    public async Task CopyEntryToAsync(
+        DraftArchiveEntry entry,
+        DraftArchiveService destination,
+        CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentNullException.ThrowIfNull(destination);
+        string? temporary = null;
+        DraftArchiveEntry source;
+        await _gate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var entries = await ReadIndexAsync(token).ConfigureAwait(false);
+            source = entries.FirstOrDefault(candidate => candidate.Id == entry.Id)
+                ?? throw new FileNotFoundException("Архивный черновик уже удалён.");
+            if (source.Bytes != entry.Bytes
+                || !source.Sha256.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Архивный черновик изменился после открытия списка.");
+            if (source.Tab.Path is not null || source.Tab.DraftRef is null)
+                throw new InvalidDataException("Запись архива не содержит закрытый черновик.");
+
+            temporary = Path.Combine(destination._archiveDirectory, $"copy-{Guid.NewGuid():N}.tmp");
+            await CopyFileAsync(ArchivePath(source.Id), temporary, token).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (temporary is not null) TryDelete(temporary);
+            throw;
+        }
+        finally { _gate.Release(); }
+
+        try
+        {
+            if (!await VerifyArchiveFileAsync(temporary!, source.Bytes, source.Sha256, token).ConfigureAwait(false))
+                throw new InvalidDataException("Копия архивного черновика не прошла проверку.");
+            await destination.CommitCopiedEntryAsync(source, temporary!, token).ConfigureAwait(false);
+        }
+        finally { TryDelete(temporary!); }
+    }
+
+    private async Task CommitCopiedEntryAsync(
+        DraftArchiveEntry copied,
+        string stagedArchive,
+        CancellationToken token)
+    {
+        await _gate.WaitAsync(token).ConfigureAwait(false);
+        var archivePath = ArchivePath(copied.Id);
+        try
+        {
+            var entries = (await ReadIndexAsync(token).ConfigureAwait(false)).ToList();
+            var existing = entries.FirstOrDefault(candidate => candidate.Id == copied.Id);
+            if (existing is not null)
+            {
+                if (!SameArchiveContent(existing, copied)
+                    || !await IsValidArchiveAsync(existing, token).ConfigureAwait(false))
+                    throw new InvalidDataException("В целевом архиве уже есть другой черновик с таким идентификатором.");
+                return;
+            }
+
+            if (File.Exists(archivePath))
+            {
+                if (!await VerifyArchiveFileAsync(archivePath, copied.Bytes, copied.Sha256, token).ConfigureAwait(false))
+                    throw new InvalidDataException("В целевом архиве уже есть файл с таким идентификатором.");
+            }
+            else
+            {
+                File.Move(stagedArchive, archivePath);
+            }
+
+            entries.Insert(0, copied);
+            await WriteIndexAsync(entries, token).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private static bool SameArchiveContent(DraftArchiveEntry left, DraftArchiveEntry right) =>
+        left.Id == right.Id
+        && left.ClosedAtMs == right.ClosedAtMs
+        && left.ArchivedAtMs == right.ArchivedAtMs
+        && left.Bytes == right.Bytes
+        && left.Sha256.Equals(right.Sha256, StringComparison.OrdinalIgnoreCase)
+        && left.DisplayName == right.DisplayName
+        && JsonSerializer.SerializeToUtf8Bytes(left.Tab, StorageJsonContext.Default.SessionTab)
+            .AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(right.Tab, StorageJsonContext.Default.SessionTab));
+
+    private static async Task CopyFileAsync(string source, string destination, CancellationToken token)
+    {
+        await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read,
+            64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+            64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await input.CopyToAsync(output, 64 * 1024, token).ConfigureAwait(false);
+        await output.FlushAsync(token).ConfigureAwait(false);
+        output.Flush(true);
+    }
+
     public async Task<SessionTab> RestoreAsync(DraftArchiveEntry entry, CancellationToken token = default)
     {
         await _gate.WaitAsync(token).ConfigureAwait(false);

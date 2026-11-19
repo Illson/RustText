@@ -8,6 +8,7 @@ public partial class MainWindow
 {
     private readonly WorkspaceSession _workspace;
     private readonly bool _restoreWorkspace;
+    private bool _isDetachedWindow;
     private bool _workspaceSwitchPending;
     private int _closedTabRestoreOperations;
 
@@ -25,6 +26,7 @@ public partial class MainWindow
         public List<MainWindow> Windows { get; } = [];
         public Dictionary<string, List<SessionTab>> ClosedTabs { get; } = new(StringComparer.Ordinal);
         public Dictionary<(string WorkspaceId, string WindowId), StorageService> SessionStores { get; } = [];
+        public HashSet<(string WorkspaceId, string WindowId)> SharedSessionAliases { get; } = [];
         public Dictionary<StorageService, DetachedDraftRecovery> DetachedDrafts { get; } = [];
         public HashSet<long> ClosedTabOperations { get; } = [];
         public Dictionary<string, Dictionary<long, SavedLiveDraft>> LiveDrafts { get; } = new(StringComparer.Ordinal);
@@ -45,14 +47,21 @@ public partial class MainWindow
             return storage;
         }
 
-        public void ShareSession(string workspaceId, string windowId, StorageService storage) =>
-            SessionStores[(workspaceId, windowId)] = storage;
+        public void ShareSession(string workspaceId, string windowId, StorageService storage)
+        {
+            var key = (workspaceId, windowId);
+            SessionStores[key] = storage;
+            SharedSessionAliases.Add(key);
+        }
 
         public void ReleaseSharedSession(string workspaceId, string windowId, StorageService storage)
         {
             var key = (workspaceId, windowId);
             if (SessionStores.TryGetValue(key, out var existing) && ReferenceEquals(existing, storage))
+            {
                 SessionStores.Remove(key);
+                SharedSessionAliases.Remove(key);
+            }
         }
 
         public List<SessionTab> GetClosedTabs(StorageService storage)
@@ -109,6 +118,32 @@ public partial class MainWindow
         ReferenceEquals(SessionStorage, window.SessionStorage)
         || string.Equals(SessionStorage.RootDirectory, window.SessionStorage.RootDirectory, StringComparison.OrdinalIgnoreCase);
 
+    private bool HasRestorableWindowAssignment() =>
+        _workspace.Catalog?.WindowAssignments.GetValueOrDefault(_windowId) is { } assignedWorkspace
+        && !(_shareDefaultSession && assignedWorkspace == WorkspaceCatalogStore.DefaultWorkspaceId)
+        && !_workspace.SharedSessionAliases.Contains((assignedWorkspace, _windowId));
+
+    private HashSet<StorageService> RestorableAssignedStores(MainWindow[] windows)
+    {
+        var assignedWindows = windows.Where(window => window.HasRestorableWindowAssignment())
+            .Select(window => window._windowId).ToHashSet(StringComparer.Ordinal);
+        return _workspace.SessionStores
+            .Where(pair => assignedWindows.Contains(pair.Key.WindowId) && !_workspace.SharedSessionAliases.Contains(pair.Key))
+            .Select(pair => pair.Value).ToHashSet();
+    }
+
+    private void RestoreDetachedDraftTracking(StorageService storage, string workspaceId, SessionState state)
+    {
+        if (state.DetachedDrafts is not { Count: > 0 } drafts) return;
+        var primary = _workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+        if (ReferenceEquals(storage, primary)) return;
+        foreach (var (id, destinationId) in drafts)
+        {
+            RecordDetachedDraft(id, (storage, primary), destinationId);
+            _workspace.NextId = Math.Max(_workspace.NextId, Math.Max(id, destinationId ?? 0));
+        }
+    }
+
     private async Task RestoreAssignedWorkspaceWindowsAsync()
     {
         if (_windowId != WorkspaceCatalogStore.PrimaryWindowId) return;
@@ -134,6 +169,7 @@ public partial class MainWindow
     private void OpenTabWindow(WorkTab tab, PixelPoint? dropPoint = null)
     {
         if (!CanDragTab(tab)) return;
+        if (_startEmpty && !CanTransferStoredDraft(tab, sharesStorage: false)) return;
 
         var workspaceId = _workspaceId;
         var windowId = "window:" + Guid.NewGuid().ToString("N");
@@ -146,6 +182,7 @@ public partial class MainWindow
         var window = new MainWindow([], _workspace, workspaceId, windowId,
             shareDefaultSession: sharedStorage is null, restoreWorkspace: false)
         {
+            _isDetachedWindow = true,
             _fontSize = _fontSize,
             _wordWrap = _wordWrap,
             _recent = _recent
@@ -175,12 +212,6 @@ public partial class MainWindow
         try
         {
             TransferTab(tab, window, window._active, null);
-            if (independent && window._tabs.ContainsKey(tab.Id))
-            {
-                if (!_workspace.DetachedDrafts.TryGetValue(sourceStorage, out var recovery))
-                    _workspace.DetachedDrafts.Add(sourceStorage, recovery = new DetachedDraftRecovery(primaryStorage));
-                recovery.DestinationIds.TryAdd(tab.Id, null);
-            }
         }
         catch
         {
@@ -199,7 +230,9 @@ public partial class MainWindow
             MoveTab(tab, group, before);
             return;
         }
+        if (!CanTransferStoredDraft(tab, SharesSessionWith(destination))) return;
 
+        var detachedRecovery = destination.PrepareDetachedDraftRecovery();
         var saved = CaptureTab(tab);
         var copy = destination.AddTab(tab.Id, group, select: false);
         try
@@ -217,6 +250,7 @@ public partial class MainWindow
                 RestoreEditorView(copy, saved);
                 destination.UpdateTab(copy);
             }
+            destination.MoveTab(copy, group, before);
         }
         catch
         {
@@ -225,11 +259,50 @@ public partial class MainWindow
         }
 
         RemoveTab(tab);
-        destination.MoveTab(copy, group, before);
+        if (detachedRecovery is { } recoveryTarget)
+            destination.RecordDetachedDraft(tab.Id, recoveryTarget);
         if (_tabs.Count == 0 && !_closing && destination.IsVisible)
         {
             Close();
         }
+    }
+
+    private bool CanTransferStoredDraft(WorkTab tab, bool sharesStorage)
+    {
+        if (sharesStorage || tab.Editor is not null || (tab.Recovery ?? tab.Deferred)?.DraftRef is null)
+            return true;
+
+        SetStatus(tab.Recovery is null
+            ? "Сначала откройте сохранённый черновик, чтобы перенести его в другой сеанс."
+            : "Для переноса постраничного черновика в другой сеанс используйте «Сохранить копию…».");
+        return false;
+    }
+
+    private (StorageService Source, StorageService Primary)? PrepareDetachedDraftRecovery()
+    {
+        if (!_isDetachedWindow || _startEmpty) return null;
+
+        var source = SessionStorage;
+        var primary = _workspace.GetStorage(_workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+        if (string.Equals(StorageCacheKey(source), StorageCacheKey(primary), StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (_workspace.DetachedDrafts.TryGetValue(source, out var existing)
+            && !string.Equals(StorageCacheKey(existing.PrimaryStorage), StorageCacheKey(primary), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Окно черновика уже связано с другим рабочим пространством.");
+        return (source, primary);
+    }
+
+    private void RecordDetachedDraft(long tabId, (StorageService Source, StorageService Primary) target, long? destinationId = null)
+    {
+        if (!_workspace.DetachedDrafts.TryGetValue(target.Source, out var recovery))
+            _workspace.DetachedDrafts.Add(target.Source, recovery = new DetachedDraftRecovery(target.Primary));
+        recovery.DestinationIds.TryAdd(tabId, destinationId);
+    }
+
+    private void TrackDetachedDraft(WorkTab tab)
+    {
+        if (PrepareDetachedDraftRecovery() is { } target)
+            RecordDetachedDraft(tab.Id, target);
     }
 
 }

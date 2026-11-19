@@ -35,6 +35,7 @@ public partial class MainWindow
         if (IsOversizedEditorText(text))
         {
             StartLargeDraftPersistence(tab, () => new StringReader(text), null, text);
+            TrackDetachedDraft(tab);
             return;
         }
 
@@ -45,6 +46,7 @@ public partial class MainWindow
             UpdateTab(tab);
         }
 
+        TrackDetachedDraft(tab);
         tab.Editor?.Focus();
     }
 

@@ -238,6 +238,7 @@ public partial class MainWindow
         }
         else if (targetState is not null)
         {
+            RestoreDetachedDraftTracking(SessionStorage, _workspaceId, targetState);
             _closedTabs.AddRange((targetState.ClosedTabs ?? []).Take(100));
             MountSessionTabs(targetState, pending: false);
             ApplyTextAppearance();
@@ -357,7 +358,7 @@ public partial class MainWindow
             if (source.GetDraftPath(tab) is { } path && File.Exists(path))
                 readers[tab.Id] = () => new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
         }
-        await destination.SaveSessionWithDraftReadersAsync(state, readers, _lifetime.Token);
+        await destination.SaveSessionWithDraftReadersAsync(state with { DetachedDrafts = null }, readers, _lifetime.Token);
     }
 
     private async Task DeleteWorkspaceAsync(WorkspaceEntry workspace, Window dialog)
@@ -418,6 +419,7 @@ public partial class MainWindow
             _workspace.UnavailableSessions.Remove(cacheKey);
             _workspace.ClosedTabs.Remove(cacheKey);
             _workspace.SessionStores.Remove(key);
+            _workspace.SharedSessionAliases.Remove(key);
         }
     }
 }

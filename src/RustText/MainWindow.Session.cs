@@ -88,6 +88,7 @@ public partial class MainWindow
         if (_closed) return;
 
         var restoredState = state ?? _pendingSession;
+        if (state is not null && !_startEmpty) RestoreDetachedDraftTracking(SessionStorage, _workspaceId, state);
         if (Settings.WordWrap is null || Settings.FontSize is null)
         {
             await SaveWorkspaceSettingsAsync(settings => settings with
@@ -330,7 +331,7 @@ public partial class MainWindow
 
     private Task SaveSessionAsync() => SaveWorkspaceSessionAsync(excludeWindow: null);
 
-    private async Task PreserveDetachedDraftsOnCloseAsync()
+    private async Task PreserveDetachedDraftsOnCloseAsync(HashSet<StorageService>? restartStores = null)
     {
         var trackedViews = _workspaceViews.Values.Prepend(CaptureWorkspaceView())
             .Where(view => _workspace.DetachedDrafts.ContainsKey(view.Storage))
@@ -344,8 +345,9 @@ public partial class MainWindow
             foreach (var views in trackedViews)
             {
                 var source = views.Key;
+                if (restartStores?.Add(source) == false) continue;
                 var recovery = _workspace.DetachedDrafts[source];
-                var otherViews = SessionViews(source, this).Any();
+                var otherViews = restartStores is null && SessionViews(source, this).Any();
                 var closingIds = views.SelectMany(view => view.Tabs.Keys).ToHashSet();
                 var pending = recovery.DestinationIds.Keys.Where(id => !otherViews || closingIds.Contains(id)).ToHashSet();
                 if (pending.Count == 0) continue;
@@ -363,11 +365,32 @@ public partial class MainWindow
                     throw new IOException("Черновик вынесенной вкладки ещё не сохранён. Повторите закрытие окна.");
                 if (drafts.Length > 0) await MergeDetachedDraftsAsync(source, recovery, drafts, token);
 
+                DraftArchiveEntry[] archived = [];
+                if (pending.Count != savedIds.Count)
+                {
+                    archived = (await source.DraftArchive.GetEntriesAsync(token))
+                        .Where(entry => pending.Contains(entry.Tab.Id) && !savedIds.Contains(entry.Tab.Id)).ToArray();
+                    foreach (var entry in archived)
+                        await source.DraftArchive.CopyEntryToAsync(entry, recovery.PrimaryStorage.DraftArchive, token);
+                }
+
+                // An installer launch can fail after the copy. Keep the mapping so a retry updates the same records.
+                if (restartStores is not null) continue;
                 foreach (var draft in drafts) recovery.DestinationIds.Remove(draft.Id);
+                foreach (var entry in archived) recovery.DestinationIds.Remove(entry.Tab.Id);
                 if (!otherViews || recovery.DestinationIds.Count == 0) _workspace.DetachedDrafts.Remove(source);
             }
         }
         finally { _workspace.SaveGate.Release(); }
+    }
+
+    private long GetDetachedDraftDestinationId(DetachedDraftRecovery recovery, long sourceId, HashSet<long> activeIds)
+    {
+        var destinationId = recovery.DestinationIds[sourceId];
+        if (destinationId is { } existing && !activeIds.Contains(existing)) return existing;
+        var freshId = NextId();
+        recovery.DestinationIds[sourceId] = freshId;
+        return freshId;
     }
 
     private async Task MergeDetachedDraftsAsync(StorageService source, DetachedDraftRecovery recovery,
@@ -384,19 +407,24 @@ public partial class MainWindow
         var existing = liveHistory ?? checkpoint.ClosedTabs ?? [];
         _workspace.NextId = Math.Max(_workspace.NextId, checkpoint.Tabs.Concat(checkpoint.ClosedTabs ?? []).Concat(existing)
             .Select(tab => tab.Id).DefaultIfEmpty().Max());
+        var activeIds = checkpoint.Tabs.Select(tab => tab.Id).Concat(liveViews.SelectMany(view => view.View.Tabs.Keys)).ToHashSet();
 
         var readers = new Dictionary<long, Func<TextReader>>();
         var recovered = new List<SessionTab>();
         var closedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         foreach (var draft in drafts)
         {
-            var id = recovery.DestinationIds[draft.Id] ?? NextId();
-            recovery.DestinationIds[draft.Id] = id;
+            var previouslyRecovered = recovery.DestinationIds[draft.Id];
+            if (previouslyRecovered is { } recoveredId && draft.DraftSha256 is { } hash
+                && checkpoint.Tabs.Any(tab => tab.Id == recoveredId && tab.DraftSha256 == hash))
+                continue;
+            var id = GetDetachedDraftDestinationId(recovery, draft.Id, activeIds);
             var path = source.GetDraftPath(draft)!;
             readers.Add(id, () => new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read,
                 FileShare.Read | FileShare.Delete), new UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: false));
             recovered.Add(draft with { Id = id, DraftRef = null, DraftSha256 = null, ClosedAtMs = closedAt });
         }
+        if (recovered.Count == 0) return;
 
         if (liveHistory is not null)
         {
@@ -477,9 +505,11 @@ public partial class MainWindow
         var preserveHistory = owner.PreserveEmptyHistory(storage);
         var historyToSave = recovered is null ? history : recovered.Concat(history).DistinctBy(tab => tab.Id);
         var capturedHistory = historyToSave.Where(tab => tab.Id != forget?.Id).Take(preserveHistory ? int.MaxValue : 100).ToList();
+        var detachedDrafts = _workspace.DetachedDrafts.TryGetValue(storage, out var tracked)
+            ? tracked.DestinationIds.OrderBy(pair => pair.Key).ToDictionary() : null;
         var session = new SessionState(state, capturedHistory, Math.Max(0, Array.IndexOf(tabs, selected)),
             double.IsFinite(home.Width) ? home.Width : 1080, double.IsFinite(home.Height) ? home.Height : 700,
-            home.Maximized, home.WordWrap, home.FontSize, owner.CaptureLayout(home.Root, home.Tabs), home.Active.Id);
+            home.Maximized, home.WordWrap, home.FontSize, owner.CaptureLayout(home.Root, home.Tabs), home.Active.Id, detachedDrafts);
         var cacheKey = StorageCacheKey(storage);
         var fingerprint = CheckpointFingerprint(session, tabs);
         if (!force && forget is null && _workspace.GetLastCheckpoint(cacheKey) == fingerprint) return null;
@@ -542,6 +572,7 @@ public partial class MainWindow
         hash.Add(state.Maximized);
         hash.Add(state.Wrap);
         hash.Add(state.FontSize);
+        foreach (var mapping in state.DetachedDrafts ?? []) hash.Add(mapping);
         AddLayout(state.Layout);
         for (var i = 0; i < tabs.Length; i++)
         {

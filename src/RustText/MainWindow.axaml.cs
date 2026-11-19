@@ -27,6 +27,7 @@ public partial class MainWindow : Window
     private bool _home;
     private bool _closing;
     private bool _closed;
+    private bool _restartingForUpdate;
     private bool _restoreFinished;
     private bool _startEmpty;
     private bool _closeAfterStartupValidation;
@@ -63,7 +64,7 @@ public partial class MainWindow : Window
         Closed += async (_, _) =>
         {
             _workspace.Windows.Remove(this);
-            if (_windowId == WorkspaceCatalogStore.PrimaryWindowId) return;
+            if (_windowId == WorkspaceCatalogStore.PrimaryWindowId || _restartingForUpdate && HasRestorableWindowAssignment()) return;
             try
             {
                 _workspace.Catalog = await _workspace.CatalogStore.RemoveWindowAsync(_windowId);

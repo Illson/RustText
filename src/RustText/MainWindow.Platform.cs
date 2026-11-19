@@ -343,16 +343,28 @@ public partial class MainWindow
         if (!await _workspace.CloseGate.WaitAsync(0))
             throw new IOException("Дождитесь завершения закрытия окна.");
 
-        var windows = _workspace.Windows.Where(window => !window._closed).ToArray();
+        var switchGateHeld = false;
+        MainWindow[] windows = [];
         try
         {
+            if (!await _workspace.WorkspaceSwitchGate.WaitAsync(0))
+                throw new IOException("Дождитесь завершения переключения рабочего пространства.");
+            switchGateHeld = true;
+            windows = _workspace.Windows.Where(window => !window._closed).ToArray();
+
             foreach (var window in windows)
             {
-                if (!window._restoreFinished || window._closing || window.OwnedWindows.Count != 0
+                if (!window._restoreFinished || window._closing || window._workspaceSwitchPending || window.OwnedWindows.Count != 0
                     || window._tabs.Values.Any(tab => tab.Saving || tab.Loading || tab.Closing || tab.Log?.HasPendingEdit == true))
                 {
                     window.Activate();
                     throw new IOException("Завершите операции во всех окнах и сохраните или отмените правки страницы перед обновлением.");
+                }
+                if (_workspace.UnavailableSessions.Contains(window.WorkspaceCacheKey)
+                    || window._workspaceViews.Values.Any(view => _workspace.UnavailableSessions.Contains(StorageCacheKey(view.Storage))))
+                {
+                    window.Activate();
+                    throw new IOException("Не удалось сохранить сеанс одного из окон. Сохраните открытые документы перед обновлением.");
                 }
             }
 
@@ -366,7 +378,14 @@ public partial class MainWindow
 
             try
             {
-                await SaveSessionAsync();
+                foreach (var window in windows)
+                    await window.SaveSessionAsync();
+
+                // Assigned windows restore their own checkpoints and retain draft tracking there.
+                var restartStores = RestorableAssignedStores(windows);
+                foreach (var window in windows)
+                    await window.PreserveDetachedDraftsOnCloseAsync(restartStores);
+
                 await startHelper();
             }
             catch
@@ -381,6 +400,9 @@ public partial class MainWindow
             }
 
             foreach (var window in windows)
+                window._restartingForUpdate = true;
+
+            foreach (var window in windows)
             {
                 window.CloseWorkspaceContents();
                 window.Close();
@@ -388,6 +410,7 @@ public partial class MainWindow
         }
         finally
         {
+            if (switchGateHeld) _workspace.WorkspaceSwitchGate.Release();
             _workspace.CloseGate.Release();
         }
     }

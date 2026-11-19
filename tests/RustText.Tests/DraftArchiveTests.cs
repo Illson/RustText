@@ -75,6 +75,39 @@ public sealed class DraftArchiveTests
     }
 
     [Fact]
+    public async Task CopyEntryToIsIdempotentAndPreservesArchiveMetadataAndSource()
+    {
+        using var directory = new TempDirectory();
+        var sourceStorage = StorageService.OpenForTesting(Path.Combine(directory.Path, "source"));
+        var destinationStorage = StorageService.OpenForTesting(Path.Combine(directory.Path, "destination"));
+        var sourceArchive = sourceStorage.DraftArchive;
+        var destinationArchive = destinationStorage.DraftArchive;
+        var closedAt = DateTimeOffset.UtcNow.AddHours(-7).ToUnixTimeMilliseconds();
+        const string text = "archived source stays available 💡\nsecond line";
+        var draft = await sourceStorage.SaveClosedDraftAsync(new SessionTab(17, null, TextEncodingKind.Utf8)
+        {
+            CustomTitle = "Tracked detached draft",
+            UntitledName = "Archive copy test",
+            ClosedAtMs = closedAt,
+            SelectionStart = 4,
+            SelectionLength = 6
+        }, text);
+        var sourceEntry = await sourceArchive.ArchiveAsync(draft, sourceStorage.GetDraftPath(draft)!);
+
+        await sourceArchive.CopyEntryToAsync(sourceEntry, destinationArchive);
+        Assert.Equal(sourceEntry, Assert.Single(await destinationArchive.GetEntriesAsync()));
+        var reloadedSourceEntry = Assert.Single(await sourceArchive.GetEntriesAsync());
+        await sourceArchive.CopyEntryToAsync(reloadedSourceEntry, destinationArchive);
+
+        var retried = Assert.Single(await destinationArchive.GetEntriesAsync());
+        Assert.Equal(sourceEntry, retried);
+        Assert.Equal(sourceEntry, Assert.Single(await sourceArchive.GetEntriesAsync()));
+        Assert.Equal(text, await destinationStorage.LoadDraftAsync(await destinationArchive.RestoreAsync(retried)));
+        Assert.Equal(text, await sourceStorage.LoadDraftAsync(await sourceArchive.RestoreAsync(sourceEntry)));
+        Assert.Empty(Directory.GetFiles(Path.Combine(destinationStorage.RootDirectory, "drafts-archive"), "copy-*.tmp"));
+    }
+
+    [Fact]
     public async Task CorruptArchiveLeavesEntryAvailableAndExpiryHonorsUnlimitedRetention()
     {
         using var directory = new TempDirectory();

@@ -18,7 +18,7 @@ internal sealed record SessionTab(long Id, string? Path, TextEncodingKind Encodi
 internal sealed record LegacyFileStamp(long Length, DateTime LastWriteUtc, DateTime? CreatedUtc);
 internal sealed record DraftArchiveEntry(string Id, SessionTab Tab, long ClosedAtMs, long Bytes, string Sha256, string DisplayName, long ArchivedAtMs);
 internal sealed record DraftArchiveIndex(List<DraftArchiveEntry> Entries);
-internal sealed record SessionState(List<SessionTab> Tabs, List<SessionTab>? ClosedTabs = null, int Active = 0, double WindowWidth = 1100, double WindowHeight = 760, bool Maximized = false, bool Wrap = false, double FontSize = FocusTheme.EditorFontSize, WorkspaceLayout? Layout = null, long? ActiveGroupId = null);
+internal sealed record SessionState(List<SessionTab> Tabs, List<SessionTab>? ClosedTabs = null, int Active = 0, double WindowWidth = 1100, double WindowHeight = 760, bool Maximized = false, bool Wrap = false, double FontSize = FocusTheme.EditorFontSize, WorkspaceLayout? Layout = null, long? ActiveGroupId = null, Dictionary<long, long?>? DetachedDrafts = null);
 public sealed record UserSettings(int UntitledTabLimit = 10, int RecentFileLimit = 100, int VersionFileLimitBytes = 5 * 1024 * 1024, long VersionTotalLimitBytes = 100L * 1024 * 1024)
 {
     public string Theme { get; init; } = "focus";
