@@ -3,6 +3,7 @@
              xmlns:chrome="using:Avalonia.Controls.Chrome"
              xmlns:aeRendering="using:AvaloniaEdit.Rendering"
              xmlns:aeEditing="using:AvaloniaEdit.Editing"
+             xmlns:editor="using:RustText.Demo.Editor"
              xmlns:local="using:RustText.Demo"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
@@ -39,6 +40,56 @@
             <Style Selector="^:disabled">
                 <Setter Property="Opacity" Value="0.55" />
             </Style>
+        </ControlTheme>
+
+        <ControlTheme x:Key="ViewportScrollThumb" TargetType="Thumb">
+            <Setter Property="MinHeight" Value="18" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Opacity" Value="0.2" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Panel Background="Transparent">
+                        <Border Name="Grip" Background="White"
+                                Width="7" HorizontalAlignment="Center" CornerRadius="3.5" />
+                    </Panel>
+                </ControlTemplate>
+            </Setter>
+            <Style Selector="^:pointerover">
+                <Setter Property="Opacity" Value="0.32" />
+            </Style>
+            <Style Selector="^:pressed">
+                <Setter Property="Opacity" Value="0.42" />
+            </Style>
+        </ControlTheme>
+
+        <ControlTheme x:Key="{x:Type editor:ViewportScrollBar}" TargetType="editor:ViewportScrollBar">
+            <Setter Property="Width" Value="13" />
+            <Setter Property="ContextFlyout" Value="{DynamicResource VerticalScrollBarContextFlyout}" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Panel Background="{x:Static local:FocusTheme.Editor}">
+                        <Border Name="Rail" Background="#19FFFFFF"
+                                Width="7" Margin="0,4" HorizontalAlignment="Center" CornerRadius="3.5"
+                                IsHitTestVisible="False" />
+                        <Track Margin="0,4" Orientation="Vertical" IsDirectionReversed="True"
+                               Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                               ViewportSize="{TemplateBinding ViewportSize}" Value="{TemplateBinding Value, Mode=TwoWay}"
+                               DeferThumbDrag="{TemplateBinding ScrollViewer.IsDeferredScrollingEnabled}">
+                            <Track.DecreaseButton>
+                                <RepeatButton Name="PART_PageUpButton" Focusable="False"
+                                              Theme="{DynamicResource FluentScrollBarPageButton}"
+                                              AutomationProperties.Name="Страница вверх" />
+                            </Track.DecreaseButton>
+                            <Track.IncreaseButton>
+                                <RepeatButton Name="PART_PageDownButton" Focusable="False"
+                                              Theme="{DynamicResource FluentScrollBarPageButton}"
+                                              AutomationProperties.Name="Страница вниз" />
+                            </Track.IncreaseButton>
+                            <Thumb Theme="{StaticResource ViewportScrollThumb}" AutomationProperties.Name="Положение прокрутки" />
+                        </Track>
+                    </Panel>
+                </ControlTemplate>
+            </Setter>
         </ControlTheme>
 
         <ControlTheme x:Key="{x:Type local:WorkspaceTabs}" TargetType="local:WorkspaceTabs">

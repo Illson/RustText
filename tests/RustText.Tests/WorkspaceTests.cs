@@ -2545,6 +2545,66 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task ThinViewportScrollbarKeepsItsWiderDragAreaAndTrackPaging() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "scrollbar.txt");
+        await File.WriteAllLinesAsync(path, Enumerable.Range(1, 240).Select(row => $"Строка {row}"));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var bar = Assert.Single(window.GetVisualDescendants().OfType<ViewportScrollBar>());
+            await HeadlessTests.WaitForAsync(() => bar.Maximum > 0
+                && bar.GetVisualDescendants().OfType<Thumb>().Any(thumb => thumb.Bounds.Height > 0));
+            var track = Assert.Single(bar.GetVisualDescendants().OfType<Track>());
+            var thumb = Assert.IsType<Thumb>(track.Thumb);
+            var rail = bar.GetVisualDescendants().OfType<Border>().Single(border => border.Name == "Rail");
+            var grip = thumb.GetVisualDescendants().OfType<Border>().Single(border => border.Name == "Grip");
+
+            Assert.Equal(13, bar.Bounds.Width);
+            Assert.Equal(bar.Bounds.Width, thumb.Bounds.Width);
+            Assert.Equal(7, grip.Bounds.Width);
+            Assert.Equal(new CornerRadius(3.5), grip.CornerRadius);
+            Assert.Equal(3, grip.TranslatePoint(default, thumb)!.Value.X);
+            Assert.Equal(grip.Bounds.Width, rail.Bounds.Width);
+            Assert.Equal(new Thickness(0, 4), rail.Margin);
+            Assert.Equal(2, bar.GetVisualDescendants().OfType<RepeatButton>().Count());
+            Assert.NotNull(bar.ContextFlyout);
+
+            var point = thumb.TranslatePoint(new Point(1, thumb.Bounds.Height / 2), window)!.Value;
+            var normalOpacity = thumb.Opacity;
+            window.MouseMove(point);
+            Assert.True(thumb.Opacity > normalOpacity);
+            window.MouseDown(point, MouseButton.Left);
+            var target = point + new Vector(0, (track.Bounds.Height - thumb.Bounds.Height) / 3);
+            window.MouseMove(target, RawInputModifiers.LeftMouseButton);
+            window.MouseUp(target, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > 0);
+            Assert.InRange(scroll.Offset.Y, bar.Maximum * .31, bar.Maximum * .35);
+            Assert.InRange(bar.Value, scroll.Offset.Y - 1, scroll.Offset.Y + 1);
+
+            var beforePage = scroll.Offset.Y;
+            var pagePoint = track.TranslatePoint(new Point(1, track.Bounds.Height * .9), window)!.Value;
+            window.MouseMove(pagePoint);
+            Assert.InRange(scroll.Offset.Y, beforePage - 1, beforePage + 1);
+            var expected = Math.Min(bar.Maximum, beforePage + bar.LargeChange);
+            window.MouseDown(pagePoint, MouseButton.Left);
+            window.MouseUp(pagePoint, MouseButton.Left);
+            Assert.True(scroll.Offset.Y > beforePage);
+            Assert.InRange(scroll.Offset.Y, expected - 1, expected + 1);
+
+            var beforeWheel = scroll.Offset.Y;
+            window.MouseWheel(pagePoint, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > beforeWheel);
+        }
+        finally
+        {
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
     public Task TextMinimapClickDragAndWheelKeepCaretAndSelection() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "scroll.txt");
