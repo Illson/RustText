@@ -12,12 +12,19 @@ from pathlib import Path
 HEIGHT = 2000
 
 
+class SmallRect(ctypes.Structure):
+    _fields_ = [("Left", wintypes.SHORT), ("Top", wintypes.SHORT),
+                ("Right", wintypes.SHORT), ("Bottom", wintypes.SHORT)]
+
+
 def api():
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
                                    wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.GetConsoleScreenBufferInfo.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    kernel.SetConsoleWindowInfo.argtypes = [wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(SmallRect)]
+    kernel.SetConsoleWindowInfo.restype = wintypes.BOOL
     kernel.SetConsoleScreenBufferSize.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel.SetConsoleScreenBufferSize.restype = wintypes.BOOL
     kernel.SetConsoleCursorPosition.argtypes = [wintypes.HANDLE, wintypes.DWORD]
@@ -25,6 +32,9 @@ def api():
     kernel.WriteConsoleW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD,
                                      ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
     kernel.WriteConsoleW.restype = wintypes.BOOL
+    kernel.WriteConsoleOutputCharacterW.argtypes = [
+        wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    kernel.WriteConsoleOutputCharacterW.restype = wintypes.BOOL
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
     kernel.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, wintypes.BOOL]
@@ -53,8 +63,7 @@ def fixture(kernel):
     if handle == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error(), "CreateFileW(CONOUT$)")
     # Keep the host's width so the buffer is never narrower than the console window.
-    info = (ctypes.c_short * 11)()
-    check(kernel.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)), "GetConsoleScreenBufferInfo")
+    info = console_info(kernel, handle)
     check(kernel.SetConsoleScreenBufferSize(handle, info[0] | (HEIGHT << 16)), "SetConsoleScreenBufferSize")
     check(kernel.SetConsoleCursorPosition(handle, (HEIGHT - 1) << 16), "SetConsoleCursorPosition")
 
@@ -70,10 +79,35 @@ def fixture(kernel):
                 print("ok 0", flush=True)
                 continue
 
+            if command == "viewport-repeat":
+                info = console_info(kernel, handle)
+                set_view_top(kernel, handle, min(500, info[6] // 2))
+                write_rows(kernel, handle, ["repeat"])
+                print("ok 1", flush=True)
+                continue
+            if command == "start-rows":
+                check(kernel.SetConsoleCursorPosition(handle, 0), "SetConsoleCursorPosition")
+                command = "U100"
+            if command == "redraw":
+                info = console_info(kernel, handle)
+                row_index = info[3] - 1
+                if row_index < 0:
+                    raise RuntimeError("The fixture has no completed row to redraw")
+                row = "S000100*"
+                written = wintypes.DWORD()
+                check(kernel.WriteConsoleOutputCharacterW(
+                    handle, row, len(row), row_index << 16, ctypes.byref(written)),
+                    "WriteConsoleOutputCharacterW")
+                if written.value != len(row):
+                    raise RuntimeError("The fixture could not redraw the numbered row")
+                print("ok 0", flush=True)
+                continue
             if command.startswith("U"):
                 rows = [f"S{number:06d}" for number in range(1, int(command[1:]) + 1)]
             elif command.startswith("R"):
                 rows = ["repeat"] * int(command[1:])
+            elif command == "control":
+                rows = ["control"]
             elif command == "burst":
                 number = 1
                 for index in range(62):
@@ -92,6 +126,19 @@ def fixture(kernel):
     finally:
         kernel.SetConsoleCtrlHandler(ctypes.cast(handler, ctypes.c_void_p), False)
         kernel.CloseHandle(handle)
+
+
+def set_view_top(kernel, handle, top):
+    info = console_info(kernel, handle)
+    height = info[8] - info[6]
+    window = SmallRect(info[5], top, info[7], top + height)
+    check(kernel.SetConsoleWindowInfo(handle, True, ctypes.byref(window)), "SetConsoleWindowInfo")
+
+
+def console_info(kernel, handle):
+    info = (ctypes.c_short * 11)()
+    check(kernel.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)), "GetConsoleScreenBufferInfo")
+    return info
 
 
 def start_reader(stream):
@@ -125,7 +172,7 @@ def expect(lines, expected, timeout=10):
     deadline = time.monotonic() + timeout
     actual = []
     while len(actual) < len(expected):
-        header = take(lines, deadline, "console frame")
+        header = take(lines, deadline, f"console frame ({len(actual)}/{len(expected)} rows received)")
         try:
             count = int(header)
         except ValueError as error:
@@ -213,6 +260,13 @@ def run(executable):
         send_fixture(fixture_process, fixture_lines, "R1", 1)
         expect(worker_lines, ["repeat"])
         idle(worker_lines)
+
+        send_fixture(fixture_process, fixture_lines, "viewport-repeat", 1)
+        expect(worker_lines, ["repeat"])
+        idle(worker_lines)
+        send_fixture(fixture_process, fixture_lines, "redraw", 0)
+        idle(worker_lines)
+
         send_fixture(fixture_process, fixture_lines, "break", 0)
         send_fixture(fixture_process, fixture_lines, "U1", 1)
         expect(worker_lines, ["S000001"])
@@ -221,6 +275,18 @@ def run(executable):
         send_fixture(fixture_process, fixture_lines, "burst", 3560)
         expect(worker_lines, [f"B{number:06d}" for number in range(1, 3561)], timeout=15)
         idle(worker_lines)
+
+        send_fixture(fixture_process, fixture_lines, "redraw", 0)
+        idle(worker_lines)
+
+        send_fixture(fixture_process, fixture_lines, "start-rows", 100)
+        expect(worker_lines, [f"S{number:06d}" for number in range(1, 101)])
+        send_fixture(fixture_process, fixture_lines, "redraw", 0)
+        idle(worker_lines)
+        send_fixture(fixture_process, fixture_lines, "control", 1)
+        expect(worker_lines, ["control"])
+        idle(worker_lines)
+
         fixture_process.stdin.close()
         if fixture_process.wait(timeout=5) or worker.wait(timeout=5):
             raise AssertionError("The console reader should exit cleanly after its source exits")

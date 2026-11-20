@@ -13,7 +13,6 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
     private readonly ConsoleScrollTracker? _scrollTracker;
     private BufferInfo? _previous;
     private string[] _tail = [];
-    private long _pendingScroll;
     private long _scrollAlreadyCaptured;
 
     public ConsoleScreenBuffer(int processId)
@@ -41,7 +40,6 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
 
     public string[] ReadNewRows(CancellationToken token)
     {
-        _pendingScroll += _scrollTracker?.ReadScroll() ?? 0;
         for (var attempt = 0; attempt < 3; attempt++)
         {
             token.ThrowIfCancellationRequested();
@@ -51,10 +49,12 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
             var continuous = _previous.HasValue && previous.Size == before.Size && end >= previous.Cursor.Y;
             var advance = continuous ? end - previous.Cursor.Y : 0;
 
-            // Moving the viewport back to the cursor can raise scroll events as well.
-            var viewportAdvance = Math.Max(0, before.Window.Top - previous.Window.Top);
-            var reported = Math.Max(0L, _pendingScroll - viewportAdvance);
             var atBottom = end == before.Size.Y - 1;
+            var viewportAdvance = before.Window.Top - previous.Window.Top;
+            var scrollBatch = _scrollTracker?.ReadEvents(before.Size.Y - 1) ?? default;
+            var reported = GetReportedScroll(viewportAdvance, scrollBatch,
+                before.Cursor.X <= previous.Cursor.X,
+                previous.Window.Bottom < previous.Cursor.Y);
             var inferred = atBottom ? Math.Max(0L, reported - _scrollAlreadyCaptured) : 0;
             var expected = (int)Math.Min(end, advance + inferred);
             var first = continuous ? Math.Max(0, end - expected - TailRows) : 0;
@@ -63,7 +63,11 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
             var lastRow = atBottom && end > 0 ? ReadRows(before.Size.X, end - 1, end, token) : null;
             var rows = ReadRows(before.Size.X, first, end, token);
             if (rows is null) continue;
-            var boundary = FindBoundary(rows, first, continuous ? expected : null);
+            // Before the last buffer row, normal output advances the cursor. A rewrite of
+            // an earlier row does not change the boundary, even when it changes the saved tail.
+            var boundary = continuous && (!atBottom || scrollBatch.HistoryRedrawn)
+                ? rows.Length - advance
+                : FindBoundary(rows, first, continuous ? expected : null);
             if (boundary < 0)
             {
                 // The writer got ahead of the notifications. The old tail can still be
@@ -74,9 +78,9 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
             }
 
             var after = GetBufferInfo();
-            var moreScroll = _scrollTracker?.ReadScroll() ?? 0;
-            _pendingScroll += moreScroll;
-            if (moreScroll != 0 || before.Size != after.Size || before.Cursor != after.Cursor
+            var eventsAfter = _scrollTracker?.ReadEvents(after.Size.Y - 1) ?? default;
+            var moreEvents = eventsAfter.EventVersion != scrollBatch.EventVersion;
+            if (moreEvents || before.Size != after.Size || before.Cursor != after.Cursor
                 || before.Window.Top != after.Window.Top || (lastRow is { Length: > 0 } && lastRow[0] != rows[^1]))
                 continue;
 
@@ -85,12 +89,34 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
             // Credit those rows once so that late notifications do not replay them.
             _scrollAlreadyCaptured = continuous && atBottom && _scrollTracker is not null
                 ? Math.Max(0L, _scrollAlreadyCaptured + added.Length - advance - reported) : 0;
-            _pendingScroll = 0;
+            _scrollTracker?.ClearEvents();
             _previous = before;
             _tail = rows[Math.Max(0, rows.Length - TailRows)..];
             return added;
         }
         return [];
+    }
+
+    private static long GetReportedScroll(int viewportAdvance, ConsoleEventBatch events,
+        bool cursorReturnedToColumnStart, bool previousViewportExcludedCursor)
+    {
+        if (events.ScrollCount == 0) return 0;
+
+        var scroll = events.Scroll;
+        if (viewportAdvance == 0 && events.LeadingLayout)
+        {
+            if (events.ScrollCount > 1 || events.BottomRegionRows == 0 || !cursorReturnedToColumnStart)
+                scroll += events.FirstScrollDelta;
+            else
+                scroll = Math.Min(scroll, events.BottomRegionRows);
+        }
+
+        var reported = Math.Max(0L, scroll - Math.Max(0, viewportAdvance));
+        // A viewport can leave the cursor and return several times between samples.
+        // Classic conhost also reports the rows it actually wrote at the buffer edge.
+        if ((events.LayoutChanged || previousViewportExcludedCursor) && events.BottomRegionRows > 0)
+            reported = Math.Min(reported, events.BottomRegionRows);
+        return reported;
     }
 
     private int FindBoundary(ReadOnlySpan<string> rows, int first, int? expected)
@@ -106,8 +132,19 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
         }
 
         var index = rows.LastIndexOf(_tail.AsSpan());
-        if (index >= 0) return index + _tail.Length;
+        if (index >= 0)
+        {
+            // Repeated history can still contain the old tail after an in-place edit.
+            // Infer an unreported scroll only when the text identifies a single boundary.
+            if (expected == 0 && index > 0 && rows[..(index + _tail.Length - 1)].IndexOf(_tail.AsSpan()) >= 0)
+                return rows.Length;
+            return index + _tail.Length;
+        }
         if (first != 0) return -1;
+
+        // An in-place edit can remove the old tail entirely. Once the full buffer
+        // has been checked, keep the boundary supplied by the cursor and scroll events.
+        if (_scrollTracker is not null && expected is { } reported) return rows.Length - reported;
 
         // A burst can evict part or all of the saved tail from the screen buffer.
         for (var overlap = Math.Min(_tail.Length - 1, rows.Length); overlap > 0; overlap--)

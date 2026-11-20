@@ -1854,7 +1854,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_closed) return;
         _consoleDisconnectMessage = message;
         RefreshButtons();
-        if (!_autoRefresh) SetAutoRefresh(true);
+        if (!_autoRefresh) SetStatus(message);
     }
 
     private void CompleteConsoleRefresh()
