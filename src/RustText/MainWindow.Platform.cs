@@ -172,53 +172,48 @@ public partial class MainWindow
         var compare = new CheckBox { Content = "Подсветить отличия от текущего текста", IsEnabled = false };
         var diffLegend = new TextBlock { Text = "Зелёный «+» — только в текущем тексте; красный «−» — только в версии.", IsVisible = false };
         var diffPreview = new TextBlock { MinHeight = 220, MaxHeight = 360, FontFamily = editor.FontFamily, TextWrapping = TextWrapping.Wrap, IsVisible = false };
-        VersionSnapshot? displayedSnapshot = null;
-        string? displayedText = null;
         string? displayedDiffText = null;
         void RefreshVersionPreview()
         {
-            var showDiff = compare.IsChecked == true && displayedSnapshot?.Encoding is not null && displayedDiffText is not null;
+            var showDiff = compare.IsChecked == true && displayedDiffText is not null;
             preview.IsVisible = !showDiff;
             diffLegend.IsVisible = showDiff;
             diffPreview.IsVisible = showDiff;
-            if (showDiff)
-            {
-                RenderVersionDiff(diffPreview, editor.Text, displayedDiffText!);
-            }
+            if (showDiff) RenderVersionDiff(diffPreview, editor.Text, displayedDiffText!);
         }
         compare.IsCheckedChanged += (_, _) => RefreshVersionPreview();
         var body = DialogPanel(new TextBlock { Text = path, TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis },
             list, compare, diffLegend, preview, diffPreview);
         var dialog = Dialog("Версии файла", body, 760);
+        var restoreButton = Button("Восстановить в редакторе", () => Run(RestoreVersionAsync));
+        restoreButton.IsEnabled = false;
         list.SelectionChanged += (_, _) => Run(async () =>
         {
-            if (list.SelectedItem is ListBoxItem { Tag: VersionSnapshot selected })
+            restoreButton.IsEnabled = compare.IsEnabled = false;
+            displayedDiffText = null;
+            preview.Text = null;
+            RefreshVersionPreview();
+            if (list.SelectedItem is not ListBoxItem { Tag: VersionSnapshot selected } item) return;
+            var bytes = await versions.ReadAsync(path, selected, _lifetime.Token);
+            if (!ReferenceEquals(list.SelectedItem, item)) return;
+            if (selected.Encoding is { } encoding)
             {
-                var bytes = await versions.ReadAsync(path, selected, _lifetime.Token);
-                if (list.SelectedItem is ListBoxItem { Tag: VersionSnapshot current } && current == selected)
+                try
                 {
-                    displayedSnapshot = selected;
-                    if (selected.Encoding is { } encoding)
-                    {
-                        displayedText = DocumentFiles.DecodeText(bytes, encoding);
-                        displayedDiffText = DocumentFiles.DecodeSnapshot(bytes, encoding).Text;
-                        preview.Text = displayedText;
-                        compare.IsEnabled = true;
-                    }
-                    else
-                    {
-                        displayedText = "У старой версии не записана кодировка. Показаны первые байты в HEX; восстановление текста отключено, чтобы не угадывать кодировку.\n\n"
-                            + Convert.ToHexString(bytes.AsSpan(0, Math.Min(bytes.Length, 256)));
-                        displayedDiffText = null;
-                        preview.Text = displayedText;
-                        compare.IsChecked = false;
-                        compare.IsEnabled = false;
-                    }
+                    preview.Text = DocumentFiles.DecodeText(bytes, encoding);
+                    displayedDiffText = DocumentFiles.DecodeSnapshot(bytes, encoding).Text;
+                    restoreButton.IsEnabled = compare.IsEnabled = true;
                     RefreshVersionPreview();
+                    return;
                 }
+                catch (InvalidDataException) { /* Older snapshots can carry an incorrect encoding. */ }
             }
+            compare.IsChecked = false;
+            preview.Text = "Кодировка снимка неизвестна. Первые байты в HEX:\n\n"
+                + Convert.ToHexString(bytes.AsSpan(0, Math.Min(bytes.Length, 256)));
         });
-        body.Children.Add(Row(FocusButton(Button("Восстановить в редакторе", () => Run(async () =>
+
+        async Task RestoreVersionAsync()
         {
             if (list.SelectedItem is ListBoxItem { Tag: VersionSnapshot selected } && _tabs.ContainsKey(active.Id))
             {
@@ -245,7 +240,8 @@ public partial class MainWindow
                 dialog.Close();
                 SetStatus("Версия восстановлена в редакторе. Ctrl+S сохранит её на диск.");
             }
-        })), primary: true), FocusButton(Button("Лимиты…", () => Run(ShowSettingsAsync)))));
+        }
+        body.Children.Add(Row(FocusButton(restoreButton, primary: true), FocusButton(Button("Лимиты…", () => Run(ShowSettingsAsync)))));
         await dialog.ShowDialog(this);
     }
 

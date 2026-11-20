@@ -641,7 +641,11 @@ public partial class MainWindow
         log.SetTextSize(_fontSize);
         tab.Log = log;
         if (_closing) log.SetWindowCloseInputBlocked(true);
-        if (draftName is null) tab.Encoding = log.DetectedEncoding;
+        if (draftName is null)
+        {
+            tab.Encoding = log.DetectedEncoding;
+            if (encoding is not null) tab.DiskEncoding = encoding;
+        }
         tab.OpeningPage = !log.InitialPageLoad.IsCompleted;
         if (tab.OpeningPage)
         {

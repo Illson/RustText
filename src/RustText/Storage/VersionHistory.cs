@@ -62,7 +62,10 @@ public sealed class VersionHistory
         {
             // Save As can target a file the editor has never opened.
             try { encoding = DocumentFiles.DetectEncoding(bytes); }
-            catch (System.Text.DecoderFallbackException) { /* Keep unknown encodings marked as such. */ }
+            catch (InvalidDataException)
+            {
+                /* Keep unknown or binary content marked as such. */
+            }
         }
         var snapshot = new VersionSnapshot(DateTime.UtcNow.Ticks.ToString("x16") + Guid.NewGuid().ToString("N")[..8], fullPath,
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), bytes.LongLength, digest, encoding);

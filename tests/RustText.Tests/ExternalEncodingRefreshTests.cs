@@ -96,6 +96,43 @@ public sealed class ExternalEncodingRefreshTests
         }
     });
 
+    [Fact]
+    public Task ExplicitLogEncodingSurvivesReloadAndReturnToEditor() => HeadlessTests.RunAsync(async profile =>
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var windows1251 = Encoding.GetEncoding(1251);
+        var path = Path.Combine(profile, "explicit-log-encoding.log");
+        await File.WriteAllTextAsync(path, "initial text", new UTF8Encoding(false));
+        var window = await OpenEditorWindowAsync(path, null);
+        try
+        {
+            var tab = Property(window, "ActiveTab")!;
+            await InvokeTask(window, "ToggleLogModeAsync", tab);
+            var initialLog = Assert.IsType<RustText.Demo.Logs.LogView>(Property(tab, "Log"));
+            await initialLog.InitialPageLoad;
+            initialLog.SetAutoRefresh(false);
+
+            await File.WriteAllBytesAsync(path, windows1251.GetBytes("новый текст"));
+            await InvokeTask(window, "ReloadAsync", tab, TextEncodingKind.Windows1251);
+            var reloadedLog = Assert.IsType<RustText.Demo.Logs.LogView>(Property(tab, "Log"));
+            await reloadedLog.InitialPageLoad;
+            Assert.Equal(TextEncodingKind.Windows1251, Property(tab, "Encoding"));
+
+            await InvokeTask(window, "ToggleLogModeAsync", tab);
+            await HeadlessTests.WaitForAsync(() => Property(tab, "Editor") is TextEditor editor
+                && editor.Text == "новый текст");
+
+            var editor = (TextEditor)Property(tab, "Editor")!;
+            editor.Document.Insert(editor.Document.TextLength, "!");
+            await InvokeTask(window, "SaveAsync", false);
+            Assert.Equal(windows1251.GetBytes("новый текст!"), await File.ReadAllBytesAsync(path));
+        }
+        finally
+        {
+            await CloseWindowAsync(window);
+        }
+    });
+
     private static async Task<MainWindow> OpenEditorWindowAsync(string? path, TextEncodingKind? encoding)
     {
         var window = new MainWindow();

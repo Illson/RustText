@@ -458,10 +458,12 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_closed || _busy || PageNavigationBlocked) return false;
         StopFollowingEnd();
         _activeSearchResult = _searchResults.IndexOf(hit);
-        var end = hit.MatchIndex + hit.MatchLength;
-        if (_page?.Rows.FirstOrDefault()?.StartOffset != hit.Offset)
+        if (!DisplaysSearchHit(hit))
         {
-            await LoadPageAsync(hit.Offset, saveHistory: true);
+            var pageBytes = Math.Clamp(hit.LineLengthBytes, LogDataReader.DefaultPageBytes, MaximumSearchLineBytes);
+            var readStamp = FileStamp.Read(_path, _file);
+            if (readStamp.Identity != snapshot.Stamp.Identity) return false;
+            await LoadPageAsync(hit.Offset, saveHistory: true, maxPageBytes: pageBytes, expectedPageStamp: readStamp);
             if (_closed) return false;
             if (!IsSearchSnapshotCurrent(snapshot))
             {
@@ -470,37 +472,19 @@ internal sealed partial class LogView : UserControl, IDisposable
                 return false;
             }
             if (!IsSearchHitCurrent(snapshot, hit)) return RemoveStaleSearchHit(hit);
+            if (PageNavigationBlocked || !DisplaysSearchHit(hit)) return false;
         }
 
-        if (_page?.Rows.FirstOrDefault()?.StartOffset != hit.Offset) return false;
-        if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && end > FirstDisplayedLineLength())
+        if (_pageEdit is not null)
         {
-            await LoadPageAsync(hit.Offset, saveHistory: false,
-                maxPageBytes: MaximumSearchLineBytes);
-            if (_closed) return false;
-            if (!IsSearchSnapshotCurrent(snapshot))
-            {
-                ClearSearchResults();
-                SetSearchStatus("Файл изменился. Повторите поиск.");
-                return false;
-            }
-            if (!IsSearchHitCurrent(snapshot, hit)) return RemoveStaleSearchHit(hit);
-        }
-
-        if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset
-            && hit.MatchIndex >= 0 && end <= FirstDisplayedLineLength())
-        {
-            if (_pageEdit is not null)
-            {
-                _pageEditor!.Select(hit.MatchIndex, hit.MatchLength);
-                return true;
-            }
-            _logText.CaretIndex = end;
-            _logText.SelectionStart = hit.MatchIndex;
-            _logText.SelectionEnd = end;
+            _pageEditor!.Select(hit.MatchIndex, hit.MatchLength);
             return true;
         }
-        return false;
+        var end = hit.MatchIndex + hit.MatchLength;
+        _logText.CaretIndex = end;
+        _logText.SelectionStart = hit.MatchIndex;
+        _logText.SelectionEnd = end;
+        return true;
     }
 
     private bool RemoveStaleSearchHit(LogSearchHit hit)
@@ -517,15 +501,14 @@ internal sealed partial class LogView : UserControl, IDisposable
         return false;
     }
 
-    private int FirstDisplayedLineLength()
+    private bool DisplaysSearchHit(LogSearchHit hit)
     {
-        var rows = _page!.Rows;
-        var length = rows[0].Text.Length;
-        for (var index = 1; index < rows.Count && rows[index].ContinuesLine; index++)
-        {
-            length += rows[index].Text.Length;
-        }
-        return length;
+        if (_page?.Rows.FirstOrDefault()?.StartOffset != hit.Offset) return false;
+        var line = (_pageEdit?.Original ?? _logText.Text).AsSpan();
+        var end = line.IndexOfAny('\r', '\n');
+        if (end >= 0) line = line[..end];
+        return hit.MatchIndex >= 0 && hit.MatchLength >= 0 && hit.MatchIndex <= line.Length - hit.MatchLength
+            && SearchLineDigest(line) == hit.LineDigest;
     }
 
     public void FocusSearch()
@@ -1025,7 +1008,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     }
 
     private async Task LoadPageAsync(long offset, bool saveHistory = true, PagePosition position = PagePosition.Start,
-        int maxPageBytes = LogDataReader.DefaultPageBytes)
+        int maxPageBytes = LogDataReader.DefaultPageBytes, FileStamp? expectedPageStamp = null)
     {
         if (_closed || _busy || PageNavigationBlocked)
         {
@@ -1039,7 +1022,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             var firstOffset = _hiddenOffset;
             var reader = _reader;
             var token = _closing.Token;
-            var stamp = _fileStamp;
+            var stamp = expectedPageStamp ?? _fileStamp;
             var (page, firstLine, edit) = await Task.Run(() =>
             {
                 var pageBytes = maxPageBytes;
@@ -1463,8 +1446,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
     }
 
-    private static string SearchLineDigest(string text) =>
-        Convert.ToHexString(SHA256.HashData(MemoryMarshal.AsBytes(text.AsSpan())));
+    private static string SearchLineDigest(ReadOnlySpan<char> text) =>
+        Convert.ToHexString(SHA256.HashData(MemoryMarshal.AsBytes(text)));
 
     internal async Task<LogSearchPage> SearchSnapshotAsync(LogSearchSnapshot snapshot, SearchOptions options,
         LogSearchCursor? cursor, int maxResults, CancellationToken token,

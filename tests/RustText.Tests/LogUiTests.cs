@@ -914,6 +914,29 @@ public sealed class LogUiTests
     });
 
     [Fact]
+    public Task LocalSearchReloadsChangedEditableLineBeyondThePageBoundary() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "paged-search.log");
+        var prefix = new string('x', LogDataReader.DefaultPageBytes + 32);
+        await File.WriteAllTextAsync(path, prefix + "before\n");
+        var timestamp = File.GetLastWriteTimeUtc(path);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, EditPages: true));
+        try
+        {
+            Assert.DoesNotContain("marker", PageEditor(log).Text);
+            await File.WriteAllTextAsync(path, prefix + "marker\n");
+            File.SetLastWriteTimeUtc(path, timestamp.AddSeconds(5));
+
+            ((TextBox)Field(log, "_searchBox")).Text = "marker";
+            await log.NavigateMatchAsync(backward: false);
+
+            Assert.Equal("marker", PageEditor(log).SelectedText);
+            Assert.Equal(prefix.Length, PageEditor(log).SelectionStart);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public Task SearchNavigationKeepsCompletedPrefixHitsAfterAppendButRejectsOpenTailHit() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "append-search.log");

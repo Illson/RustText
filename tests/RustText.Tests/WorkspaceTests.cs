@@ -909,6 +909,42 @@ public sealed class WorkspaceTests
         finally { await CloseAsync(window); }
     });
 
+    [Fact]
+    public Task SearchAllTabsReloadsChangedLogPageAtSameOffsetBeforeHighlightingHit() => HeadlessTests.RunAsync(async profile =>
+    {
+        var logPath = Path.Combine(profile, "same-offset.log");
+        var notesPath = Path.Combine(profile, "notes.txt");
+        await File.WriteAllTextAsync(logPath, "before\n");
+        await File.WriteAllTextAsync(notesPath, "notes without a match");
+        var window = await OpenWorkspaceAsync(logPath, notesPath);
+        try
+        {
+            var logTab = Tabs(window).Single(tab => Read<string>(tab, "Path") == logPath);
+            var log = Read<LogView>(logTab, "Log");
+            await log.InitialPageLoad;
+            Assert.Equal("before", LogText(log).Text);
+            log.SetAutoRefresh(false);
+            Assert.Equal(notesPath, Read<string>(ActiveTab(window), "Path"));
+
+            var timestamp = File.GetLastWriteTimeUtc(logPath);
+            await File.WriteAllTextAsync(logPath, "marker\n");
+            File.SetLastWriteTimeUtc(logPath, timestamp);
+
+            Invoke(window, "OpenSearchPanel", false);
+            ((TextBox)Field(window, "_searchInput")).Text = "marker";
+            ((ToggleButton)Field(window, "_allTabs")).IsChecked = true;
+            await CallAsync(window, "FindAsync");
+            var results = (ListBox)Field(window, "_searchResults");
+            results.SelectedItem = Assert.Single(results.Items.OfType<ListBoxItem>(), item =>
+                item.Content!.ToString()!.Contains("marker", StringComparison.Ordinal));
+
+            await HeadlessTests.WaitForAsync(() => ReferenceEquals(ActiveTab(window), logTab)
+                && LogText(log).SelectionEnd > LogText(log).SelectionStart);
+            Assert.Equal("marker", LogText(log).SelectedText);
+        }
+        finally { await CloseAsync(window); }
+    });
+
     [Theory]
     [InlineData("1234 56", @"\d+", "$&$&", "12341234 56", 9, "56")]
     [InlineData("12 34", @"(\d)\d", "$1", "1 34", 2, "34")]

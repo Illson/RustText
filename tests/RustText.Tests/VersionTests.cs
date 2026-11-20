@@ -46,6 +46,75 @@ public sealed class VersionTests
     }
 
     [Fact]
+    public async Task SaveAsSnapshotWithUnspecifiedBomlessUtf16EncodingRemainsUnknown()
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "target.txt");
+        var bytes = Encoding.Unicode.GetBytes("A\nB");
+        await File.WriteAllBytesAsync(path, bytes);
+        var store = VersionHistory.Open(Path.Combine(folder.Path, "versions"), 1024, 4096);
+
+        await store.CaptureExpectedAsync(path, null, await DocumentFiles.GetStampAsync(path));
+
+        var snapshot = Assert.Single(await store.ListAsync(path));
+        Assert.Null(snapshot.Encoding);
+        Assert.Equal(bytes, await store.ReadAsync(path, snapshot));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ExplicitAndBomDetectedUtf16SnapshotsRemainReadable(bool bigEndian)
+    {
+        var encoding = new UnicodeEncoding(bigEndian, true, true);
+        var kind = bigEndian ? TextEncodingKind.Utf16BigEndian : TextEncodingKind.Utf16LittleEndian;
+        var bytes = encoding.GetBytes("A\r\nB");
+        byte[] withBom = [.. encoding.GetPreamble(), .. bytes];
+        Assert.Equal(kind, DocumentFiles.DetectEncoding(withBom));
+        Assert.Equal("A\nB", DocumentFiles.DecodeSnapshot(withBom, kind).Text);
+        Assert.Equal("A\nB", DocumentFiles.DecodeSnapshot(bytes, kind).Text);
+        byte[] withNul = [.. encoding.GetPreamble(), .. encoding.GetBytes("A\0B")];
+        Assert.Throws<InvalidDataException>(() => DocumentFiles.DetectEncoding(withNul));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task NulSnapshotShowsHexAndDisablesRestore(bool oldUtf8Label) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "target.txt");
+        var bytes = Encoding.Unicode.GetBytes("A\nB");
+        await File.WriteAllBytesAsync(path, bytes);
+        var store = VersionHistory.OpenDefault();
+        await store.CaptureExpectedAsync(path, oldUtf8Label ? TextEncodingKind.Utf8 : null, await DocumentFiles.GetStampAsync(path));
+        var stored = Assert.Single(await store.ListAsync(path));
+        await File.WriteAllTextAsync(path, "current text");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var dialogTask = CallAsync(window, "ShowVersionsAsync");
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
+            var dialog = Assert.Single(window.OwnedWindows);
+            var list = Assert.Single(dialog.GetVisualDescendants().OfType<ListBox>());
+            list.SelectedItem = Assert.Single(list.Items.OfType<ListBoxItem>(), item => Equals(item.Tag, stored));
+            var preview = Assert.Single(dialog.GetVisualDescendants().OfType<TextBox>());
+            await HeadlessTests.WaitForAsync(() => !string.IsNullOrEmpty(preview.Text));
+
+            Assert.Contains(Convert.ToHexString(bytes), preview.Text!, StringComparison.Ordinal);
+            Assert.False(Assert.Single(dialog.GetVisualDescendants().OfType<CheckBox>()).IsEnabled);
+            var restore = Assert.Single(dialog.GetVisualDescendants().OfType<Button>(),
+                button => Equals(button.Content, "Восстановить в редакторе"));
+            Assert.False(restore.IsEnabled);
+            Assert.Equal("current text", editor.Text);
+            Assert.Equal("current text", await File.ReadAllTextAsync(path));
+            dialog.Close();
+            await dialogTask;
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public async Task ExpectedStamp_RejectsExternalChangesWithoutReplacingOrCapturingThem()
     {
         await HeadlessTests.RunAsync(async profilePath =>
@@ -376,6 +445,7 @@ public sealed class VersionTests
 
     [Theory]
     [InlineData(@"A\n(B\n)", "$1", "B\rC\nD")]
+    [InlineData(@"(A\n)(B\n)(C)(\n)", "$2$4", "B\r\r\nD")]
     [InlineData(@"(A\n)(?<keep>B\n)", "${keep}$1${keep}", "B\rA\r\nB\rC\nD")]
     [InlineData(@"(A\n)(B\n)", "$$2$02", "$2B\rC\nD")]
     [InlineData(@"A\n(B\n)", "$+", "B\rC\nD")]
@@ -403,6 +473,7 @@ public sealed class VersionTests
                 Assert.Equal(expected.ReplaceLineEndings("\n"), editor.Text);
                 await CallAsync(window, "SaveAsync", false);
                 Assert.Equal(Encoding.UTF8.GetBytes(expected), await File.ReadAllBytesAsync(path));
+                Assert.Equal(editor.Text, (await DocumentFiles.ReadAsync(path)).Text);
                 editor.TextArea.Focus();
                 PressUndo(window);
                 await CallAsync(window, "SaveAsync", false);
@@ -410,6 +481,30 @@ public sealed class VersionTests
             }
             finally { await CloseAsync(window); }
         });
+
+    [Fact]
+    public Task InsertedBlankLineAfterBareCrSurvivesSavingAndUndo() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "blank-line.txt");
+        const string original = "A\rB\nC";
+        await File.WriteAllTextAsync(path, original);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.Document.Insert(2, "\n");
+            Assert.Equal("A\n\nB\nC", editor.Text);
+            await CallAsync(window, "SaveAsync", false);
+            Assert.Equal(editor.Text, (await DocumentFiles.ReadAsync(path)).Text);
+            Assert.Equal("A\r\r\nB\nC", await File.ReadAllTextAsync(path));
+
+            editor.TextArea.Focus();
+            PressUndo(window);
+            await CallAsync(window, "SaveAsync", false);
+            Assert.Equal(original, await File.ReadAllTextAsync(path));
+        }
+        finally { await CloseAsync(window); }
+    });
 
     [Fact]
     public Task RestoredFormat_UndoSaveRedoSaveKeepsOriginalBytesAndDoesNotDuplicateTheirEncoding() => HeadlessTests.RunAsync(async profilePath =>

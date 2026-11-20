@@ -60,7 +60,6 @@ public static class DocumentFiles
         if (before != after) throw new IOException("Файл изменился во время чтения.");
 
         var (decoded, detected) = Decode(bytes, encoding);
-        if (decoded.Contains('\0')) throw new InvalidDataException("Файл содержит нулевые символы.");
         var (normalized, endings, style) = NormalizeNewlines(decoded);
         return new(normalized, detected, style, endings, before);
     }
@@ -137,7 +136,14 @@ public static class DocumentFiles
             if (c != '\n') { builder.Append(c); continue; }
             var ending = !originalEndings.IsDefault && map < originalEndings.Length ? originalEndings[map] : lineEnding == LineEndingKind.Mixed ? LineEndingKind.Lf : lineEnding;
             map++;
-            builder.Append(ending switch { LineEndingKind.CrLf => "\r\n", LineEndingKind.Cr => "\r", _ => "\n" });
+            // A bare CR and the next logical LF would be read back as a single CRLF.
+            builder.Append(ending switch
+            {
+                LineEndingKind.Cr => "\r",
+                LineEndingKind.CrLf => "\r\n",
+                _ when builder.Length > 0 && builder[^1] == '\r' => "\r\n",
+                _ => "\n"
+            });
         }
         var textToWrite = builder.ToString();
         var selected = GetEncoding(encoding);
@@ -163,7 +169,12 @@ public static class DocumentFiles
         if (kind == TextEncodingKind.Utf8Bom && bytes.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF })) skip = 3;
         if (kind == TextEncodingKind.Utf16LittleEndian && bytes.AsSpan().StartsWith(new byte[] { 0xFF, 0xFE })) skip = 2;
         if (kind == TextEncodingKind.Utf16BigEndian && bytes.AsSpan().StartsWith(new byte[] { 0xFE, 0xFF })) skip = 2;
-        try { return (GetEncoding(kind).GetString(bytes, skip, bytes.Length - skip), kind); }
+        try
+        {
+            var decoded = GetEncoding(kind).GetString(bytes, skip, bytes.Length - skip);
+            if (decoded.Contains('\0')) throw new InvalidDataException("Файл содержит нулевые символы.");
+            return (decoded, kind);
+        }
         catch (DecoderFallbackException ex) { throw new InvalidDataException($"Файл не соответствует {kind}.", ex); }
     }
 
@@ -175,12 +186,7 @@ public static class DocumentFiles
         _ => TextEncodingKind.Utf8
     };
 
-    internal static TextEncodingKind DetectEncoding(byte[] bytes)
-    {
-        var kind = EncodingFromPreamble(bytes);
-        _ = GetEncoding(kind).GetCharCount(bytes);
-        return kind;
-    }
+    internal static TextEncodingKind DetectEncoding(byte[] bytes) => Decode(bytes, null).Encoding;
 
     internal static Encoding GetEncoding(TextEncodingKind kind) => kind switch
     {
