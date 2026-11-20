@@ -36,7 +36,6 @@ internal sealed partial class LogView
     private int _sourceSelectionStart;
     private int _sourceSelectionEnd;
     private int _sourceCaretIndex;
-    private int[] _filteredRowStarts = [];
     private long?[] _filteredSourceLineNumbers = [];
     private FilterPage? _filteredPage;
     private ScrollViewer? _filteredLogScrollViewer;
@@ -50,11 +49,6 @@ internal sealed partial class LogView
         textLayer.Children.Add(_filteredLogText);
         _filteredLevelBands = new LogLevelBands(_filteredLogText) { IsHitTestVisible = false, ClipToBounds = true };
         textLayer.Children.Add(_filteredLevelBands);
-        _filteredLogText.AddHandler(ScrollViewer.ScrollChangedEvent, (_, _) =>
-        {
-            _filteredLevelBands.InvalidateVisual();
-            SyncFilteredGutterScroll();
-        });
         _filteredLogText.LayoutUpdated += OnFilteredLogTextLayoutUpdated;
         _levelFilter = new LogLevelFilterPanel();
         _levelFilter.LevelsChanged += OnFilterLevelsChanged;
@@ -127,7 +121,6 @@ internal sealed partial class LogView
         _filterCurrent = cursor;
         _filterNext = null;
         _filteredLogText.Text = string.Empty;
-        _filteredRowStarts = [];
         _filteredSourceLineNumbers = [];
         _filteredPage = null;
         _lineGutterText.Text = string.Empty;
@@ -205,20 +198,12 @@ internal sealed partial class LogView
 
     private void UpdateFilteredLineGutter(FilterPage page)
     {
-        var starts = new List<int>();
-        var lineNumbers = new List<long?>();
-        var offset = 0;
+        var lineNumbers = new List<long?>(page.Rows.Count);
         foreach (var row in page.Rows)
         {
-            if (starts.Count == 0 || !row.Continuation)
-            {
-                if (starts.Count > 0) offset += Environment.NewLine.Length;
-                starts.Add(offset);
+            if (lineNumbers.Count == 0 || !row.Continuation)
                 lineNumbers.Add(row.SourceLine);
-            }
-            offset += row.Text.Length;
         }
-        _filteredRowStarts = [.. starts];
         _filteredSourceLineNumbers = [.. lineNumbers];
         UpdateLineGutterText();
         RefreshLineCount();
@@ -254,8 +239,22 @@ internal sealed partial class LogView
     {
         if (_levelFilterViewport?.IsVisible != true) return;
         var scrollViewer = _filteredLogText.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
-        if (!ReferenceEquals(scrollViewer, _filteredLogScrollViewer)) _filteredLogScrollViewer = scrollViewer;
-        UpdateLineGutterText();
+        AttachFilteredScrollViewer(scrollViewer);
+        SyncFilteredGutterScroll();
+    }
+
+    private void AttachFilteredScrollViewer(ScrollViewer? scrollViewer)
+    {
+        if (ReferenceEquals(scrollViewer, _filteredLogScrollViewer)) return;
+        if (_filteredLogScrollViewer is not null) _filteredLogScrollViewer.ScrollChanged -= OnFilteredScrollChanged;
+        _filteredLogScrollViewer = scrollViewer;
+        if (scrollViewer is not null) scrollViewer.ScrollChanged += OnFilteredScrollChanged;
+    }
+
+    private void OnFilteredScrollChanged(object? sender, ScrollChangedEventArgs e)
+    {
+        _filteredLevelBands?.InvalidateVisual();
+        SyncFilteredGutterScroll();
     }
 
     private void SyncFilteredGutterScroll()
@@ -327,9 +326,8 @@ internal sealed partial class LogView
         ((Grid)_contentViewport.Children[0]).Children.Remove(_levelFilterViewport);
         _filterStatus.IsVisible = false;
         _filteredPage = null;
-        _filteredRowStarts = [];
         _filteredSourceLineNumbers = [];
-        _filteredLogScrollViewer = null;
+        AttachFilteredScrollViewer(null);
         _logText.IsVisible = _pageEdit is null;
         if (_pageEditor is not null) _pageEditor.IsVisible = _pageEdit is not null;
         _lineGutterScrollViewer.IsVisible = _pageEdit is null;

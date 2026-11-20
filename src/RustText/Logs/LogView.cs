@@ -2178,31 +2178,31 @@ internal sealed partial class LogView : UserControl, IDisposable
     private void UpdateLineGutterText()
     {
         var isFiltered = _levelFilterViewport?.IsVisible == true;
-        var textBox = isFiltered ? _filteredLogText : _logText;
-        IReadOnlyList<int> rowStarts = isFiltered ? _filteredRowStarts : _displayRowStarts;
-        IReadOnlyList<long?> sourceLineNumbers = isFiltered ? _filteredSourceLineNumbers : _displaySourceLineNumbers;
+        var sourceLineNumbers = isFiltered ? _filteredSourceLineNumbers : _displaySourceLineNumbers;
         var scrollViewer = isFiltered ? _filteredLogScrollViewer : _logScrollViewer;
-        if (sourceLineNumbers.Count == 0)
+        if (sourceLineNumbers.Length == 0)
         {
             _lineGutterText.Text = string.Empty;
             return;
         }
 
         var values = new List<string>();
-        var layout = textBox.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault()?.TextLayout;
+        // Filtered rows are never wrapped. Their gutter can be built directly from the page,
+        // even when the text box has not laid out all of its text yet.
+        var layout = isFiltered ? null : _logText.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault()?.TextLayout;
         if (layout is not null && layout.TextLines.Count > 0)
         {
-            var text = textBox.Text ?? string.Empty;
+            var text = _logText.Text ?? string.Empty;
             var rowIndex = 0;
             foreach (var visualLine in layout.TextLines)
             {
                 var start = Math.Clamp(visualLine.FirstTextSourceIndex, 0, text.Length);
-                while (rowIndex + 1 < rowStarts.Count && rowStarts[rowIndex + 1] <= start)
+                while (rowIndex + 1 < _displayRowStarts.Length && _displayRowStarts[rowIndex + 1] <= start)
                 {
                     rowIndex++;
                 }
 
-                var startsLogicalRow = start == rowStarts[rowIndex];
+                var startsLogicalRow = start == _displayRowStarts[rowIndex];
                 values.Add(startsLogicalRow
                     ? sourceLineNumbers[rowIndex] is { } line ? LineNumbers.Format(line) : "?"
                     : string.Empty);
