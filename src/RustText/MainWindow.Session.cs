@@ -44,6 +44,14 @@ public partial class MainWindow
                 {
                     _workspace.SettingsReady = true;
                 }
+                if (OperatingSystem.IsWindows())
+                {
+                    // Older profiles could save the disabled default without recording a choice.
+                    await SaveWorkspaceSettingsAsync(static settings =>
+                        settings is { AutoCheckUpdates: false, AutoCheckUpdatesChoiceMade: false }
+                            ? settings with { AutoCheckUpdates = true, AutoCheckUpdatesChoiceMade = true }
+                            : settings);
+                }
             }
             _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
         }
@@ -296,9 +304,10 @@ public partial class MainWindow
             ? new WorkspaceLayout(group.Id, Split: axis.ToString(), Ratio: group.Ratio,
                 First: CaptureLayout(group.First!, tabs), Second: CaptureLayout(group.Second!, tabs))
             : new WorkspaceLayout(group.Id, group.Tabs.Items.OfType<TabItem>()
-                .Select(item => tabs.Values.First(tab => ReferenceEquals(tab.Item, item)).Id).ToArray(),
+                .Select(item => tabs.Values.First(tab => ReferenceEquals(tab.Item, item)))
+                .Where(tab => tab.Log?.IsConsole != true).Select(tab => tab.Id).ToArray(),
                 group.Tabs.SelectedItem is TabItem selected
-                    ? tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, selected))?.Id : null);
+                    ? tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, selected) && tab.Log?.IsConsole != true)?.Id : null);
     }
 
     private SessionTab CaptureTab(WorkTab tab)
@@ -510,7 +519,7 @@ public partial class MainWindow
         {
             var byItem = pair.View.Tabs.Values.ToDictionary(tab => tab.Item);
             return pair.Owner.Groups(pair.View.Root).SelectMany(group => group.Tabs.Items.OfType<TabItem>())
-                .Select(item => (pair.Owner, Tab: byItem[item]));
+                .Select(item => (pair.Owner, Tab: byItem[item])).Where(entry => entry.Tab.Log?.IsConsole != true);
         }).ToArray();
         var tabs = entries.Select(entry => entry.Tab).ToArray();
         var recoveries = tabs.Select(tab => tab.Recovery).ToArray();
@@ -883,6 +892,7 @@ public partial class MainWindow
         bool preserveUnsavedText = false,
         bool deferHistoryLimit = false)
     {
+        if (tab.Log?.IsConsole == true) return;
         await _workspace.SaveGate.WaitAsync(_lifetime.Token);
         try
         {

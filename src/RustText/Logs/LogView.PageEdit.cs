@@ -81,7 +81,7 @@ internal sealed partial class LogView
 
     private async Task TogglePageEditAsync()
     {
-        if (_closed || _busy || EditsPagesByDefault || _page is not { } page) return;
+        if (_closed || _busy || IsConsole || EditsPagesByDefault || _page is not { } page) return;
         if (_pageEdit is not null)
         {
             if (HasPendingEdit) SetStatus("Сохраните или отмените правки страницы.");
@@ -371,7 +371,7 @@ internal sealed partial class LogView
         var saving = _pageWrite is not null;
         _readModeLabel.Text = _isDraft && (editing || EditsPagesByDefault) ? "РЕДАКТИРОВАНИЕ ЧЕРНОВИКА"
             : EditsPagesByDefault || editing ? "РЕДАКТИРОВАНИЕ" : "ТОЛЬКО ЧТЕНИЕ";
-        _editPageButton.IsVisible = !EditsPagesByDefault;
+        _editPageButton.IsVisible = !EditsPagesByDefault && !IsConsole;
         _editPageButton.Content = editing ? "Только чтение" : "Редактировать";
         _editPageButton.IsEnabled = !_closed && !_busy && !saving && _page is not null;
         _savePageButton.IsVisible = editing && !saving;

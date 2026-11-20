@@ -1,6 +1,8 @@
 using System.Reflection;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using AvaloniaEdit;
+using RustText.Demo.Editor;
 using RustText.Demo;
 using Xunit;
 
@@ -40,6 +42,48 @@ public sealed class IdleUnloadTests
         }
         finally
         {
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
+    public Task SearchAllTabsFindsAndOpensAnUnloadedLargeDraft() => HeadlessTests.RunAsync(async profile =>
+    {
+        var firstPath = Path.Combine(profile, "first.txt");
+        var secondPath = Path.Combine(profile, "second.txt");
+        await File.WriteAllTextAsync(firstPath, "first document");
+        await File.WriteAllTextAsync(secondPath, "visible document");
+        var window = await OpenWorkspaceAsync(firstPath, secondPath);
+        try
+        {
+            var anchor = Tabs(window).Single(item => Equals(Property(item, "Path"), secondPath));
+            typeof(MainWindow).GetMethod("NewTab", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(window, [new string('x', 8 * 1024 * 1024) + "unique-needle"]);
+            var tab = Tabs(window).Single(item => Property(item, "Path") is null
+                && Property(item, "Editor") is TextEditor);
+            typeof(MainWindow).GetMethod("Select", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(window, [anchor]);
+            SetProperty(tab, "LastWorked", DateTimeOffset.Now - TimeSpan.FromMinutes(10));
+            await CallAsync(window, "UnloadIdleEditorsAsync");
+
+            var deferred = Assert.IsType<SessionTab>(Property(tab, "Deferred"));
+            Assert.Equal(false, deferred.DraftLogMode);
+            Assert.True(StorageService.OpenForTesting(profile).GetDraftLength(deferred) > 8 * 1024 * 1024);
+            ((TextBox)Field(window, "_searchInput")!).Text = "unique-needle";
+            ((ToggleButton)Field(window, "_allTabs")!).IsChecked = true;
+            await CallAsync(window, "FindMatchesAsync", false, false);
+
+            var results = (ListBox)Field(window, "_searchResults")!;
+            Assert.Single(results.Items);
+            results.SelectedItem = Assert.IsType<ListBoxItem>(Assert.Single(results.Items));
+            await HeadlessTests.WaitForAsync(() => Property(tab, "Editor") is TextEditor restored
+                && restored.SelectedText == "unique-needle");
+        }
+        finally
+        {
+            if (Tabs(window).SingleOrDefault(item => Property(item, "Path") is null) is { } draftTab
+                && Property(draftTab, "Editor") is TextEditor restored)
+                restored.Text = string.Empty;
             await CloseAsync(window);
         }
     });

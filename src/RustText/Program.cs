@@ -14,6 +14,11 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        if (ConsoleCapture.TryRunWorker(args) is { } consoleExit)
+        {
+            return consoleExit;
+        }
+
         if (Environment.GetEnvironmentVariable("RUSTTEXT_MEASURE") is not null)
         {
             _measurementStart = Stopwatch.GetTimestamp();

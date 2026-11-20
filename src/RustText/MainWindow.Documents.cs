@@ -616,9 +616,10 @@ public partial class MainWindow
         LogTabState? state = null,
         string? draftName = null,
         long? draftLineCount = null,
-        bool preserveEditorChanges = false)
+        bool preserveEditorChanges = false,
+        ConsoleCapture? console = null)
     {
-        var log = new LogView(path, encoding, state ?? new LogTabState(AutoRefresh: tab.AutoRefresh), draftName, draftLineCount)
+        var log = new LogView(path, encoding, state ?? new LogTabState(AutoRefresh: tab.AutoRefresh), draftName, draftLineCount, console)
         {
             WordWrap = state?.WordWrap ?? _wordWrap,
             PreserveExternalPageEdit = text => PreservePageDraft(tab, text)
@@ -634,6 +635,7 @@ public partial class MainWindow
         else _ = DetachEditor(tab);
         log.SetTextSize(_fontSize);
         tab.Log = log;
+        tab.Encoding = log.DetectedEncoding;
         tab.OpeningPage = !log.InitialPageLoad.IsCompleted;
         if (tab.OpeningPage)
         {
@@ -918,9 +920,17 @@ public partial class MainWindow
                     }
                     else
                     {
-                        var loaded = await DocumentFiles.ReadAsync(path, tab.Encoding, source.Token);
-                        if (!IsCurrent() || !ReferenceEquals(tab.Log, log)) return;
-                        AttachLoadedEditor(tab, loaded);
+                        if (!log.TryBeginModeSwitch()) return;
+                        try
+                        {
+                            var loaded = await DocumentFiles.ReadAsync(path, tab.Encoding, source.Token);
+                            if (!IsCurrent() || !ReferenceEquals(tab.Log, log)) return;
+                            AttachLoadedEditor(tab, loaded);
+                        }
+                        finally
+                        {
+                            if (ReferenceEquals(tab.Log, log)) log.EndModeSwitch();
+                        }
                     }
                 }
             }

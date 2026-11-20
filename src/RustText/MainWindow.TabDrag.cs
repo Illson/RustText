@@ -16,6 +16,7 @@ public partial class MainWindow
     private long? _draggedTabId;
 
     private bool CanDragTab(WorkTab tab) => !_closing && !_closed && !_validatingStartupSession && !tab.Loading && !tab.CheckingSession
+        && tab.Log?.IsConsole != true
         && !tab.Closing && !tab.Saving && tab.Log?.HasPendingEdit != true && _tabs.ContainsKey(tab.Id);
 
     private void RegisterTabDrag(WorkTab tab, Button close)

@@ -18,6 +18,7 @@ public sealed class UpdaterTests
 
         var newProfile = await storage.LoadSettingsAsync();
         Assert.True(newProfile.AutoCheckUpdates);
+        Assert.False(newProfile.AutoCheckUpdatesChoiceMade);
         Assert.True(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: true, profileOverride: null));
         Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: false, profileOverride: null));
         Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: true, profileOverride: "C:\\isolated"));
@@ -25,16 +26,25 @@ public sealed class UpdaterTests
         await File.WriteAllTextAsync(Path.Combine(storage.RootDirectory, "settings.json"), "{\"untitled_tab_limit\":19}");
         var legacy = await storage.LoadSettingsAsync();
         Assert.True(legacy.AutoCheckUpdates);
+        Assert.False(legacy.AutoCheckUpdatesChoiceMade);
         Assert.Equal(19, legacy.UntitledTabLimit);
 
-        await storage.SaveSettingsAsync(newProfile with { AutoCheckUpdates = false });
+        await File.WriteAllTextAsync(Path.Combine(storage.RootDirectory, "settings.json"), "{\"auto_check_updates\":false}");
+        var ambiguousLegacyOptOut = await storage.LoadSettingsAsync();
+        Assert.False(ambiguousLegacyOptOut.AutoCheckUpdates);
+        Assert.False(ambiguousLegacyOptOut.AutoCheckUpdatesChoiceMade);
+        Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(ambiguousLegacyOptOut.AutoCheckUpdates, isWindows: true, profileOverride: null));
+
+        await storage.SaveSettingsAsync(ambiguousLegacyOptOut with { AutoCheckUpdatesChoiceMade = true });
         var optedOut = await storage.LoadSettingsAsync();
         Assert.False(optedOut.AutoCheckUpdates);
+        Assert.True(optedOut.AutoCheckUpdatesChoiceMade);
         Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(optedOut.AutoCheckUpdates, isWindows: true, profileOverride: null));
 
         await storage.SaveSettingsAsync(optedOut with { AutoCheckUpdates = true });
         var optedIn = await storage.LoadSettingsAsync();
         Assert.True(optedIn.AutoCheckUpdates);
+        Assert.True(optedIn.AutoCheckUpdatesChoiceMade);
         Assert.True(MainWindow.ShouldRunAutomaticUpdateCheck(optedIn.AutoCheckUpdates, isWindows: true, profileOverride: null));
     }
 
