@@ -25,8 +25,6 @@ public partial class MainWindow
 {
     private const long LargeFilePromptBytes = 100L * 1024 * 1024;
     private const int MaxEditorCharacters = 8 * 1024 * 1024;
-    // AvaloniaEdit keeps a document line object for every line, including empty ones.
-    private const int MaxEditorLines = 50_000;
     private const int MaxEditorLineLength = 64 * 1024;
     private static readonly FilePickerFileType TextFiles = new("Текст и логи") { Patterns = ["*.txt", "*.log", "*.json", "*.jsonl", "*.ndjson", "*.xml"] };
     private bool _confirmingTabClose;
@@ -34,13 +32,6 @@ public partial class MainWindow
     private void NewTab(string text = "")
     {
         var tab = AddTab();
-        if (IsOversizedEditorText(text))
-        {
-            StartLargeDraftPersistence(tab, () => new StringReader(text), null, text);
-            TrackDetachedDraft(tab);
-            return;
-        }
-
         AttachEditor(tab, text);
         if (text.Length > 0)
         {
@@ -323,9 +314,9 @@ public partial class MainWindow
         editor.TextArea.TextView.BackgroundRenderers.Add(tab.Highlights);
         var undoStack = document.UndoStack;
         var multiCaret = new MultiCaretEditing(editor.TextArea,
-            edits => !WouldExceedEditorLimits(document, edits), SetStatus);
+            edits => edits.Sum(edit => (long)edit.Text.Length - edit.Range.Length) <= MaxEditorCharacters, SetStatus);
         tab.MultiCaret = multiCaret;
-        var pasteQueue = new SemaphoreSlim(1);
+
 
         var warning = new TextBlock
         {
@@ -418,46 +409,14 @@ public partial class MainWindow
         };
         editor.TextArea.Caret.PositionChanged += caretHandler;
         editor.TextArea.SelectionChanged += caretHandler;
-        EventHandler<Avalonia.Input.TextInputEventArgs> textEnteringHandler = (_, e) =>
+        bool CanEditClipboard() => !_closing && !tab.Closing && !tab.Loading
+            && ReferenceEquals(tab.Editor, editor) && ReferenceEquals(tab, ActiveTab);
+        var unbindPaste = EditorClipboard.BindPaste(editor, CanEditClipboard, text =>
         {
-            if (e.Text is not { Length: > 0 } insertion || tab.Loading
-                || multiCaret.IsActive
-                || !WouldExceedEditorLimits(editor, insertion))
-            {
-                return;
-            }
-
-            var start = editor.SelectionStart;
-            var length = editor.SelectionLength;
-            var snapshot = document.CreateSnapshot();
-            e.Handled = true;
-            StartLargeDraftPersistence(tab,
-                () => new ReplacingTextReader(snapshot.CreateReader(), start, length, insertion), editor, insertion,
-                start);
-        };
-        editor.TextArea.TextEntering += textEnteringHandler;
-        EventHandler<CanExecuteRoutedEventArgs> pasteCanExecute = (_, e) =>
-        {
-            e.CanExecute = editor.IsEnabled && !editor.IsReadOnly && !tab.Loading;
-            e.Handled = true;
-        };
-        EventHandler<ExecutedRoutedEventArgs> pasteExecuted = (_, e) =>
-        {
-            e.Handled = true;
-            if (editor.IsEnabled)
-            {
-                Run(() => PasteSafelyAsync(tab, editor, multiCaret, pasteQueue));
-            }
-        };
-        var pasteBinding = new RoutedCommandBinding(ApplicationCommands.Paste, pasteExecuted, pasteCanExecute);
-        editor.TextArea.CommandBindings.Insert(0, pasteBinding);
-        void PasteKeyDown(object? sender, KeyEventArgs e)
-        {
-            if (e.Key != Key.V || e.KeyModifiers != KeyModifiers.Control) return;
-            e.Handled = true;
-            Run(() => PasteSafelyAsync(tab, editor, multiCaret, pasteQueue));
-        }
-        editor.TextArea.AddHandler(KeyDownEvent, PasteKeyDown, RoutingStrategies.Tunnel);
+            var normalized = NormalizePaste(editor, text);
+            if (multiCaret.IsActive) multiCaret.Paste(normalized);
+            else editor.TextArea.PerformTextInput(normalized);
+        }, Run);
         void CutLineKeyDown(object? sender, KeyEventArgs e)
         {
             if (e.Key != Key.X || e.KeyModifiers != KeyModifiers.Control
@@ -472,7 +431,7 @@ public partial class MainWindow
                 return;
             }
 
-            Run(() => CutCurrentLineAsync(tab, editor));
+            Run(() => EditorClipboard.CutLineAsync(editor, CanEditClipboard));
         }
         editor.TextArea.AddHandler(KeyDownEvent, CutLineKeyDown, RoutingStrategies.Tunnel);
 
@@ -486,9 +445,7 @@ public partial class MainWindow
             () => editor.TextChanged -= textChangedHandler,
             () => editor.TextArea.Caret.PositionChanged -= caretHandler,
             () => editor.TextArea.SelectionChanged -= caretHandler,
-            () => editor.TextArea.TextEntering -= textEnteringHandler,
-            () => editor.TextArea.CommandBindings.Remove(pasteBinding),
-            () => editor.TextArea.RemoveHandler(KeyDownEvent, PasteKeyDown),
+            unbindPaste,
             () => editor.TextArea.RemoveHandler(KeyDownEvent, CutLineKeyDown),
             () => editor.TemplateApplied -= templateApplied,
             () => editor.AttachedToVisualTree -= attached,
@@ -502,101 +459,6 @@ public partial class MainWindow
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
         if (PanelHost.IsVisible && ReferenceEquals(tab, ActiveTab) && _searchCancellation is null) ScheduleSearch();
-    }
-
-    private async Task CutCurrentLineAsync(WorkTab tab, TextEditor editor)
-    {
-        if (TopLevel.GetTopLevel(editor)?.Clipboard is not { } clipboard
-            || _closing || tab.Closing || tab.Loading || editor.IsReadOnly || !editor.IsEnabled
-            || !ReferenceEquals(tab.Editor, editor) || !ReferenceEquals(tab, ActiveTab)
-            || !editor.TextArea.Selection.IsEmpty)
-        {
-            return;
-        }
-
-        var document = editor.Document;
-        var caretOffset = editor.CaretOffset;
-        var line = document.GetLineByOffset(caretOffset);
-        var length = line.TotalLength;
-        if (length == 0)
-        {
-            return;
-        }
-
-        var lineText = document.GetText(line.Offset, length);
-        var deleteStart = line.Offset;
-        var deleteLength = length;
-        if (line.DelimiterLength == 0 && line.PreviousLine is { } previousLine)
-        {
-            deleteStart = previousLine.EndOffset;
-            deleteLength = line.EndOffset - deleteStart;
-        }
-
-        var documentChanged = false;
-        EventHandler<DocumentChangeEventArgs> changed = (_, _) => documentChanged = true;
-        document.Changed += changed;
-        try
-        {
-            await clipboard.SetTextAsync(lineText.Replace("\r\n", "\n", StringComparison.Ordinal)
-                .Replace('\r', '\n').Replace("\n", Environment.NewLine, StringComparison.Ordinal));
-        }
-        finally
-        {
-            document.Changed -= changed;
-        }
-
-        if (_closing || tab.Closing || tab.Loading || editor.IsReadOnly || !editor.IsEnabled
-            || !ReferenceEquals(tab.Editor, editor) || !ReferenceEquals(tab, ActiveTab)
-            || !ReferenceEquals(editor.Document, document) || editor.CaretOffset != caretOffset
-            || !editor.TextArea.Selection.IsEmpty || documentChanged)
-        {
-            return;
-        }
-
-        document.Remove(deleteStart, deleteLength);
-        editor.CaretOffset = Math.Min(deleteStart, document.TextLength);
-        editor.TextArea.ClearSelection();
-    }
-
-    private async Task PasteSafelyAsync(WorkTab tab, TextEditor editor, MultiCaretEditing multiCaret, SemaphoreSlim queue)
-    {
-        if (TopLevel.GetTopLevel(editor)?.Clipboard is not { } clipboard) return;
-
-        await queue.WaitAsync();
-        try
-        {
-            if (!CanPaste()) return;
-            var transfer = await clipboard.TryGetDataAsync();
-            var text = transfer is null ? null : await transfer.TryGetTextAsync();
-            if (string.IsNullOrEmpty(text) || !CanPaste()) return;
-
-            if (multiCaret.IsActive)
-            {
-                multiCaret.Paste(NormalizeBoundedPaste(editor, text));
-                return;
-            }
-
-            // Preserve raw clipboard text in the large-draft path, including its line endings.
-            if (WouldExceedEditorLimits(editor, text))
-            {
-                var start = editor.SelectionStart;
-                var length = editor.SelectionLength;
-                var snapshot = editor.Document.CreateSnapshot();
-                StartLargeDraftPersistence(tab,
-                    () => new ReplacingTextReader(snapshot.CreateReader(), start, length, text), editor, text,
-                    start);
-                return;
-            }
-
-            editor.TextArea.PerformTextInput(NormalizeBoundedPaste(editor, text));
-        }
-        finally
-        {
-            queue.Release();
-        }
-
-        bool CanPaste() => !_closing && !tab.Closing && !tab.Loading && !editor.IsReadOnly
-            && editor.IsEnabled && ReferenceEquals(tab.Editor, editor) && ReferenceEquals(tab, ActiveTab);
     }
 
     private void ShowEditorLevelFilter(WorkTab tab)
@@ -623,7 +485,7 @@ public partial class MainWindow
         if (!_closing && ReferenceEquals(tab, ActiveTab)) tab.Editor?.Focus();
     }
 
-    private static string NormalizeBoundedPaste(TextEditor editor, string text)
+    private static string NormalizePaste(TextEditor editor, string text)
     {
         if (text.Contains('\r'))
         {
@@ -636,197 +498,46 @@ public partial class MainWindow
         return text;
     }
 
-    private void StartLargeDraftPersistence(
-        WorkTab tab,
-        Func<TextReader> openReader,
-        TextEditor? editor,
-        string insertedText,
-        int selectionStart = 0)
+    private async Task PersistRecoveredPageAsync(WorkTab tab, string text)
     {
         var (tabs, storage) = FindTabWorkspace(tab)
             ?? throw new InvalidOperationException("Рабочее пространство черновика закрыто.");
-        var hadFocus = editor?.TextArea.IsKeyboardFocusWithin == true;
-        var prefix = editor is not null && selectionStart > 0 ? editor.Document.GetText(0, selectionStart) : "";
-        using var titleReader = openReader();
-        var title = ReadUntitledTitle(titleReader);
-        var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-        tab.LoadCancellation?.Cancel();
+        using var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         tab.LoadCancellation = source;
         tab.Loading = true;
-        if (editor is not null)
+        tab.Item.Content = LoadingSurface(source, "Сохраняю черновик…");
+        try
         {
-            editor.IsEnabled = false;
-        }
-        else
-        {
-            tab.Item.Content = new TextBlock { Text = "Сохраняю большой черновик…", Margin = new Thickness(16) };
-        }
-
-        Run(async () =>
-        {
-            var saveGateAcquired = false;
+            await _workspace.SaveGate.WaitAsync(source.Token);
             try
             {
-                await _workspace.SaveGate.WaitAsync(source.Token);
-                saveGateAcquired = true;
                 if (!ReferenceEquals(FindTabWorkspace(tab)?.Tabs, tabs)) return;
-                var saved = CaptureTab(tab) with
-                {
-                    SelectionStart = selectionStart + insertedText.Length,
-                    SelectionLength = 0,
-                    Reversed = false,
-                    LineCount = null,
-                    DraftOffset = 0,
-                    UntitledName = title
-                };
-                saved = await storage.SaveClosedDraftAsync(saved, openReader, source.Token);
-                long? byteCaret = editor is null
-                    ? null
-                    : await Task.Run(() => (long)Encoding.UTF8.GetByteCount(prefix) + Encoding.UTF8.GetByteCount(insertedText), source.Token);
-                saved = saved with { DraftOffset = 0 };
+                using var reader = new StringReader(text);
+                var saved = CaptureTab(tab) with { UntitledName = ReadUntitledTitle(reader), DraftOffset = 0 };
+                saved = await storage.SaveClosedDraftAsync(saved, text, source.Token);
                 source.Token.ThrowIfCancellationRequested();
-                if (!ReferenceEquals(FindTabWorkspace(tab)?.Tabs, tabs) || !ReferenceEquals(tab.Editor, editor))
-                {
-                    return;
-                }
-
-                tab.Dirty = true;
-                tab.RestoredDirty = true;
+                if (!ReferenceEquals(FindTabWorkspace(tab)?.Tabs, tabs)) return;
+                tab.Dirty = tab.RestoredDirty = true;
                 tab.Revision++;
-                tab.LastWorked = DateTimeOffset.Now;
-                if (editor is not null)
-                {
-                    _ = DetachEditor(tab);
-                }
-                AttachPagedDraftEditor(tab, saved, storage.GetDraftPath(saved)!, focus: hadFocus, byteCaret: byteCaret);
+                AttachPagedDraftEditor(tab, saved, storage.GetDraftPath(saved)!);
+            }
+            finally { _workspace.SaveGate.Release(); }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or OperationCanceledException)
+        {
+            if (ReferenceEquals(FindTabWorkspace(tab)?.Tabs, tabs))
+            {
+                AttachEditor(tab, text);
+                tab.RestoredDirty = tab.Dirty = true;
                 UpdateTab(tab);
             }
-            finally
-            {
-                tab.Loading = false;
-                if (ReferenceEquals(tab.LoadCancellation, source))
-                {
-                    tab.LoadCancellation = null;
-                }
-                if (editor is not null && ReferenceEquals(tab.Editor, editor))
-                {
-                    editor.IsEnabled = true;
-                }
-                if (saveGateAcquired)
-                {
-                    _workspace.SaveGate.Release();
-                }
-                source.Dispose();
-            }
-        });
-    }
-
-    private static bool WouldExceedEditorLimits(TextEditor editor, string insertion)
-    {
-        var document = editor.Document;
-        var start = editor.SelectionStart;
-        var end = start + editor.SelectionLength;
-        var projectedCharacters = document.TextLength - editor.SelectionLength + insertion.Length;
-        if (projectedCharacters > MaxEditorCharacters)
-        {
-            return true;
+            throw;
         }
-
-        var firstLine = document.GetLineByOffset(Math.Clamp(start, 0, document.TextLength));
-        var lastLine = document.GetLineByOffset(Math.Clamp(end, 0, document.TextLength));
-        var projectedLines = document.LineCount - (lastLine.LineNumber - firstLine.LineNumber);
-        var insertedLines = 0;
-        var longestInsertedLine = 0;
-        var currentLineLength = 0;
-        var previousCarriageReturn = false;
-        foreach (var character in insertion)
+        finally
         {
-            if (character == '\r')
-            {
-                insertedLines++;
-                longestInsertedLine = Math.Max(longestInsertedLine, currentLineLength);
-                currentLineLength = 0;
-                previousCarriageReturn = true;
-            }
-            else if (character == '\n')
-            {
-                if (!previousCarriageReturn)
-                {
-                    insertedLines++;
-                    longestInsertedLine = Math.Max(longestInsertedLine, currentLineLength);
-                    currentLineLength = 0;
-                }
-                previousCarriageReturn = false;
-            }
-            else
-            {
-                currentLineLength++;
-                previousCarriageReturn = false;
-            }
+            tab.Loading = false;
+            if (ReferenceEquals(tab.LoadCancellation, source)) tab.LoadCancellation = null;
         }
-        longestInsertedLine = Math.Max(longestInsertedLine, currentLineLength);
-        if (projectedLines + insertedLines > MaxEditorLines || longestInsertedLine > MaxEditorLineLength)
-        {
-            return true;
-        }
-
-        if (insertedLines == 0)
-        {
-            var lineSelectionLength = start < firstLine.EndOffset && end > firstLine.Offset
-                ? Math.Min(end, firstLine.EndOffset) - Math.Max(start, firstLine.Offset)
-                : 0;
-            return firstLine.Length - lineSelectionLength + insertion.Length > MaxEditorLineLength;
-        }
-
-        return false;
-    }
-
-    private static bool WouldExceedEditorLimits(TextDocument document, IReadOnlyList<CaretEdit> edits)
-    {
-        if (document.TextLength + edits.Sum(edit => (long)edit.Text.Length - edit.Range.Length) > MaxEditorCharacters)
-            return true;
-
-        // Inspect only affected lines. Edits on the same line must share the line-length budget.
-        var projectedLines = document.LineCount;
-        for (var index = 0; index < edits.Count;)
-        {
-            var first = document.GetLineByOffset(edits[index].Range.Start);
-            var last = first;
-            var offset = first.Offset;
-            var lineLength = 0;
-            var insertedBreaks = 0;
-            var afterCr = false;
-            do
-            {
-                var (range, text) = edits[index++];
-                if (!Count(document.GetText(offset, range.Start - offset)) || !Count(text)) return true;
-                offset = range.End;
-                last = document.GetLineByOffset(offset);
-            }
-            while (index < edits.Count && edits[index].Range.Start <= last.EndOffset);
-
-            if (!Count(document.GetText(offset, last.EndOffset - offset))) return true;
-            projectedLines += insertedBreaks - (last.LineNumber - first.LineNumber);
-
-            bool Count(string text)
-            {
-                foreach (var character in text)
-                {
-                    if (character is '\r' or '\n')
-                    {
-                        if (!(character == '\n' && afterCr)) insertedBreaks++;
-                        lineLength = 0;
-                    }
-                    else if (++lineLength > MaxEditorLineLength)
-                    {
-                        return false;
-                    }
-                    afterCr = character == '\r';
-                }
-                return true;
-            }
-        }
-        return projectedLines > MaxEditorLines;
     }
 
     private static bool IsOversizedEditorText(string text)
@@ -837,39 +548,10 @@ public partial class MainWindow
         }
 
         var lineLength = 0;
-        var lineCount = 1;
-        var previousCarriageReturn = false;
         foreach (var character in text)
         {
-            if (character == '\r')
-            {
-                if (lineLength > MaxEditorLineLength || ++lineCount > MaxEditorLines)
-                {
-                    return true;
-                }
-                lineLength = 0;
-                previousCarriageReturn = true;
-            }
-            else if (character == '\n')
-            {
-                if (!previousCarriageReturn)
-                {
-                    if (lineLength > MaxEditorLineLength || ++lineCount > MaxEditorLines)
-                    {
-                        return true;
-                    }
-                    lineLength = 0;
-                }
-                previousCarriageReturn = false;
-            }
-            else if (++lineLength > MaxEditorLineLength)
-            {
-                return true;
-            }
-            else
-            {
-                previousCarriageReturn = false;
-            }
+            if (character is '\r' or '\n') lineLength = 0;
+            else if (++lineLength > MaxEditorLineLength) return true;
         }
         return false;
     }
@@ -934,11 +616,9 @@ public partial class MainWindow
         LogTabState? state = null,
         string? draftName = null,
         long? draftLineCount = null,
-        bool preserveEditorChanges = false,
-        long? initialDraftCaretBytes = null)
+        bool preserveEditorChanges = false)
     {
-        var log = new LogView(path, encoding, state ?? new LogTabState(AutoRefresh: tab.AutoRefresh), draftName, draftLineCount,
-            initialDraftCaretBytes)
+        var log = new LogView(path, encoding, state ?? new LogTabState(AutoRefresh: tab.AutoRefresh), draftName, draftLineCount)
         {
             WordWrap = state?.WordWrap ?? _wordWrap,
             PreserveExternalPageEdit = text => PreservePageDraft(tab, text)
@@ -1145,6 +825,121 @@ public partial class MainWindow
             : $"Сохранено · {path}. Версию не удалось записать: {versionWarning}");
     }
 
+    private async Task<bool> ResolvePendingPageAsync(WorkTab tab)
+    {
+        if (tab.Log is not { HasPendingEdit: true } log) return true;
+        if (log.IsWritingPage) return false;
+        if (tab.Recovery is null)
+        {
+            var body = DialogPanel(new TextBlock { Text = $"Сохранить изменения страницы в файле «{Path.GetFileName(tab.Path)}»?" });
+            var dialog = Dialog("Изменения страницы", body);
+            var cancel = FocusButton(Button("Отмена", () => dialog.Close()));
+            cancel.IsCancel = true;
+            body.Children.Add(Row(cancel, Button("Без сохранения", () => dialog.Close(false)),
+                Button("Сохранить", () => dialog.Close(true))));
+            var save = await dialog.ShowDialog<bool?>(this);
+            if (save is null) return false;
+            if (save == false)
+            {
+                log.DiscardPageEdits();
+                return true;
+            }
+        }
+        await log.SavePageEditAsync();
+        return tab.Log?.HasPendingEdit != true;
+    }
+
+    private async Task ToggleLogModeAsync(WorkTab tab)
+    {
+        if (_closing || _workspaceSwitchPending || tab.Saving || tab.Closing || tab.Loading || tab.CheckingSession) return;
+        if (tab.Deferred is not null) await ActivateDeferredAsync(tab);
+        if (tab.Deferred is not null || !_tabs.ContainsKey(tab.Id) || tab.Loading) return;
+        tab.Loading = true;
+        var editor = tab.Editor;
+        var storage = SessionStorage;
+        using var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        tab.LoadCancellation = source;
+        try
+        {
+            if (editor is not null)
+            {
+                if (tab.Path is { } path && !tab.Dirty)
+                {
+                    AttachLog(tab, path, tab.Encoding, new LogTabState(tab.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh));
+                }
+                else
+                {
+                    var snapshot = editor.Document.CreateSnapshot();
+                    var revision = tab.Revision;
+                    var saved = CaptureTab(tab) with { DraftLogMode = true, DraftOffset = 0 };
+                    await _workspace.SaveGate.WaitAsync(source.Token);
+                    try
+                    {
+                        saved = await storage.SaveClosedDraftAsync(saved, snapshot.CreateReader, source.Token);
+                        source.Token.ThrowIfCancellationRequested();
+                        if (!IsCurrent() || !ReferenceEquals(tab.Editor, editor)) return;
+                        if (revision != tab.Revision)
+                        {
+                            SetStatus("Текст изменился во время переключения. Повторите команду.");
+                            return;
+                        }
+                        AttachPagedDraftEditor(tab, saved, storage.GetDraftPath(saved)!);
+                    }
+                    finally { _workspace.SaveGate.Release(); }
+                }
+            }
+            else if (tab.Log is { } previous)
+            {
+                await previous.InitialPageLoad;
+                if (!IsCurrent() || !await ResolvePendingPageAsync(tab) || !IsCurrent()) return;
+                var log = tab.Log!;
+                if (tab.Recovery is { } recovery)
+                {
+                    // Very large streamed drafts can also switch between reading and editing by page.
+                    if (log.FileLength > DocumentFiles.MaximumDocumentBytes)
+                    {
+                        AttachPagedDraftEditor(tab, recovery with { DraftLogMode = log.EditsPagesByDefault, DraftOffset = log.CurrentOffset },
+                            storage.GetDraftPath(recovery)!, focus: true);
+                    }
+                    else
+                    {
+                        var text = await storage.LoadDraftAsync(recovery, source.Token, fullEditor: true) ?? "";
+                        if (!IsCurrent() || !ReferenceEquals(tab.Log, log)) return;
+                        AttachEditor(tab, text);
+                        tab.RestoredDirty = tab.Dirty = text.Length != 0 || tab.Path is not null;
+                        RestoreEditorView(tab, recovery);
+                    }
+                }
+                else if (tab.Path is { } path)
+                {
+                    if (log.EditsPagesByDefault || new FileInfo(path).Length > DocumentFiles.MaximumDocumentBytes)
+                    {
+                        AttachLog(tab, path, tab.Encoding, log.CaptureState() with { EditPages = !log.EditsPagesByDefault });
+                    }
+                    else
+                    {
+                        var loaded = await DocumentFiles.ReadAsync(path, tab.Encoding, source.Token);
+                        if (!IsCurrent() || !ReferenceEquals(tab.Log, log)) return;
+                        AttachLoadedEditor(tab, loaded);
+                    }
+                }
+            }
+            if (!IsCurrent()) return;
+            UpdateTab(tab);
+            if (ReferenceEquals(tab, ActiveTab)) tab.Editor?.Focus();
+            await SaveSessionAsync();
+        }
+        catch (OperationCanceledException) when (source.IsCancellationRequested) { }
+        finally
+        {
+            if (ReferenceEquals(tab.LoadCancellation, source)) tab.LoadCancellation = null;
+            tab.Loading = false;
+        }
+
+        bool IsCurrent() => !_closing && !_closed && !tab.Closing && _tabs.ContainsKey(tab.Id)
+            && ReferenceEquals(SessionStorage, storage) && !source.IsCancellationRequested;
+    }
+
     private async Task CloseTabAsync(WorkTab tab)
     {
         if (_closing || _workspaceSwitchPending || !_tabs.ContainsKey(tab.Id)
@@ -1153,7 +948,7 @@ public partial class MainWindow
             return;
         }
 
-        if (tab.Saving || tab.Log?.HasPendingEdit == true)
+        if (tab.Saving || tab.Log?.IsWritingPage == true)
         {
             Select(tab);
             SetStatus("Завершите сохранение или отмените правки страницы перед закрытием.");
@@ -1166,6 +961,7 @@ public partial class MainWindow
         if (editor is not null) editor.IsEnabled = false;
         try
         {
+            if (!await ResolvePendingPageAsync(tab)) return;
             if (tab is { Dirty: true, Path: { } path, Recovery: null })
             {
                 var body = DialogPanel(new TextBlock
@@ -1286,7 +1082,7 @@ public partial class MainWindow
 
     private void UpdateDraftLineCount(WorkTab tab)
     {
-        var count = tab.Editor?.Document.LineCount ?? tab.Log?.KnownLineCount ?? tab.Deferred?.LineCount;
+        var count = tab.Editor?.Document.LineCount ?? tab.Log?.DisplayLineCount ?? tab.Deferred?.LineCount;
         tab.LineCountLabel.IsVisible = Settings.ShowDraftLineCount && tab.Path is null && count.HasValue;
         if (tab.LineCountLabel.IsVisible)
             tab.LineCountLabel.Text = $"{LineNumbers.Format(count!.Value)} стр.";

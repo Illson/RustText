@@ -11,6 +11,7 @@ internal sealed record SessionTab(long Id, string? Path, TextEncodingKind Encodi
     public bool SelectionUsesUtf8 { get; init; }
     public string? CustomTitle { get; init; }
     public string? UntitledName { get; init; }
+    public bool? DraftLogMode { get; init; }
     public long? DraftOffset { get; init; }
     public bool? AutoRefresh { get; init; }
     public long? ClosedAtMs { get; init; }

@@ -126,7 +126,7 @@ public partial class MainWindow
         if (IsOversizedEditorText(text))
         {
             var draft = AddRecoveryTab(source);
-            StartLargeDraftPersistence(draft, () => new StringReader(text), null, text);
+            Run(() => PersistRecoveredPageAsync(draft, text));
         }
         else
         {

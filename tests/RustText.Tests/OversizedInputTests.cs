@@ -1,5 +1,9 @@
 using System.Reflection;
-using System.Text;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.VisualTree;
+using System.Diagnostics;
+using Xunit.Abstractions;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Input.Platform;
@@ -12,114 +16,102 @@ using Xunit;
 namespace RustText.Tests;
 
 [Collection(HeadlessCollection.Name)]
-public sealed class OversizedInputTests
+public sealed class OversizedInputTests(ITestOutputHelper output)
 {
-    [Fact]
-    public async Task ReplacingReaderStreamsPrefixInsertionAndSuffixWithoutBuildingCombinedString()
-    {
-        using var reader = new ReplacingTextReader(new StringReader("before selected after"), 7, 8, "large\ninsert");
-        Assert.Equal("before large\ninsert after", await reader.ReadToEndAsync());
-    }
-
-    [Fact]
-    public Task OversizedNewTabStartsInEditablePageWithExactUtf8Content() => HeadlessTests.RunAsync(async profile =>
-    {
-        var window = await OpenWorkspaceAsync();
-        try
-        {
-            var content = new string('ё', 65_537) + "\nпоследняя строка 💡";
-            Invoke(window, "NewTab", content);
-            var tab = Tabs(window).Single(value => Property(value, "Loading") is true);
-            await HeadlessTests.WaitForAsync(() => Property(tab, "Recovery") is SessionTab);
-
-            Assert.Null(Property(tab, "Editor"));
-            await EditablePageAsync(tab);
-            var saved = Assert.IsType<SessionTab>(Property(tab, "Recovery"));
-            var path = StorageService.OpenForTesting(profile).GetDraftPath(saved)!;
-            Assert.Equal(Encoding.UTF8.GetBytes(content), await File.ReadAllBytesAsync(path));
-        }
-        finally
-        {
-            await CloseAsync(window);
-        }
-    });
-
-    [Fact]
-    public Task TextInputCrossingFiftyThousandLinesContinuesAtTheInsertionPoint() => HeadlessTests.RunAsync(async _ =>
+    [Theory]
+    [InlineData(51_000, 8)]
+    [InlineData(115_000, 80)]
+    public Task CtrlVPastesIntoOrdinaryEditorAndClosedDraftRestoresInFull(int rows, int width) => HeadlessTests.RunAsync(async profile =>
     {
         var window = await OpenWorkspaceAsync();
         try
         {
             Invoke(window, "ShowGroups");
-            Invoke(window, "NewTab", string.Concat(Enumerable.Repeat("r\n", 49_999)));
+            Invoke(window, "NewTab", "prefix suffix");
             var tab = ActiveTab(window);
             var editor = Assert.IsType<TextEditor>(Property(tab, "Editor"));
-            await HeadlessTests.WaitForAsync(() => TopLevel.GetTopLevel(editor.TextArea) == window
-                && (editor.TextArea.IsKeyboardFocusWithin || editor.TextArea.Focus()));
-            Assert.True(editor.TextArea.IsKeyboardFocusWithin);
-            editor.CaretOffset = editor.Document.TextLength;
-            Assert.Equal(50_000, editor.Document.LineCount);
-            editor.TextArea.PerformTextInput("ещё\nпоследняя 💡");
-            var (paged, page) = await EditablePageAsync(tab);
-            Assert.EndsWith("ещё\nпоследняя 💡", page.Text);
-            Assert.Equal(page.Text!.Length, page.CaretIndex);
-            await HeadlessTests.WaitForAsync(() => page.IsKeyboardFocusWithin);
-            window.KeyTextInput(" строка");
-            Assert.EndsWith("ещё\nпоследняя 💡 строка", page.Text);
-            await paged.SavePageEditAsync();
-            var (_, reopened) = await EditablePageAsync(tab);
-            Assert.EndsWith("ещё\nпоследняя 💡 строка", reopened.Text);
+            await HeadlessTests.WaitForAsync(() => editor.TextArea.Focus());
+            editor.CaretOffset = 7;
+            var row = new string('я', width);
+            var paste = string.Concat(Enumerable.Repeat(row + "\r\n", rows)) + "конец";
+            var expected = "prefix " + paste.Replace("\r\n", "\n") + "suffix";
+            await window.Clipboard!.SetTextAsync(paste);
+            var timer = Stopwatch.StartNew();
+            window.KeyPress(Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            window.KeyRelease(Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            await HeadlessTests.WaitForAsync(() => editor.LineCount == rows + 1);
+            output.WriteLine($"Ctrl+V, {rows} rows: {timer.ElapsedMilliseconds} ms");
+            Assert.Same(editor, Property(tab, "Editor"));
+            Assert.Null(Property(tab, "Log"));
+            Assert.Equal(expected, editor.Text);
+            window.KeyTextInput("!");
+            Assert.Equal(expected.Insert(expected.Length - 6, "!"), editor.Text);
+            editor.Undo();
+            Assert.Equal(expected, editor.Text);
+            editor.Undo();
+            Assert.Equal("prefix suffix", editor.Text);
+            editor.Redo();
+            await (Task)Invoke(window, "CloseTabAsync", tab)!;
+            Assert.DoesNotContain(tab, Tabs(window));
+            await (Task)Invoke(window, "RestoreLastClosedAsync")!;
+            var restored = Assert.IsType<TextEditor>(Property(ActiveTab(window), "Editor"));
+            Assert.Equal(expected, restored.Text);
+            restored.SelectAll();
+            restored.TextArea.PerformTextInput("снова");
+            Assert.Equal("снова", restored.Text);
         }
-        finally
-        {
-            await CloseAsync(window);
-        }
+        finally { await CloseAsync(window); }
     });
 
     [Fact]
-    public Task LargeClipboardPasteCreatesEditableDraftAndPreservesAllBytes() => HeadlessTests.RunAsync(async profile =>
+    public Task ManualDraftLogModeKeepsEditsAcrossCloseAndReturnToEditor() => HeadlessTests.RunAsync(async profile =>
     {
         var window = await OpenWorkspaceAsync();
         try
         {
             Invoke(window, "ShowGroups");
-            Invoke(window, "NewTab", "");
+            const string row = "draft row\n";
+            var original = string.Concat(Enumerable.Repeat(row, 51_000));
+            Invoke(window, "NewTab", original);
             var tab = ActiveTab(window);
-            var editor = Assert.IsType<TextEditor>(Property(tab, "Editor"));
-            await HeadlessTests.WaitForAsync(() => TopLevel.GetTopLevel(editor.TextArea) == window
-                && editor.TextArea.Focus());
-            var text = string.Concat(Enumerable.Repeat("paste row\r\n", 50_001)) + "конец";
-            var clipboard = TopLevel.GetTopLevel(editor)!.Clipboard;
-            Assert.NotNull(clipboard);
-            await clipboard.SetTextAsync(text);
-
-            ApplicationCommands.Paste.Execute(null, editor.TextArea);
-            var (_, page) = await EditablePageAsync(tab);
-            Assert.Equal(0, editor.Document.TextLength);
-            Assert.EndsWith("paste row\r\nконец", page.Text);
-            Assert.Equal(page.Text!.Length, page.CaretIndex);
-            var saved = Assert.IsType<SessionTab>(Property(tab, "Recovery"));
-            Assert.Equal(50_002, saved.LineCount);
-            var path = StorageService.OpenForTesting(profile).GetDraftPath(saved)!;
-            Assert.Equal(Encoding.UTF8.GetBytes(text), await File.ReadAllBytesAsync(path));
+            var item = Assert.IsType<TabItem>(Property(tab, "Item"));
+            var toggle = item.ContextMenu!.Items.OfType<MenuItem>().Single(menu => Equals(menu.Header, "Режим лога"));
+            toggle.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => Property(tab, "Loading") is false && Property(tab, "Log") is LogView);
+            var log = Assert.IsType<LogView>(Property(tab, "Log"));
+            await log.InitialPageLoad;
+            Assert.True(log.IsReadOnly);
+            await (Task)typeof(LogView).GetMethod("TogglePageEditAsync", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(log, null)!;
+            var page = log.GetVisualDescendants().OfType<TextEditor>().Single();
+            var suffix = original[page.Text.Length..];
+            page.SelectAll();
+            page.TextArea.PerformTextInput("новая строка");
+            var bulk = string.Concat(Enumerable.Repeat("ж\n", 115_000));
+            await window.Clipboard!.SetTextAsync(bulk);
+            page.CaretOffset = page.Document.TextLength;
+            page.TextArea.Focus();
+            window.KeyPress(Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            window.KeyRelease(Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            await HeadlessTests.WaitForAsync(() => page.LineCount == 115_001);
+            page.SelectAll();
+            page.Document.Remove(0, page.Document.TextLength);
+            window.KeyTextInput("после очистки");
+            Assert.Equal("после очистки", page.Text);
+            page.Document.Remove(0, page.Document.TextLength);
+            Assert.True(log.HasPendingEdit);
+            await (Task)Invoke(window, "CloseTabAsync", tab)!;
+            Assert.DoesNotContain(tab, Tabs(window));
+            await (Task)Invoke(window, "RestoreLastClosedAsync")!;
+            var restored = ActiveTab(window);
+            Assert.True(Assert.IsType<LogView>(Property(restored, "Log")).IsReadOnly);
+            await (Task)Invoke(window, "ToggleLogModeAsync", restored)!;
+            var editor = Assert.IsType<TextEditor>(Property(restored, "Editor"));
+            Assert.Equal(suffix, editor.Text);
+            editor.TextArea.PerformTextInput("после");
+            Assert.Contains("после", editor.Text);
         }
-        finally
-        {
-            await CloseAsync(window);
-        }
+        finally { await CloseAsync(window); }
     });
-
-    private static async Task<(LogView Editor, TextBox Text)> EditablePageAsync(object tab)
-    {
-        await HeadlessTests.WaitForAsync(() => Property(tab, "Log") is LogView);
-        var editor = Assert.IsType<LogView>(Property(tab, "Log"));
-        await editor.InitialPageLoad;
-        var page = Assert.IsType<TextBox>(typeof(LogView).GetField("_logText",
-            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(editor));
-        Assert.False(page.IsReadOnly);
-        Assert.False(editor.IsReadOnly);
-        return (editor, page);
-    }
 
     private static async Task<MainWindow> OpenWorkspaceAsync()
     {
