@@ -1926,6 +1926,9 @@ public sealed class WorkspaceTests
             var inactiveBackground = SolidColor(inactiveSurface.Background);
             Assert.Equal(default(Thickness), titleBar.BorderThickness);
             Assert.Equal(default(Thickness), selectedSurface.BorderThickness);
+            var titleBarBottom = titleBar.TranslatePoint(new Point(0, titleBar.Bounds.Height), window)!.Value.Y;
+            var tabTop = selectedSurface.TranslatePoint(default, window)!.Value.Y;
+            Assert.Equal(2, tabTop - titleBarBottom);
             Assert.NotEqual(selectedBackground, inactiveBackground);
             var hoverPoint = inactiveSurface.TranslatePoint(
                 new Point(inactiveSurface.Bounds.Width / 2, inactiveSurface.Bounds.Height / 2), window)

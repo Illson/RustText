@@ -100,7 +100,7 @@
             <Setter Property="Template">
                 <ControlTemplate>
                     <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
-                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,5,8,0">
+                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,2,8,0">
                             <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
                                 <Grid.Styles>
                                     <Style Selector="Track#TabScrollPosition[Maximum=0]">
