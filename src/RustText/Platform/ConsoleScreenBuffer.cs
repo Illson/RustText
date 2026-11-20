@@ -6,65 +6,118 @@ namespace RustText.Demo.Platform;
 
 internal sealed partial class ConsoleScreenBuffer : IDisposable
 {
-    private const int OverlapRows = 256;
+    private const int TailRows = 64;
     private const uint GenericRead = 0x80000000;
     private const ushort TrailingCharacterCell = 0x0200;
     private readonly SafeFileHandle _output;
+    private readonly ConsoleScrollTracker? _scrollTracker;
+    private BufferInfo? _previous;
     private string[] _tail = [];
-    private int _lastCursorRow;
-    private int _lastWidth;
+    private long _pendingScroll;
+    private long _scrollAlreadyCaptured;
 
     public ConsoleScreenBuffer(int processId)
     {
         FreeConsole();
         if (!AttachConsole((uint)processId))
             throw new Win32Exception(Marshal.GetLastPInvokeError(), "Не удалось подключиться к консоли процесса.");
-        _output = OpenOutput("CONOUT$", GenericRead, FileShare.ReadWrite, 0, FileMode.Open, 0, 0);
-        if (_output.IsInvalid)
+        try
         {
-            var error = Marshal.GetLastPInvokeError();
-            _output.Dispose();
+            // AttachConsole resets the helper's control handlers.
+            if (!SetConsoleCtrlHandler(0, true))
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "Не удалось настроить обработку Ctrl+C.");
+            _output = OpenOutput("CONOUT$", GenericRead, FileShare.ReadWrite, 0, FileMode.Open, 0, 0);
+            if (_output.IsInvalid)
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "Не удалось открыть буфер консоли.");
+            _scrollTracker = ConsoleScrollTracker.TryCreate();
+        }
+        catch
+        {
+            _output?.Dispose();
             FreeConsole();
-            throw new Win32Exception(error, "Не удалось открыть буфер консоли.");
+            throw;
         }
     }
 
     public string[] ReadNewRows(CancellationToken token)
     {
+        _pendingScroll += _scrollTracker?.ReadScroll() ?? 0;
         for (var attempt = 0; attempt < 3; attempt++)
         {
             token.ThrowIfCancellationRequested();
             var before = GetBufferInfo();
-            var end = before.Cursor.Y;
-            var width = before.Size.X;
-            var first = _lastWidth == 0 ? 0
-                : Math.Max(0, Math.Min(end, _lastCursorRow) - OverlapRows);
-            var rows = ReadRows(width, first, end, token);
-            var after = GetBufferInfo();
-            if (rows is null || before.Size != after.Size || before.Cursor != after.Cursor) continue;
+            var end = (int)before.Cursor.Y;
+            var previous = _previous.GetValueOrDefault();
+            var continuous = _previous.HasValue && previous.Size == before.Size && end >= previous.Cursor.Y;
+            var advance = continuous ? end - previous.Cursor.Y : 0;
 
-            var count = _lastWidth == width && end >= _lastCursorRow
-                && end < before.Size.Y - 1
-                ? _lastCursorRow - first
-                : SharedRows(_tail, rows);
-            _tail = rows.AsSpan(Math.Max(0, rows.Length - OverlapRows)).ToArray();
-            _lastCursorRow = end;
-            _lastWidth = width;
-            return rows.AsSpan(count).ToArray();
+            // Moving the viewport back to the cursor can raise scroll events as well.
+            var viewportAdvance = Math.Max(0, before.Window.Top - previous.Window.Top);
+            var reported = Math.Max(0L, _pendingScroll - viewportAdvance);
+            var atBottom = end == before.Size.Y - 1;
+            var inferred = atBottom ? Math.Max(0L, reported - _scrollAlreadyCaptured) : 0;
+            var expected = (int)Math.Min(end, advance + inferred);
+            var first = continuous ? Math.Max(0, end - expected - TailRows) : 0;
+
+            // At the bottom the cursor can stay still while a multi-chunk read is scrolling.
+            var lastRow = atBottom && end > 0 ? ReadRows(before.Size.X, end - 1, end, token) : null;
+            var rows = ReadRows(before.Size.X, first, end, token);
+            if (rows is null) continue;
+            var boundary = FindBoundary(rows, first, continuous ? expected : null);
+            if (boundary < 0)
+            {
+                // The writer got ahead of the notifications. The old tail can still be
+                // higher in the buffer than the predicted read window.
+                rows = ReadRows(before.Size.X, 0, end, token);
+                if (rows is null) continue;
+                boundary = FindBoundary(rows, 0, continuous ? expected : null);
+            }
+
+            var after = GetBufferInfo();
+            var moreScroll = _scrollTracker?.ReadScroll() ?? 0;
+            _pendingScroll += moreScroll;
+            if (moreScroll != 0 || before.Size != after.Size || before.Cursor != after.Cursor
+                || before.Window.Top != after.Window.Top || (lastRow is { Length: > 0 } && lastRow[0] != rows[^1]))
+                continue;
+
+            var added = rows[boundary..];
+            // Content can prove that rows scrolled before the corresponding events arrive.
+            // Credit those rows once so that late notifications do not replay them.
+            _scrollAlreadyCaptured = continuous && atBottom && _scrollTracker is not null
+                ? Math.Max(0L, _scrollAlreadyCaptured + added.Length - advance - reported) : 0;
+            _pendingScroll = 0;
+            _previous = before;
+            _tail = rows[Math.Max(0, rows.Length - TailRows)..];
+            return added;
         }
         return [];
     }
 
-    // A full screen buffer scrolls without advancing the cursor row. Keep
-    // the longest overlap so existing rows aren't appended a second time.
-    internal static int SharedRows(ReadOnlySpan<string> previous, ReadOnlySpan<string> current)
+    private int FindBoundary(ReadOnlySpan<string> rows, int first, int? expected)
     {
-        for (var count = Math.Min(previous.Length, current.Length); count > 0; count--)
+        if (_tail.Length == 0) return 0;
+        if (expected is { } count && count <= rows.Length)
         {
-            if (previous[^count..].SequenceEqual(current[..count])) return count;
+            var boundary = rows.Length - count;
+            var overlap = Math.Min(_tail.Length, boundary);
+            if ((overlap == _tail.Length || first == 0)
+                && _tail.AsSpan(_tail.Length - overlap).SequenceEqual(rows.Slice(boundary - overlap, overlap)))
+                return boundary;
         }
+
+        var index = rows.LastIndexOf(_tail.AsSpan());
+        if (index >= 0) return index + _tail.Length;
+        if (first != 0) return -1;
+
+        // A burst can evict part or all of the saved tail from the screen buffer.
+        for (var overlap = Math.Min(_tail.Length - 1, rows.Length); overlap > 0; overlap--)
+            if (_tail.AsSpan(_tail.Length - overlap).SequenceEqual(rows[..overlap])) return overlap;
         return 0;
     }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetConsoleCtrlHandler(nint handler, [MarshalAs(UnmanagedType.Bool)] bool add);
 
     private BufferInfo GetBufferInfo()
     {
@@ -111,6 +164,7 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
 
     public void Dispose()
     {
+        _scrollTracker?.Dispose();
         _output.Dispose();
         FreeConsole();
     }

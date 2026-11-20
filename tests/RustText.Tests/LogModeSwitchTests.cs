@@ -72,6 +72,42 @@ public sealed class LogModeSwitchTests
         }
     });
 
+    [Fact]
+    public Task DirtyNamedUtf16EditorKeepsEncodingAcrossLogModeAndSave() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "dirty-utf16.txt");
+        await File.WriteAllTextAsync(path, "исходный", Encoding.Unicode);
+        var window = new MainWindow();
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+
+        try
+        {
+            await InvokeTask(window, "OpenPathAsync", path, false, null);
+            var tab = Property(window, "ActiveTab")!;
+            Assert.Equal(TextEncodingKind.Utf16LittleEndian, Property(tab, "Encoding"));
+            ((TextEditor)Property(tab, "Editor")!).Text = "изменённый";
+
+            await InvokeTask(window, "ToggleLogModeAsync", tab);
+            var log = (LogView)Property(tab, "Log")!;
+            await log.InitialPageLoad;
+            Assert.Equal(TextEncodingKind.Utf16LittleEndian, Property(tab, "Encoding"));
+
+            await InvokeTask(window, "ToggleLogModeAsync", tab);
+            Assert.Equal("изменённый", ((TextEditor)Property(tab, "Editor")!).Text);
+            Assert.Equal(TextEncodingKind.Utf16LittleEndian, Property(tab, "Encoding"));
+            await InvokeTask(window, "SaveAsync", false);
+
+            var bytes = await File.ReadAllBytesAsync(path);
+            Assert.Equal([0xFF, 0xFE], bytes[..2]);
+            Assert.Equal("изменённый", Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2));
+        }
+        finally
+        {
+            await CloseMainWindowAsync(window);
+        }
+    });
+
     private static async Task<(MainWindow Window, object Tab, LogView Log)> OpenLogAsync(string path)
     {
         var window = new MainWindow { Width = 900, Height = 700 };
