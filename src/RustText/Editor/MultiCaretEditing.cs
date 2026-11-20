@@ -26,7 +26,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
     private readonly TextArea _area;
     private readonly Func<IReadOnlyList<CaretEdit>, bool> _canEdit;
     private readonly Action<string> _status;
-    private AltClick? _altClick;
+    private CaretClick? _caretClick;
     private TextDocument Document => _area.Document;
     private MultiSelection? Current => _area.Selection as MultiSelection;
     public bool IsActive => Current is not null;
@@ -41,6 +41,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         area.AddHandler(InputElement.PointerPressedEvent, PointerPressed, RoutingStrategies.Tunnel);
         area.AddHandler(InputElement.PointerMovedEvent, PointerMoved, RoutingStrategies.Tunnel);
         area.AddHandler(InputElement.PointerReleasedEvent, PointerReleased, RoutingStrategies.Bubble, handledEventsToo: true);
+        area.AddHandler(VisualLineLinkText.OpenUriEvent, OpenUri);
         area.GotFocus += FocusChanged;
         area.LostFocus += FocusChanged;
         area.TextView.BackgroundRenderers.Add(this);
@@ -52,6 +53,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         _area.RemoveHandler(InputElement.PointerPressedEvent, PointerPressed);
         _area.RemoveHandler(InputElement.PointerMovedEvent, PointerMoved);
         _area.RemoveHandler(InputElement.PointerReleasedEvent, PointerReleased);
+        _area.RemoveHandler(VisualLineLinkText.OpenUriEvent, OpenUri);
         _area.GotFocus -= FocusChanged;
         _area.LostFocus -= FocusChanged;
         _area.TextView.BackgroundRenderers.Remove(this);
@@ -138,21 +140,21 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
 
     private void PointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        _altClick = null;
+        _caretClick = null;
         var view = _area.TextView;
         if (e.Source is not Visual source || !view.IsVisualAncestorOf(source) && !ReferenceEquals(view, source)
             || !e.GetCurrentPoint(view).Properties.IsLeftButtonPressed)
         {
             return;
         }
-        if (e.KeyModifiers == KeyModifiers.Alt)
+        if (e.KeyModifiers is KeyModifiers.Control or KeyModifiers.Alt)
         {
             var point = e.GetPosition(view);
             if (view.GetPosition(point + view.ScrollOffset) is not { } position) return;
 
-            // Let AvaloniaEdit handle the drag as a rectangular selection. Only a click
-            // (resolved after release) replaces it with the saved carets plus the clicked one.
-            _altClick = new(e.Pointer, point, Document.Version, Document.GetOffset(position.Location),
+            // AvaloniaEdit handles drags, including rectangular selection with Alt.
+            // A click restores the saved carets and toggles the one at the clicked position.
+            _caretClick = new(e.Pointer, point, e.KeyModifiers, Document.Version, Document.GetOffset(position.Location),
                 Current?.Ranges ?? [Primary(_area)], Current?.PrimaryIndex ?? 0);
             _area.ClearSelection();
             return;
@@ -163,14 +165,21 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
 
     private void PointerMoved(object? sender, PointerEventArgs e)
     {
-        if (_altClick is { } click && click.Pointer == e.Pointer && MovedSincePress(e, click))
-            _altClick = null;
+        if (_caretClick is { } click && click.Pointer == e.Pointer && MovedSincePress(e, click))
+            _caretClick = null;
+    }
+
+    private void OpenUri(object? sender, OpenUriRoutedEventArgs e)
+    {
+        // AvaloniaEdit opens links on mouse down with any Control modifier combination.
+        // Reserve exact Ctrl+click for carets. Ctrl+Shift+click still opens a link.
+        if (_caretClick?.Modifiers == KeyModifiers.Control) e.Handled = true;
     }
 
     private void PointerReleased(object? sender, PointerReleasedEventArgs e)
     {
-        if (_altClick is not { } click || click.Pointer != e.Pointer || e.InitialPressMouseButton != MouseButton.Left) return;
-        _altClick = null;
+        if (_caretClick is not { } click || click.Pointer != e.Pointer || e.InitialPressMouseButton != MouseButton.Left) return;
+        _caretClick = null;
         if (MovedSincePress(e, click) || !ReferenceEquals(click.Version, Document.Version)) return;
 
         var ranges = click.Ranges;
@@ -195,13 +204,13 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         e.Handled = true;
     }
 
-    private bool MovedSincePress(PointerEventArgs e, AltClick click)
+    private bool MovedSincePress(PointerEventArgs e, CaretClick click)
     {
         var movement = e.GetPosition(_area.TextView) - click.Point;
         return Math.Abs(movement.X) > 2 || Math.Abs(movement.Y) > 2;
     }
 
-    private sealed record AltClick(IPointer Pointer, Point Point, ITextSourceVersion Version, int Offset,
+    private sealed record CaretClick(IPointer Pointer, Point Point, KeyModifiers Modifiers, ITextSourceVersion Version, int Offset,
         CaretRange[] Ranges, int PrimaryIndex);
 
     private void AddVertical(int direction)

@@ -1652,6 +1652,88 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task CtrlClickTogglesCaretsAndTypingEditsThemInOneUndoStep() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string original = "aaa\nbbb\nccc";
+        var path = Path.Combine(profile, "ctrl-click.txt");
+        await File.WriteAllTextAsync(path, original);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var view = editor.TextArea.TextView;
+            view.EnsureVisualLines();
+
+            Click(1, 2, RawInputModifiers.None);
+            Click(3, 3, RawInputModifiers.Control);
+            Click(2, 2, RawInputModifiers.Control);
+            Assert.Equal(new[] { 1, 5, 10 }, editor.TextArea.Selection.Segments.Select(segment => segment.StartOffset));
+            Click(2, 2, RawInputModifiers.Control);
+            Assert.Equal(new[] { 1, 10 }, editor.TextArea.Selection.Segments.Select(segment => segment.StartOffset));
+
+            window.KeyTextInput("!");
+            Assert.Equal("a!aa\nbbb\ncc!c", editor.Text);
+            editor.Undo();
+            Assert.Equal(original, editor.Text);
+            editor.Redo();
+            Assert.Equal("a!aa\nbbb\ncc!c", editor.Text);
+
+            Click(2, 3, RawInputModifiers.None);
+            Assert.Equal(1, MultiCaretEditing.Count(editor.TextArea));
+
+            void Click(int line, int column, RawInputModifiers modifiers)
+            {
+                var location = new TextViewPosition(line, column);
+                var point = view.TranslatePoint(view.GetVisualPosition(location, VisualYPosition.LineMiddle) - view.ScrollOffset,
+                    window)!.Value;
+                window.MouseDown(point, MouseButton.Left, modifiers);
+                window.MouseUp(point, MouseButton.Left, modifiers);
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task CtrlClickAddsACaretInsideALinkAndCtrlShiftClickRequestsNavigation() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string link = "https://example.com/";
+        var path = Path.Combine(profile, "ctrl-click-link.txt");
+        await File.WriteAllTextAsync(path, "first");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var area = editor.TextArea;
+            var view = area.TextView;
+            // Underline rendering shares Avalonia decorations across headless dispatchers.
+            view.LinkTextUnderline = false;
+            editor.Text = $"first\n{link}";
+            view.EnsureVisualLines();
+            area.Focus();
+            editor.CaretOffset = 1;
+            var point = view.TranslatePoint(view.GetVisualPosition(new TextViewPosition(2, 10),
+                VisualYPosition.LineMiddle) - view.ScrollOffset, window)!.Value;
+            Uri? opened = null;
+            area.AddHandler(VisualLineLinkText.OpenUriEvent, (_, e) =>
+            {
+                opened = e.Uri;
+                e.Handled = true;
+            });
+
+            window.MouseDown(point, MouseButton.Left, RawInputModifiers.Control);
+            window.MouseUp(point, MouseButton.Left, RawInputModifiers.Control);
+            Assert.Null(opened);
+            Assert.Equal(new[] { 1, 15 }, area.Selection.Segments.Select(segment => segment.StartOffset));
+
+            const RawInputModifiers controlShift = RawInputModifiers.Control | RawInputModifiers.Shift;
+            window.MouseDown(point, MouseButton.Left, controlShift);
+            window.MouseUp(point, MouseButton.Left, controlShift);
+            Assert.Equal(new Uri(link), opened);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task AltClickTogglesCaretsAndUpAddsOneOnThePreviousLine() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "mouse.txt");
