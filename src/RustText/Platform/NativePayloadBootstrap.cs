@@ -70,18 +70,28 @@ internal static partial class NativePayloadBootstrap
 
     private static Dictionary<string, byte[]>? ReadPayloadHashes(Assembly assembly)
     {
+        using var stream = assembly.GetManifestResourceStream(ResourcePrefix + "sha256");
+        if (stream is null) return null;
+
+        using var reader = new StreamReader(stream);
         var result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         foreach (var name in NativeFiles)
         {
-            using var stream = assembly.GetManifestResourceStream(ResourcePrefix + name);
-            if (stream is null)
+            var line = reader.ReadLine();
+            if (line is null || line.Length != name.Length + 65
+                || line[name.Length] != ' ' || !line.StartsWith(name, StringComparison.Ordinal))
             {
-                if (result.Count == 0) return null;
-                throw new InvalidDataException($"Не найден встроенный ресурс {name}.");
+                throw new InvalidDataException($"Не найдена контрольная сумма встроенной библиотеки {name}.");
             }
 
-            if (stream.Length == 0) throw new InvalidDataException($"Встроенная библиотека {name} пуста.");
-            result.Add(name, SHA256.HashData(stream));
+            try
+            {
+                result.Add(name, Convert.FromHexString(line.AsSpan(name.Length + 1)));
+            }
+            catch (FormatException error)
+            {
+                throw new InvalidDataException($"Недопустимая контрольная сумма встроенной библиотеки {name}.", error);
+            }
         }
 
         return result;

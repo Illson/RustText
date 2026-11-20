@@ -37,7 +37,7 @@ try {
     $archive = [IO.Compression.ZipFile]::Open($primary, [IO.Compression.ZipArchiveMode]::Create)
     try {
         [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-            $archive, $exe.FullName, 'rusttext.exe', [IO.Compression.CompressionLevel]::Optimal
+            $archive, $exe.FullName, 'rusttext.exe', [IO.Compression.CompressionLevel]::SmallestSize
         )
     } finally {
         $archive.Dispose()

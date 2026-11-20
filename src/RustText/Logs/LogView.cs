@@ -1524,6 +1524,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         var reader = snapshot.Reader;
         var searchOffset = Math.Max(Math.Max(cursor.Offset, snapshot.HiddenOffset), reader.PreambleLength);
         var pageEnd = snapshot.Length;
+        var readAheadEnd = searchOffset + Math.Min(maxScanBytes, Math.Max(0, pageEnd - searchOffset));
+        using var scan = reader.BeginSequentialScan(readAheadEnd);
         var pendingLine = new StringBuilder(cursor.PendingText);
         var cursorLineStart = cursor.LineOffset >= 0 ? cursor.LineOffset : searchOffset;
         var pendingOffset = cursorLineStart;
@@ -1536,9 +1538,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             token.ThrowIfCancellationRequested();
             var maxPageBytes = (int)Math.Clamp(maxScanBytes - (nextOffset - searchOffset), 4, LogDataReader.DefaultPageBytes);
-            var maxFrameBytes = Math.Min(LogDataReader.DefaultFrameBytes, maxPageBytes);
-            var page = reader.ReadPage(nextOffset, maxFrameBytes: maxFrameBytes, maxPageBytes: maxPageBytes,
-                cancellationToken: token, endOffset: pageEnd);
+            var page = scan.ReadPage(nextOffset, token, maxPageBytes, pageEnd);
             if (page.NextOffset <= nextOffset) break;
             foreach (var row in page.Rows)
             {
@@ -1655,7 +1655,6 @@ internal sealed partial class LogView : UserControl, IDisposable
     private long? FindTimeOffset(DateTime requested, CancellationToken token)
     {
         var cursor = _hiddenOffset;
-        long line = 0;
         while (cursor < _file.Length)
         {
             token.ThrowIfCancellationRequested();
@@ -1666,11 +1665,10 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
             foreach (var row in page.Rows)
             {
-                if (IsContinuationAt(row.StartOffset))
+                if (row.StartsWithinLine)
                 {
                     continue;
                 }
-                line++;
                 if (TryReadTimestamp(row.Text, out var timestamp) && timestamp >= requested)
                 {
                     return row.StartOffset;
@@ -1686,6 +1684,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         RegexOptions.Compiled,
         TimeSpan.FromMilliseconds(20));
 
+    private static readonly string[] TimestampDateFormats = ["yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss"];
+    private static readonly string[] TimestampClockFormats = ["HH:mm:ss.FFFFFFF", "HH:mm:ss"];
+
     private static bool TryReadTimestamp(string line, out DateTime timestamp)
     {
         var match = TimestampPattern.Match(line);
@@ -1694,9 +1695,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             var value = match.Groups["date"].Success
                 ? $"{match.Groups["date"].Value} {match.Groups["time"].Value}"
                 : match.Groups["clock"].Value;
-            var formats = match.Groups["date"].Success
-                ? new[] { "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss" }
-                : new[] { "HH:mm:ss.FFFFFFF", "HH:mm:ss" };
+            var formats = match.Groups["date"].Success ? TimestampDateFormats : TimestampClockFormats;
             if (DateTime.TryParseExact(value, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp))
             {
                 return true;
