@@ -190,12 +190,12 @@ internal sealed partial class LogView : UserControl, IDisposable
     private long?[] _displaySourceLineNumbers = [];
 
     public LogView(string path, TextEncodingKind? encoding = null, LogTabState? state = null,
-        string? draftName = null, long? draftLineCount = null, long? initialDraftCaretBytes = null)
+        string? draftName = null, long? draftLineCount = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         _path = System.IO.Path.GetFullPath(path);
         _isDraft = draftName is not null;
-        EditsPagesByDefault = _isDraft || state?.EditPages == true;
+        EditsPagesByDefault = state?.EditPages ?? _isDraft;
         _savedLineCount = draftLineCount;
         _encodingOverride = encoding ?? state?.Encoding;
         _file = LogDataReader.Open(_path);
@@ -234,7 +234,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         RefreshButtons();
 
         InitialPageLoad = LoadPageAsync(Math.Max(_hiddenOffset, restoreState?.Offset ?? _hiddenOffset), saveHistory: false,
-            allowFollowEnd: bookmarkRestorable, editCaretBytes: initialDraftCaretBytes);
+            allowFollowEnd: bookmarkRestorable);
         LoadMinimapSamples();
         StartIndexIfNeeded();
         if (_autoRefresh)
@@ -252,6 +252,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     public bool IsReadOnly => _pageEdit is null;
     public bool AutoRefresh => _autoRefresh;
     public long? CurrentOffset => _page?.StartOffset;
+    internal long FileLength => _fileStamp.Length;
     public long? KnownLineCount => _totalLineCount ?? _savedLineCount;
     public string StatusText { get; private set; } = string.Empty;
 
@@ -261,6 +262,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         set
         {
             _wordWrap = value;
+            if (_pageEditor is { } editor) editor.WordWrap = value;
             _logText.TextWrapping = _filteredLogText.TextWrapping = value ? TextWrapping.Wrap : TextWrapping.NoWrap;
             _wrapButton.Content = value ? "Перенос: вкл." : "Перенос: выкл.";
         }
@@ -381,6 +383,8 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     public void SetTextSize(double value)
     {
+        if (_pageEditor is { } editor) editor.FontSize = value;
+        _pageLineNumbers?.SetValue(TextBlock.FontSizeProperty, value);
         _logText.FontSize = value;
         _filteredLogText.FontSize = value;
         _lineGutterText.FontSize = value;
@@ -434,6 +438,11 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && hit.MatchLength > 0
             && hit.MatchIndex >= 0 && end <= FirstDisplayedLineLength())
         {
+            if (_pageEdit is not null)
+            {
+                _pageEditor!.Select(hit.MatchIndex, hit.MatchLength);
+                return;
+            }
             _logText.CaretIndex = end;
             _logText.SelectionStart = hit.MatchIndex;
             _logText.SelectionEnd = end;
@@ -455,7 +464,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     {
         if (PageNavigationBlocked) return;
         if (_levelFilterViewport?.IsVisible == true) CloseInlineLevelFilter();
-        if (!_searchBox.IsKeyboardFocusWithin && _logText.SelectedText is { Length: > 0 } selected)
+        if (!_searchBox.IsKeyboardFocusWithin && (_pageEdit is null ? _logText.SelectedText : _pageEditor!.SelectedText) is { Length: > 0 } selected)
         {
             _regexBox.IsChecked = false;
             _searchBox.Text = selected;
@@ -471,7 +480,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (!_searchPanel.IsVisible) return false;
         _searchPanel.IsVisible = false;
         StopSearch();
-        _logText.Focus();
+        FocusPageEditor();
         return true;
     }
 
@@ -491,6 +500,12 @@ internal sealed partial class LogView : UserControl, IDisposable
         _indexCancellation?.Cancel();
         _trimCancellation?.Cancel();
         _refreshTimer.Stop();
+        if (_pageEditor is { } editor)
+        {
+            _unbindPagePaste?.Invoke();
+            editor.LayoutUpdated -= OnLogTextLayoutUpdated;
+            ClearPageEdit();
+        }
         _logText.LayoutUpdated -= OnLogTextLayoutUpdated;
         AttachLogScrollbar(null);
         _file.Dispose();
@@ -847,10 +862,10 @@ internal sealed partial class LogView : UserControl, IDisposable
     private async void OnLogKeyDown(object? sender, KeyEventArgs e)
     {
         if (e.Key == Key.X && e.KeyModifiers == KeyModifiers.Control && _pageEdit is not null
-            && !_logText.IsReadOnly && _logText.SelectionStart == _logText.SelectionEnd)
+            && _pageEditor is { IsReadOnly: false, SelectionLength: 0 })
         {
             e.Handled = true;
-            await CutCurrentPageLineAsync();
+            RunPageClipboard(() => EditorClipboard.CutLineAsync(_pageEditor, () => !_closed && _pageEdit is not null && !IsWritingPage));
             return;
         }
 
@@ -935,7 +950,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     }
 
     private async Task LoadPageAsync(long offset, bool saveHistory = true, bool allowFollowEnd = true,
-        int maxPageBytes = LogDataReader.DefaultPageBytes, bool scrollToEnd = false, long? editCaretBytes = null)
+        int maxPageBytes = LogDataReader.DefaultPageBytes, bool scrollToEnd = false)
     {
         if (_closed || _busy || PageNavigationBlocked)
         {
@@ -954,12 +969,9 @@ internal sealed partial class LogView : UserControl, IDisposable
             var (page, firstLine, edit) = await Task.Run(() =>
             {
                 var pageBytes = EditsPagesByDefault ? LogDataReader.DefaultPageBytes : maxPageBytes;
-                var start = editCaretBytes is { } byteCaret ? reader.GetPreviousPageOffset(byteCaret, token) : requested;
-                var result = reader.ReadPage(start, maxPageBytes: pageBytes, cancellationToken: token);
-                if (editCaretBytes is { } target && target > result.NextOffset)
-                    result = reader.ReadPage(target, maxPageBytes: pageBytes, cancellationToken: token);
+                var result = reader.ReadPage(requested, maxPageBytes: pageBytes, cancellationToken: token);
                 var first = result.Rows.Count > 0 ? FindLineNumber(reader, result.Rows[0].StartOffset, token) : null;
-                var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token, editCaretBytes) : null;
+                var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token) : null;
                 return (result, first, pageEdit);
             }, token);
             if (_closed)
@@ -1003,15 +1015,12 @@ internal sealed partial class LogView : UserControl, IDisposable
                 _logText.Text = displayText.ToString();
                 _levelBands.SetPage(page);
             }
-            if (editCaretBytes is null)
+            Dispatcher.UIThread.Post(() =>
             {
-                Dispatcher.UIThread.Post(() =>
-                {
-                    if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
-                    scroll.Offset = new Vector(scroll.Offset.X,
-                        scrollToEnd ? Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height) : 0);
-                }, DispatcherPriority.Loaded);
-            }
+                if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
+                scroll.Offset = new Vector(scroll.Offset.X,
+                    scrollToEnd ? Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height) : 0);
+            }, DispatcherPriority.Loaded);
             var rows = page.Rows.Count == 0 ? 0 : 1 + page.Rows.Skip(1).Count(row => !row.StartsWithinLine);
             _countLabel.Text = $"Строк на странице · {LineNumbers.Format(rows)}";
             if (_isDraft && !_indexOptIn && (KnownLineCount is null || (firstLine is null && rows > 0)))
@@ -1973,7 +1982,8 @@ internal sealed partial class LogView : UserControl, IDisposable
             ? $"Строки {LineNumbers.Format(firstLine)}–{LineNumbers.Format(lastLine)}"
             : page.Rows.Count == 0 ? "" : "Позиция · " + (_indexPaused ? "нет индекса строк" : "считаются строки");
         RefreshLineCount();
-        UpdateLineGutterText();
+        if (_pageEdit is null) UpdateLineGutterText();
+        else _pageLineNumbers!.FirstLineNumber = first;
         TextPositionChanged?.Invoke();
     }
 
@@ -1982,47 +1992,29 @@ internal sealed partial class LogView : UserControl, IDisposable
         get
         {
             if (_page is null) return null;
+            if (_pageEdit is not null && _pageEditor is { } editor)
+            {
+                var line = editor.TextArea.Caret.Line;
+                var first = _displaySourceLineNumbers.FirstOrDefault();
+                return (first + line - 1 ?? line, editor.SelectionLength, first is null);
+            }
             var text = _logText.Text.AsSpan();
             var caret = Math.Clamp(_logText.CaretIndex, 0, text.Length);
             var start = Math.Clamp(_logText.SelectionStart, 0, text.Length);
             var end = Math.Clamp(_logText.SelectionEnd, 0, text.Length);
             var selected = Math.Abs(end - start);
-            int pageLine;
-            long? fileLine;
-            if (_pageEdit is not null)
-            {
-                pageLine = EditedPageLine(text, caret);
-                fileLine = _displaySourceLineNumbers.FirstOrDefault() + pageLine;
-            }
-            else
-            {
-                // The rows used by the gutter follow source lines, including when a line wraps.
-                var index = Array.BinarySearch(_displayRowStarts, caret);
-                pageLine = index < 0 ? Math.Max(0, ~index - 1) : index;
-                fileLine = _displaySourceLineNumbers.ElementAtOrDefault(pageLine);
-            }
+            var index = Array.BinarySearch(_displayRowStarts, caret);
+            var pageLine = index < 0 ? Math.Max(0, ~index - 1) : index;
+            var fileLine = _displaySourceLineNumbers.ElementAtOrDefault(pageLine);
             return (fileLine ?? pageLine + 1, selected, fileLine is null);
         }
     }
 
-    private static int EditedPageLine(ReadOnlySpan<char> text, int caret)
-    {
-        var line = 0;
-        for (var offset = 0; offset < caret;)
-        {
-            var newline = text[offset..caret].IndexOfAny('\r', '\n');
-            if (newline < 0) break;
-            var delimiter = offset + newline;
-            offset = delimiter + 1;
-            if (text[delimiter] == '\r' && offset < text.Length && text[offset] == '\n') offset++;
-            if (offset <= caret) line++;
-        }
-        return line;
-    }
-
+    private void UpdateDisplayedLineCount() =>
+        _positionLabel.Text = DisplayLineCount is { } count ? $"Всего строк · {LineNumbers.Format(count)}" : "";
     private void RefreshLineCount()
     {
-        _positionLabel.Text = KnownLineCount is { } count ? $"Всего строк · {LineNumbers.Format(count)}" : "";
+        UpdateDisplayedLineCount();
         _indexLabel.Text = KnownLineCount is null && _indexedLineCount > 0
             ? $"Посчитано · {LineNumbers.Format(_indexedLineCount)}"
             : "";
@@ -2035,6 +2027,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void OnLogTextLayoutUpdated(object? sender, EventArgs e)
     {
+        if (!ReferenceEquals(sender, _pageEdit is null ? (Control)_logText : _pageEditor)) return;
         AttachLogScrollViewer();
         if (_pageEdit is null)
         {
@@ -2045,7 +2038,9 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void AttachLogScrollViewer()
     {
-        var scrollViewer = _logText.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
+        Control surface = _pageEdit is null ? _logText : _pageEditor!;
+        if (_logScrollViewer is { } current && _verticalLogScrollbar is not null && surface.IsVisualAncestorOf(current)) return;
+        var scrollViewer = surface.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
         if (!ReferenceEquals(scrollViewer, _logScrollViewer) || _verticalLogScrollbar is null)
         {
             AttachLogScrollbar(scrollViewer?.GetVisualDescendants().OfType<ScrollBar>()
@@ -2172,8 +2167,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_closed) return;
         var enabled = !_busy && !PageNavigationBlocked;
         UpdatePageModeControls();
-        _levelBands.IsVisible = !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path));
-        _levelFilterButton.IsVisible = _levelBands.IsVisible;
+        _levelFilterButton.IsVisible = !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path));
+        _levelBands.IsVisible = _levelFilterButton.IsVisible && _pageEdit is null;
         _levelFilterButton.IsEnabled = CanFilterLevels || _levelFilterOpen;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
         _followButton.Content = _followEnd ? "К концу" : "Следовать";
@@ -2206,9 +2201,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         _indexButton.IsEnabled = !_closed && (!_indexBuilding || _indexCancellation is not null);
         _cancelIndexButton.IsVisible = _indexBuilding;
         _cancelTrimButton.IsVisible = _trimCancellation is not null;
-        _hideButton.IsVisible = !EditsPagesByDefault;
-        _revealButton.IsVisible = !EditsPagesByDefault;
-        _trimButton.IsVisible = !EditsPagesByDefault;
+        _hideButton.IsVisible = !_isDraft && !EditsPagesByDefault;
+        _revealButton.IsVisible = !_isDraft && !EditsPagesByDefault;
+        _trimButton.IsVisible = !_isDraft && !EditsPagesByDefault;
         _hideButton.IsEnabled = enabled && _page?.Rows.Count > 0;
         _revealButton.IsEnabled = enabled && _hiddenOffset > 0;
         _trimButton.IsEnabled = enabled && _hiddenOffset > 0;

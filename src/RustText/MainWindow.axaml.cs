@@ -308,6 +308,8 @@ public partial class MainWindow : Window
         var saveCopy = Command("Сохранить копию…", () => Run(() => SaveCurrentDraftCopyAsync(tab)));
         var autoRefresh = Command("Автообновление с диска", () => SetTabAutoRefresh(tab, !TabAutoRefresh(tab)));
         autoRefresh.ToggleType = MenuItemToggleType.CheckBox;
+        var logMode = Command("Режим лога", () => Run(() => ToggleLogModeAsync(tab)));
+        logMode.ToggleType = MenuItemToggleType.CheckBox;
         var context = new ContextMenu
         {
             Items =
@@ -317,6 +319,7 @@ public partial class MainWindow : Window
                 Command("Скопировать путь", () => Run(() => CopyTextAsync(tab.Path))),
                 filter,
                 saveCopy,
+                logMode,
                 autoRefresh,
                 Command("Переместить в новое окно", () => OpenTabWindow(tab)),
                 Command("Закрыть", () => Run(() => CloseTabAsync(tab)))
@@ -324,6 +327,9 @@ public partial class MainWindow : Window
         };
         context.Opening += (_, _) =>
         {
+            logMode.IsChecked = tab.OpensAsLog || tab.Deferred?.DraftLogMode == true
+                || tab.Recovery is not null && tab.Log?.FileLength <= DocumentFiles.MaximumDocumentBytes;
+            logMode.IsEnabled = !tab.Loading && !tab.Closing && !tab.Saving && !tab.CheckingSession;
             filter.IsVisible = tab.Editor is not null || tab.Log is { CanFilterLevels: true };
             saveCopy.IsVisible = tab.Recovery is not null;
             saveCopy.IsEnabled = tab.Log?.HasPendingEdit != true;
@@ -638,7 +644,7 @@ public partial class MainWindow : Window
             SetStatus("Дождитесь сохранения закрываемой вкладки.");
             return;
         }
-        if (_tabs.Values.FirstOrDefault(tab => tab.Saving || tab.Log?.HasPendingEdit == true) is { } pending)
+        if (_tabs.Values.FirstOrDefault(tab => tab.Saving || tab.Log?.IsWritingPage == true) is { } pending)
         {
             Select(pending);
             SetStatus("Завершите сохранение или отмените правки страницы перед закрытием окна.");
@@ -661,6 +667,15 @@ public partial class MainWindow : Window
         var priorHistory = new List<(int Index, SessionTab Tab)>();
         try
         {
+            foreach (var tab in _tabs.Values.Where(tab => tab.Log?.HasPendingEdit == true).ToArray())
+            {
+                if (!await ResolvePendingPageAsync(tab))
+                {
+                    _closing = false;
+                    _checkpoint.Start();
+                    return;
+                }
+            }
             await _workspace.CloseGate.WaitAsync();
             closeGateHeld = true;
             await _workspace.WorkspaceSwitchGate.WaitAsync();

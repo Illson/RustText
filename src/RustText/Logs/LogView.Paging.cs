@@ -70,7 +70,7 @@ internal sealed partial class LogView
     {
         for (; visual is not null && !ReferenceEquals(visual, this); visual = visual.GetVisualParent())
         {
-            if (ReferenceEquals(visual, _logText)) return true;
+            if (ReferenceEquals(visual, _logText) || ReferenceEquals(visual, _pageEditor)) return true;
         }
         return false;
     }

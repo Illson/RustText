@@ -870,7 +870,7 @@ public sealed class WorkspaceTests
         {
             var log = Assert.IsType<LogView>(Property(ActiveTab(window), "Log"));
             await log.InitialPageLoad;
-            Assert.StartsWith("first row", LogText(log).Text);
+            Assert.StartsWith("first row", PageEditor(log).Text);
             Assert.False(log.IsReadOnly);
         }
         finally { await CloseAsync(window); }
@@ -941,7 +941,7 @@ public sealed class WorkspaceTests
         const string row = "row with text\r\n";
         await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat(row, 170)));
         var window = await OpenWorkspaceAsync();
-        TextBox? pageText = null;
+        TextEditor? pageEditor = null;
         string? original = null;
         try
         {
@@ -950,16 +950,16 @@ public sealed class WorkspaceTests
             var log = Read<LogView>(ActiveTab(window), "Log");
             await log.InitialPageLoad;
             await (Task)typeof(LogView).GetMethod("NavigateAsync", Private)!.Invoke(log, [80L * row.Length, true])!;
-            pageText = LogText(log);
-            original = pageText.Text;
+            var pageText = LogText(log);
             var status = window.FindControl<TextBlock>("FormatText")!;
             if (editable)
             {
                 const string previousLines = "первая\rвторая\nтретья\r\n";
-                pageText.Text = previousLines + "четвёртая";
-                pageText.CaretIndex = previousLines.Length + 4;
-                pageText.SelectionStart = previousLines.Length;
-                pageText.SelectionEnd = previousLines.Length + 4;
+                pageEditor = PageEditor(log);
+                original = pageEditor.Text;
+                pageEditor.Text = previousLines + "четвёртая";
+                pageEditor.CaretOffset = previousLines.Length + 4;
+                pageEditor.Select(previousLines.Length, 4);
                 Assert.StartsWith("Строка 84 · Выделено 4 симв.", status.Text);
             }
             else
@@ -970,12 +970,13 @@ public sealed class WorkspaceTests
                 Assert.StartsWith("Строка 82 · Выделено 3 симв.", status.Text);
             }
 
-            pageText.SelectionStart = pageText.SelectionEnd;
+            if (editable) pageEditor!.TextArea.ClearSelection();
+            else pageText.SelectionStart = pageText.SelectionEnd;
             Assert.Contains("Выделено 0 симв.", status.Text);
         }
         finally
         {
-            if (editable && pageText is not null) pageText.Text = original;
+            if (pageEditor is not null) pageEditor.Text = original;
             await CloseAsync(window);
         }
     });
@@ -1122,7 +1123,7 @@ public sealed class WorkspaceTests
             var tab = ActiveTab(window);
             var editor = Read<LogView>(tab, "Log");
             await editor.InitialPageLoad;
-            var page = LogText(editor);
+            var page = PageEditor(editor);
             Assert.False(page.IsReadOnly);
             await CallAsync(window, "RememberClosedAsync", tab, false, false);
             var closed = Assert.Single((List<SessionTab>)Field(window, "_closedTabs"));
@@ -1155,6 +1156,69 @@ public sealed class WorkspaceTests
 
     private static Button DialogButton(Window dialog, string caption) =>
         Assert.Single(dialog.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, caption));
+
+    [Theory]
+    [InlineData("Сохранить")]
+    [InlineData("Без сохранения")]
+    [InlineData("Отмена")]
+    public Task ClosingEditedLogPageRespectsChoice(string choice) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "closing.log");
+        await File.WriteAllTextAsync(path, "first row");
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenPathAsync", path, true, null);
+            var tab = ActiveTab(window);
+            var log = Read<LogView>(tab, "Log");
+            await log.InitialPageLoad;
+            await (Task)typeof(LogView).GetMethod("TogglePageEditAsync", Private)!.Invoke(log, null)!;
+            var page = PageEditor(log);
+            page.Text = "";
+            await HeadlessTests.WaitForAsync(() => log.DisplayLineCount == 0);
+            page.TextArea.PerformTextInput("replacement");
+            Assert.Equal(1L, log.DisplayLineCount);
+            var closing = CallAsync(window, "CloseTabAsync", tab);
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any(dialog => dialog.Title == "Изменения страницы"));
+            Click(DialogButton(Assert.Single(window.OwnedWindows), choice));
+            await closing;
+            Assert.Equal(choice == "Сохранить" ? "replacement" : "first row", await File.ReadAllTextAsync(path));
+            if (choice == "Отмена")
+            {
+                Assert.Contains(tab, Tabs(window));
+                Assert.True(log.HasPendingEdit);
+                Assert.Equal("replacement", page.Text);
+                log.DiscardPageEdits();
+            }
+            else Assert.DoesNotContain(tab, Tabs(window));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task SwitchingDirtyNamedEditorPreservesTheBufferAndSource() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "unchanged.txt");
+        await File.WriteAllTextAsync(path, "on disk");
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenPathAsync", path, false, null);
+            var tab = ActiveTab(window);
+            Read<TextEditor>(tab, "Editor").Text = "local changes";
+            await CallAsync(window, "ToggleLogModeAsync", tab);
+            var log = Read<LogView>(tab, "Log");
+            await log.InitialPageLoad;
+            Assert.True(log.IsReadOnly);
+            Assert.Equal("on disk", await File.ReadAllTextAsync(path));
+            await CallAsync(window, "ToggleLogModeAsync", tab);
+            Assert.Equal("local changes", Read<TextEditor>(tab, "Editor").Text);
+            Assert.True(Read<bool>(tab, "Dirty"));
+            Assert.Equal(path, Property(tab, "Path"));
+            Assert.Equal("on disk", await File.ReadAllTextAsync(path));
+        }
+        finally { await CloseAsync(window); }
+    });
 
     [Fact]
     public Task IdleLogReusesCheckpointUntilBookmarkChanges() => HeadlessTests.RunAsync(async profile =>
@@ -1203,7 +1267,7 @@ public sealed class WorkspaceTests
             Func<Task> start = () => { starts++; return Task.CompletedTask; };
             await Assert.ThrowsAsync<IOException>(() => CallAsync(window, "RestartForUpdateAsync", start));
             Assert.Equal(0, starts);
-            Assert.Equal("pending edit", LogText(log).Text);
+            Assert.Equal("pending edit", PageEditor(log).Text);
             Assert.True(window.IsVisible && detached.IsVisible);
 
             await log.SavePageEditAsync();
@@ -1231,13 +1295,15 @@ public sealed class WorkspaceTests
         }
     });
 
+    private static TextEditor PageEditor(LogView log) => (TextEditor)typeof(LogView).GetField("_pageEditor", Private)!.GetValue(log)!;
+
     private static TextBox LogText(LogView log) => (TextBox)typeof(LogView).GetField("_logText", Private)!.GetValue(log)!;
 
     private static async Task EditLogPageAsync(LogView log, string content)
     {
         await (Task)typeof(LogView).GetMethod("TogglePageEditAsync", Private)!.Invoke(log, null)!;
         Assert.False(log.IsReadOnly);
-        LogText(log).Text = content;
+        PageEditor(log).Text = content;
     }
 
     [Fact]
@@ -1669,7 +1735,7 @@ public sealed class WorkspaceTests
             await log.InitialPageLoad;
             Assert.False(Read<bool>(tab, "Dirty"));
             Assert.True(log.AutoRefresh);
-            Assert.StartsWith("xxx", LogText(log).Text);
+            Assert.StartsWith("xxx", PageEditor(log).Text);
             var draft = Assert.Single(Tabs(window), candidate => Property(candidate, "Path") is null);
             Assert.Equal("short + local", Read<TextEditor>(draft, "Editor").Text);
             Assert.Same(tab, ActiveTab(window));

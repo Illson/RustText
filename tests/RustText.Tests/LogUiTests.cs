@@ -9,7 +9,9 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.VisualTree;
+using AvaloniaEdit;
 using RustText.Demo;
+using RustText.Demo.Editor;
 using RustText.Demo.Logs;
 using Xunit;
 using Xunit.Abstractions;
@@ -22,6 +24,8 @@ public sealed class LogUiTests
     private readonly ITestOutputHelper _output;
 
     public LogUiTests(ITestOutputHelper output) => _output = output;
+
+    private static TextEditor PageEditor(LogView log) => (TextEditor)Field(log, "_pageEditor");
 
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
@@ -90,7 +94,7 @@ public sealed class LogUiTests
             await InvokeTask(log, "NavigateAsync", 3 + 80L * row.Length, true);
             await InvokeTask(log, "TogglePageEditAsync");
             Assert.False(log.IsReadOnly);
-            var text = (TextBox)Field(log, "_logText");
+            var text = PageEditor(log);
             Assert.Equal(string.Concat(Enumerable.Repeat(row, 80)), text.Text);
             const string replacement = "страница 🚀\r\n";
             text.Text = replacement;
@@ -155,12 +159,10 @@ public sealed class LogUiTests
         {
             await InvokeTask(log, "NavigateAsync", 0L, true);
             await InvokeTask(log, "TogglePageEditAsync");
-            var source = (TextBox)Field(log, "_logText");
+            var source = PageEditor(log);
             var originalPage = source.Text;
-            source.CaretIndex = Math.Min(12, source.Text!.Length);
-            source.SelectionStart = 0;
-            source.SelectionEnd = Math.Min(5, source.Text.Length);
-            var originalSelection = SelectedText(source);
+            source.Select(0, Math.Min(5, source.Text.Length));
+            var originalSelection = source.SelectedText;
             var pageOffset = Page(log)!.StartOffset;
 
             await InvokeTask(log, "ShowLevelFilterAsync");
@@ -169,7 +171,7 @@ public sealed class LogUiTests
             Assert.Equal(pageOffset, Page(log)!.StartOffset);
             Assert.True(source.IsVisible);
             Assert.Equal(originalPage, source.Text);
-            Assert.Equal(originalSelection, SelectedText(source));
+            Assert.Equal(originalSelection, source.SelectedText);
             Assert.False(log.IsReadOnly);
 
             filterPanel.SetLevels(LogLevel.Fatal);
@@ -183,7 +185,7 @@ public sealed class LogUiTests
             await HeadlessTests.WaitForAsync(() => !filterPanel.IsVisible && ((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
             Assert.Equal(pageOffset, Page(log)!.StartOffset);
             Assert.Equal(originalPage, source.Text);
-            Assert.Equal(originalSelection, SelectedText(source));
+            Assert.Equal(originalSelection, source.SelectedText);
 
             Assert.False(filterPanel.IsVisible);
             Assert.Equal(originalPage, source.Text);
@@ -201,7 +203,7 @@ public sealed class LogUiTests
         try
         {
             await InvokeTask(log, "TogglePageEditAsync");
-            var source = (TextBox)Field(log, "_logText");
+            var source = PageEditor(log);
             source.Text = "pending edit";
             Assert.True(log.HasPendingEdit);
             Assert.False(log.CanFilterLevels);
@@ -278,16 +280,17 @@ public sealed class LogUiTests
 
             await InvokeTask(log, "TogglePageEditAsync");
             Assert.False(log.IsReadOnly);
-            text.CaretIndex = caret;
+            var pageEditor = PageEditor(log);
+            pageEditor.CaretOffset = caret;
             window.KeyPress(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
             window.KeyRelease(Key.X, RawInputModifiers.Control, PhysicalKey.X, "x");
-            await HeadlessTests.WaitForAsync(() => text.Text == expected);
+            await HeadlessTests.WaitForAsync(() => pageEditor.Text == expected);
             var clipboard = await window.Clipboard!.TryGetDataAsync();
             Assert.NotNull(clipboard);
             Assert.Equal(cut, await clipboard.TryGetTextAsync());
 
-            text.Undo();
-            Assert.Equal(original, text.Text);
+            pageEditor.Undo();
+            Assert.Equal(original, pageEditor.Text);
         }
         finally { await CloseLogAsync(window, log); }
     });
@@ -322,7 +325,7 @@ public sealed class LogUiTests
             Assert.False(log.IsReadOnly);
             ((Button)Field(log, "_startButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await HeadlessTests.WaitForAsync(() => log.CurrentOffset == 0);
-            ((TextBox)Field(log, "_logText")).Text = "updated draft\n";
+            PageEditor(log).Text = "updated draft\n";
             await HeadlessTests.WaitForAsync(() => !next.IsEnabled);
             await log.SavePageEditAsync();
             var editedLog = Assert.IsType<LogView>(ActiveLog(window));
@@ -561,13 +564,13 @@ public sealed class LogUiTests
             await HeadlessTests.WaitForAsync(() => lineLabel.Text == "Строки 60.001–60.080");
             Assert.Equal("Всего строк · 81.000", countLabel.Text);
             Assert.Equal("Большой черновик", ((TextBlock)Field(log, "_fileLabel")).Text);
-            Assert.StartsWith("60.001", ((TextBlock)Field(log, "_lineGutterText")).Text);
+            Assert.Equal(60_001L, PageEditor(Assert.IsType<LogView>(log)).TextArea.LeftMargins.OfType<GroupedLineNumberMargin>().Single().FirstLineNumber);
             var minimap = (Control)Field(log, "_minimap");
             await HeadlessTests.WaitForAsync(() => Marker(minimap).Height >= 14);
             Assert.InRange(Marker(minimap).Center.Y / minimap.Bounds.Height, .7, .8);
 
-            var text = (TextBox)Field(log, "_logText");
-            text.Focus();
+            var text = PageEditor(Assert.IsType<LogView>(log));
+            text.TextArea.Focus();
             window.KeyPress(Key.PageUp, RawInputModifiers.None, PhysicalKey.PageUp, "");
             window.KeyRelease(Key.PageUp, RawInputModifiers.None, PhysicalKey.PageUp, "");
             await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == (startLine - 81L) * row.Length);
