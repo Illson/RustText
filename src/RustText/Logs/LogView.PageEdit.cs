@@ -114,6 +114,7 @@ internal sealed partial class LogView
             return;
         }
 
+        if (_levelFilterViewport?.IsVisible == true) CloseInlineLevelFilter();
         _busy = true;
         RefreshButtons();
         try

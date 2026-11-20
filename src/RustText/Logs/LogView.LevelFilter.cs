@@ -269,8 +269,15 @@ internal sealed partial class LogView
 
     private void UpdateFilteredMinimap(FilterPage page)
     {
-        if (page.Rows.Count == 0 || _filterSnapshotLength <= _hiddenOffset) return;
+        if (_filterSnapshotLength <= _hiddenOffset) return;
         var range = Math.Max(1, _filterSnapshotLength - _hiddenOffset);
+        if (page.Rows.Count == 0)
+        {
+            var offset = Math.Clamp(_filterCurrent.Offset - _hiddenOffset, 0, range);
+            var markerStart = offset / (double)range;
+            _minimap.UpdateViewport(markerStart, Math.Min(1, markerStart + 1d / range));
+            return;
+        }
         var start = Math.Max(0, page.Rows[0].StartOffset - _hiddenOffset);
         var end = Math.Max(start, page.Rows[^1].EndOffset - _hiddenOffset);
         _minimap.UpdateViewport(start / (double)range, end / (double)range);
@@ -293,8 +300,7 @@ internal sealed partial class LogView
             }, token);
             if (_closed || request != _minimapRequest || generation != _filterGeneration
                 || _levelFilterViewport?.IsVisible != true || !ReferenceEquals(reader, _reader)) return;
-            _filterHistory.Clear();
-            _filterNext = null;
+            if (_filterCurrent.Offset != aligned) _filterHistory.Push(_filterCurrent);
             await LoadFilteredPageAsync(new FilterCursor(Math.Clamp(aligned, _hiddenOffset, length)));
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
