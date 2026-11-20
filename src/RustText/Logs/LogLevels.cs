@@ -24,8 +24,45 @@ internal static partial class LogLevels
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex HeaderLevel();
 
+    [GeneratedRegex(@"^\s*\[?\d{4}[-/.]\d\d[-/.]\d\d[T ]\d\d:\d\d:\d\d\b", RegexOptions.CultureInvariant)]
+    private static partial Regex DatedHeader();
+
     internal static bool IsLogPath(string? path) =>
         string.Equals(Path.GetExtension(path), ".log", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool HasLogRecords(string path, TextEncodingKind? encoding, CancellationToken token)
+    {
+        const int sampleBytes = 16 * 1024;
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, LogDataReader.DetectEncoding(file, encoding));
+        var sample = reader.ReadPage(0, pageSize: 32, maxFrameBytes: sampleBytes, maxPageBytes: sampleBytes, cancellationToken: token);
+        if (sample.Rows.Any(row => row.Text.Contains('\0'))) return false;
+
+        var nonEmpty = 0;
+        var recognized = 0;
+        foreach (var row in sample.Rows)
+        {
+            if (row.ContinuesLine || string.IsNullOrWhiteSpace(row.Text)) continue;
+            nonEmpty++;
+            var text = row.Text.TrimStart();
+            var level = Classify(text);
+            if (level != LogLevel.Other)
+            {
+                // An explicit severity prefix can identify a log after its first record.
+                var prefixEnd = text[0] switch
+                {
+                    '[' => text.IndexOf(']', 0, Math.Min(32, text.Length)),
+                    '<' => text.IndexOf('>', 0, Math.Min(5, text.Length)),
+                    _ => -1
+                };
+                if (prefixEnd > 0 && Classify(text[..(prefixEnd + 1)]) != LogLevel.Other)
+                    return true;
+            }
+            if (level != LogLevel.Other || DatedHeader().IsMatch(text)) recognized++;
+        }
+
+        return recognized >= 2 && recognized * 2 >= nonEmpty;
+    }
 
     internal static LogLevel Classify(string text)
     {

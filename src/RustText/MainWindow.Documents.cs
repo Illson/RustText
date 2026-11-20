@@ -82,8 +82,7 @@ public partial class MainWindow
         {
             try
             {
-                var preferLog = asLog is null && LogLevels.IsLogPath(path);
-                if (await PrepareOpenAsync(path, asLog == true, encoding, preferLog: preferLog) is not { } request) continue;
+                if (await PrepareOpenAsync(path, asLog, encoding) is not { } request) continue;
                 last = request.Tab;
                 if (request.IsNew || encoding is not null) pending.Add(request);
             }
@@ -107,8 +106,7 @@ public partial class MainWindow
         return request.Tab;
     }
 
-    private async Task<OpenRequest?> PrepareOpenAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages = false,
-        bool preferLog = false)
+    private async Task<OpenRequest?> PrepareOpenAsync(string path, bool? asLog, TextEncodingKind? encoding, bool editPages = false)
     {
         var fullPath = Path.GetFullPath(path);
         var file = new FileInfo(fullPath);
@@ -117,7 +115,8 @@ public partial class MainWindow
             throw new FileNotFoundException($"Файл не найден. {fullPath}", fullPath);
         }
 
-        var openAsLog = asLog || (preferLog && file.Length <= LargeFilePromptBytes);
+        var openAsLog = asLog ?? (file.Length <= LargeFilePromptBytes && await ShouldOpenAsLogAsync(fullPath, encoding));
+        if (_closed || _closing) return null;
         var mode = editPages ? FileOpenMode.PagedEditor : openAsLog ? FileOpenMode.Log : FileOpenMode.Editor;
         if (mode == FileOpenMode.Editor)
         {
@@ -153,6 +152,17 @@ public partial class MainWindow
         tab.Item.Content = new TextBlock { Text = "Ожидание загрузки…", Margin = new Thickness(18) };
         UpdateTab(tab);
         return new(tab, true, mode);
+    }
+
+    private async Task<bool> ShouldOpenAsLogAsync(string path, TextEncodingKind? encoding)
+    {
+        if (LogLevels.IsLogPath(path)) return true;
+        if (!string.Equals(Path.GetExtension(path), ".txt", StringComparison.OrdinalIgnoreCase)) return false;
+        if (_tabs.Values.Any(tab => tab.OpensAsLog && tab.Recovery is null && SamePath(tab.Path, path))
+            || _recent.Any(entry => entry.ViewAsLog && entry.Log?.EditPages != true && SamePath(entry.Path, path))) return true;
+
+        var token = _lifetime.Token;
+        return await Task.Run(() => LogLevels.HasLogRecords(path, encoding, token), token);
     }
 
     private async Task<bool?> ChooseLargeFileModeAsync(FileInfo file)

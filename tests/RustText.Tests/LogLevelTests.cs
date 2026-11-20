@@ -34,6 +34,79 @@ public sealed class LogLevelTests
     public void ClassifiesLevelFromRecordHeader(string row, string expected) =>
         Assert.Equal(expected, LogLevels.Classify(row).ToString());
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HasLogRecordsRecognizesTimestampedSeverityRowsWithUtf16Bom(bool bigEndian)
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "events.txt");
+        var encoding = bigEndian ? Encoding.BigEndianUnicode : Encoding.Unicode;
+        File.WriteAllText(path,
+            "2026-11-19 12:58:42.001 [worker] WARN request\r\n"
+            + "2026-11-19 12:58:42.002 [worker] INFO started\r\n"
+            + "2026-11-19 12:58:42.003 [worker] ERROR failed\r\n",
+            encoding);
+
+        Assert.True(LogLevels.HasLogRecords(path, encoding: null, token: CancellationToken.None));
+    }
+
+    [Fact]
+    public void HasLogRecordsRecognizesDatedRecordsWithoutSeverity()
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "timestamps.txt");
+        File.WriteAllText(path, "2026-11-19 12:58:42 opened connection\n2026-11-19 12:58:43 closed connection\n");
+
+        Assert.True(LogLevels.HasLogRecords(path, encoding: null, token: CancellationToken.None));
+    }
+
+    [Fact]
+    public void HasLogRecordsDoesNotInferLogFromOneOrdinaryErrorSentence()
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "prose.txt");
+        File.WriteAllText(path,
+            "Error handling is described in this section.\n"
+            + "The next paragraph explains how to recover a document.\n"
+            + "Examples follow in the appendix.\n");
+
+        Assert.False(LogLevels.HasLogRecords(path, encoding: null, token: CancellationToken.None));
+    }
+
+    [Fact]
+    public void HasLogRecordsDoesNotInferLogFromOneLooseLevelFieldInProse()
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "settings-guide.txt");
+        File.WriteAllText(path,
+            "This manual uses the level=info setting as an example.\n"
+            + "The remaining paragraphs describe configuration options.\n"
+            + "A reference table appears at the end.\n");
+
+        Assert.False(LogLevels.HasLogRecords(path, encoding: null, token: CancellationToken.None));
+    }
+
+    [Fact]
+    public void HasLogRecordsDoesNotScanPastTheFirstSixteenKiB()
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "late-records.txt");
+        File.WriteAllText(path, new string('x', 16 * 1024) + "\n[ERROR] late record\n[INFO] another late record\n");
+
+        Assert.False(LogLevels.HasLogRecords(path, encoding: null, token: CancellationToken.None));
+    }
+
+    [Fact]
+    public void HasLogRecordsAcceptsOneExplicitBracketedSeverityRecord()
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "single-record.txt");
+        File.WriteAllText(path, "[ERROR] service failed during startup\n");
+
+        Assert.True(LogLevels.HasLogRecords(path, encoding: null, token: CancellationToken.None));
+    }
+
     [Fact]
     public void FilterKeepsMultiFrameRowsAcrossPagesAndFileEncodings()
     {
