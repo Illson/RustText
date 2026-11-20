@@ -1516,6 +1516,11 @@ internal sealed partial class LogView : UserControl, IDisposable
             {
                 var dateSpan = date.ValueSpan;
                 var timeSpan = time.ValueSpan;
+                if (timeSpan.Length > 16)
+                {
+                    timestamp = default;
+                    return false;
+                }
                 dateSpan.CopyTo(value);
                 value[dateSpan.Length] = ' ';
                 timeSpan.CopyTo(value[(dateSpan.Length + 1)..]);
@@ -1525,6 +1530,11 @@ internal sealed partial class LogView : UserControl, IDisposable
             else
             {
                 var clockSpan = clock.ValueSpan;
+                if (clockSpan.Length > 16)
+                {
+                    timestamp = default;
+                    return false;
+                }
                 clockSpan.CopyTo(value);
                 length = clockSpan.Length;
                 formats = TimestampClockFormats;

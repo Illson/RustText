@@ -246,7 +246,9 @@ internal sealed class LogDataReader
             var pageEnd = Math.Min(bytes.Length, maxPageBytes);
             var rows = new List<LogRow>(pageSize);
             var inputStartsWithinLine = alignedOffset > _bomLength
-                && !IsNewlineBefore(bytes, (int)(alignedOffset - readOffset));
+                && (scan?.TryGetExpectedStartsWithinLine(requestedOffset, out var expectedStartsWithinLine) == true
+                    ? expectedStartsWithinLine
+                    : !IsNewlineBefore(handle, alignedOffset));
 
             while (rows.Count < pageSize && position < pageEnd)
             {
@@ -354,6 +356,7 @@ internal sealed class LogDataReader
         private bool _disposed;
         private bool _hasExpectedOffset;
         private long _expectedOffset;
+        private bool _expectedStartsWithinLine;
         private readonly LogDataReader reader;
         private readonly int maxPageBytes;
 
@@ -372,6 +375,7 @@ internal sealed class LogDataReader
                 cancellationToken, endOffset, _reuseWindow ? this : null);
             _expectedOffset = page.NextOffset;
             _hasExpectedOffset = true;
+            _expectedStartsWithinLine = page.Rows.Count > 0 && page.Rows[^1].IsTruncated;
             // A page limited by bytes already used most of its window. Only retain
             // a window when the preceding page stopped at the row limit early.
             _reuseWindow = page.Rows.Count == DefaultPageSize
@@ -384,6 +388,12 @@ internal sealed class LogDataReader
         }
 
         internal bool IsExpectedOffset(long offset) => _hasExpectedOffset && offset == _expectedOffset;
+
+        internal bool TryGetExpectedStartsWithinLine(long offset, out bool startsWithinLine)
+        {
+            startsWithinLine = _expectedStartsWithinLine;
+            return IsExpectedOffset(offset);
+        }
 
         internal ReadOnlySpan<byte> ReadWindow(SafeFileHandle handle, long offset, int length, long observedLength,
             CancellationToken cancellationToken)

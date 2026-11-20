@@ -61,6 +61,23 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Fact]
+    public void TryReadTimestampSkipsExcessFractionAndAcceptsSupportedForms()
+    {
+        var parser = typeof(LogView).GetMethod("TryReadTimestamp", BindingFlags.Static | BindingFlags.NonPublic)!;
+        DateTime? Parse(string value)
+        {
+            object?[] arguments = [value, null];
+            var parsed = (bool)parser.Invoke(null, arguments)!;
+            return parsed ? (DateTime)arguments[1]! : null;
+        }
+
+        Assert.Null(Parse("2026-11-20T12:00:00.123456789 [INFO] too precise"));
+        Assert.Equal(new DateTime(2026, 11, 20, 12, 0, 0, 250), Parse("2026-11-20T12:00:00.250 [INFO] T separator")!.Value);
+        Assert.Equal(new DateTime(2026, 11, 20, 12, 0, 0, 250), Parse("2026-11-20 12:00:00.250 [INFO] space separator")!.Value);
+        Assert.Equal(TimeSpan.FromHours(12) + TimeSpan.FromMilliseconds(250), Parse("12:00:00.250 [INFO] clock only")?.TimeOfDay);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
