@@ -1227,6 +1227,33 @@ public sealed class LogUiTests
         });
     }
 
+    [Fact]
+    public Task SequentialSearchHonorsSnapshotAndResumesAtTheByteBudget() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "bounded.log");
+        var prefix = string.Concat(Enumerable.Repeat("x\n", 240));
+        await File.WriteAllTextAsync(path, prefix + "needle original\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var snapshot = log.CaptureSearchSnapshot();
+            await File.AppendAllTextAsync(path, "needle appended\n");
+            var options = new SearchOptions("needle", false, false, false);
+
+            var first = await log.SearchSnapshotAsync(snapshot, options, null, 32, CancellationToken.None, maxScanBytes: 322);
+            Assert.Empty(first.Hits);
+            Assert.True(first.HasMore);
+            Assert.Equal(322L, Assert.IsType<LogSearchCursor>(first.NextCursor).Offset);
+
+            var last = await log.SearchSnapshotAsync(snapshot, options, first.NextCursor, 32, CancellationToken.None);
+            var hit = Assert.Single(last.Hits);
+            Assert.Equal((long)prefix.Length, hit.Offset);
+            Assert.Equal("needle original", hit.Preview);
+            Assert.False(last.HasMore);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     private static async Task<(Window Window, LogView Log)> ShowLogAsync(string path, LogTabState? state)
     {
         var log = new LogView(path, state: state);
