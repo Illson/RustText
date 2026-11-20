@@ -635,7 +635,7 @@ public partial class MainWindow
         else _ = DetachEditor(tab);
         log.SetTextSize(_fontSize);
         tab.Log = log;
-        tab.Encoding = log.DetectedEncoding;
+        if (draftName is null) tab.Encoding = log.DetectedEncoding;
         tab.OpeningPage = !log.InitialPageLoad.IsCompleted;
         if (tab.OpeningPage)
         {

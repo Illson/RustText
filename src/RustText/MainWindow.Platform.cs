@@ -94,7 +94,7 @@ public partial class MainWindow
         var matches = new ListBox { MinHeight = 155, MaxHeight = 400 };
         var status = new TextBlock { Foreground = FocusTheme.Muted };
         var body = DialogPanel(query, matches, status);
-        var dialog = Dialog("Вывести окно на передний план", body, 650);
+        var dialog = Dialog("Найти окно процесса", body, 650);
         void Find()
         {
             var term = query.Text?.Trim() ?? "";

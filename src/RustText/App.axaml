@@ -3,6 +3,7 @@
              xmlns:chrome="using:Avalonia.Controls.Chrome"
              xmlns:aeRendering="using:AvaloniaEdit.Rendering"
              xmlns:aeEditing="using:AvaloniaEdit.Editing"
+             xmlns:editor="using:RustText.Demo.Editor"
              xmlns:local="using:RustText.Demo"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
@@ -41,6 +42,56 @@
             </Style>
         </ControlTheme>
 
+        <ControlTheme x:Key="ViewportScrollThumb" TargetType="Thumb">
+            <Setter Property="MinHeight" Value="18" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Opacity" Value="0.2" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Panel Background="Transparent">
+                        <Border Name="Grip" Background="White"
+                                Width="7" HorizontalAlignment="Center" CornerRadius="3.5" />
+                    </Panel>
+                </ControlTemplate>
+            </Setter>
+            <Style Selector="^:pointerover">
+                <Setter Property="Opacity" Value="0.32" />
+            </Style>
+            <Style Selector="^:pressed">
+                <Setter Property="Opacity" Value="0.42" />
+            </Style>
+        </ControlTheme>
+
+        <ControlTheme x:Key="{x:Type editor:ViewportScrollBar}" TargetType="editor:ViewportScrollBar">
+            <Setter Property="Width" Value="13" />
+            <Setter Property="ContextFlyout" Value="{DynamicResource VerticalScrollBarContextFlyout}" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Panel Background="{x:Static local:FocusTheme.Editor}">
+                        <Border Name="Rail" Background="#19FFFFFF"
+                                Width="7" Margin="0,4" HorizontalAlignment="Center" CornerRadius="3.5"
+                                IsHitTestVisible="False" />
+                        <Track Margin="0,4" Orientation="Vertical" IsDirectionReversed="True"
+                               Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                               ViewportSize="{TemplateBinding ViewportSize}" Value="{TemplateBinding Value, Mode=TwoWay}"
+                               DeferThumbDrag="{TemplateBinding ScrollViewer.IsDeferredScrollingEnabled}">
+                            <Track.DecreaseButton>
+                                <RepeatButton Name="PART_PageUpButton" Focusable="False"
+                                              Theme="{DynamicResource FluentScrollBarPageButton}"
+                                              AutomationProperties.Name="Страница вверх" />
+                            </Track.DecreaseButton>
+                            <Track.IncreaseButton>
+                                <RepeatButton Name="PART_PageDownButton" Focusable="False"
+                                              Theme="{DynamicResource FluentScrollBarPageButton}"
+                                              AutomationProperties.Name="Страница вниз" />
+                            </Track.IncreaseButton>
+                            <Thumb Theme="{StaticResource ViewportScrollThumb}" AutomationProperties.Name="Положение прокрутки" />
+                        </Track>
+                    </Panel>
+                </ControlTemplate>
+            </Setter>
+        </ControlTheme>
+
         <ControlTheme x:Key="{x:Type local:WorkspaceTabs}" TargetType="local:WorkspaceTabs">
             <Setter Property="ItemsPanel">
                 <ItemsPanelTemplate>
@@ -53,12 +104,33 @@
                 <ControlTemplate>
                     <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
                         <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,5,8,0">
-                            <Grid ColumnDefinitions="*,Auto">
-                                <ScrollViewer Name="TabHeaderScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                                <Grid.Styles>
+                                    <Style Selector="Track#TabScrollPosition[Maximum=0]">
+                                        <Setter Property="IsVisible" Value="False" />
+                                    </Style>
+                                </Grid.Styles>
+                                <ScrollViewer Name="TabHeaderScroll" AllowAutoHide="False"
+                                              HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
                                     <ItemsPresenter Name="PART_ItemsPresenter" ItemsPanel="{TemplateBinding ItemsPanel}" />
                                 </ScrollViewer>
                                 <ContentPresenter Grid.Column="1" Content="{TemplateBinding HeaderActions}"
                                                   VerticalAlignment="Center" Margin="4,0,0,3" />
+                                <Track Name="TabScrollPosition" Grid.Row="1" Height="2" Orientation="Horizontal"
+                                       ClipToBounds="True" IsHitTestVisible="False" Opacity="0.65"
+                                       Maximum="{CompiledBinding #TabHeaderScroll.ScrollBarMaximum.X, Mode=OneWay}"
+                                       ViewportSize="{CompiledBinding #TabHeaderScroll.Viewport.Width, Mode=OneWay}"
+                                       Value="{CompiledBinding #TabHeaderScroll.Offset.X, Mode=OneWay}">
+                                    <Track.Thumb>
+                                        <Thumb>
+                                            <Thumb.Template>
+                                                <ControlTemplate>
+                                                    <Border Background="{x:Static local:FocusTheme.Muted}" CornerRadius="1" />
+                                                </ControlTemplate>
+                                            </Thumb.Template>
+                                        </Thumb>
+                                    </Track.Thumb>
+                                </Track>
                             </Grid>
                         </Border>
                         <Panel Grid.Row="1" ClipToBounds="True">
@@ -160,6 +232,21 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
             <Setter Property="FontSize" Value="13" />
         </Style>
+        <Style Selector="ListBoxItem.settings-section">
+            <Setter Property="Margin" Value="0,0,0,3" />
+            <Setter Property="Padding" Value="10,8" />
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderThickness" Value="2,0,0,0" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="CornerRadius" Value="4" />
+        </Style>
+        <Style Selector="ListBoxItem.settings-section:selected /template/ ContentPresenter#PART_ContentPresenter,
+                         ListBoxItem.settings-section:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Accent}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
         <Style Selector="TextBox.focus-log-editor">
             <Setter Property="CornerRadius" Value="0" />
             <Setter Property="BorderThickness" Value="0" />
@@ -252,9 +339,11 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
         </Style>
         <Style Selector="Button.focus-primary">
-            <Setter Property="Background" Value="{x:Static local:FocusTheme.Accent}" />
-            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Deep}" />
-            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ActionBorder}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
             <Setter Property="FontWeight" Value="SemiBold" />
         </Style>
         <Style Selector="Button.focus-outline">
@@ -271,8 +360,45 @@
             <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ActionBorder}" />
         </Style>
         <Style Selector="Button.focus-primary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-            <Setter Property="Background" Value="{x:Static local:FocusTheme.AccentHover}" />
-            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Deep}" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ControlOutline}" />
+        </Style>
+        <Style Selector="Button.focus-primary:pressed /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ControlOutline}" />
+        </Style>
+        <Style Selector="CheckBox:not(:checked):not(:indeterminate) /template/ Border#NormalRectangle">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Field}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Muted}" />
+        </Style>
+        <Style Selector="CheckBox:checked /template/ Border#NormalRectangle,
+                         CheckBox:indeterminate /template/ Border#NormalRectangle">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Muted}" />
+        </Style>
+        <Style Selector="CheckBox:checked /template/ Path#CheckGlyph,
+                         CheckBox:indeterminate /template/ Path#CheckGlyph">
+            <Setter Property="Fill" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
+        <Style Selector="CheckBox:not(:checked):not(:indeterminate):pointerover /template/ Border#NormalRectangle,
+                         CheckBox:pressed /template/ Border#NormalRectangle">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+        </Style>
+        <Style Selector="CheckBox:pointerover /template/ Border#NormalRectangle,
+                         CheckBox:pressed /template/ Border#NormalRectangle">
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ControlOutline}" />
+        </Style>
+        <Style Selector="CheckBox:disabled /template/ Border#NormalRectangle">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Field}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Border}" />
+        </Style>
+        <Style Selector="CheckBox:disabled /template/ Path#CheckGlyph">
+            <Setter Property="Fill" Value="{x:Static local:FocusTheme.Muted}" />
+        </Style>
+        <Style Selector="Window.focus-dialog TextBox:focus /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ControlOutline}" />
         </Style>
         <Style Selector="Button.focus-danger">
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Danger}" />

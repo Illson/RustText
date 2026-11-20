@@ -28,6 +28,7 @@ internal sealed class ConsoleCapture : IDisposable
     public string Path { get; }
     public string Title { get; }
     public Task<Exception?> Completion { get; }
+    public bool IsDisposed => _disposed;
 
     public static async Task<ConsoleCapture> ConnectAsync(int processId, string title, CancellationToken token)
     {
@@ -80,7 +81,12 @@ internal sealed class ConsoleCapture : IDisposable
                 await writer.FlushAsync(token).ConfigureAwait(false);
                 _ready.TrySetResult();
             }
-            throw new IOException("Чтение вывода консоли завершено.");
+            if (worker is null) throw new IOException("Чтение вывода консоли завершено.");
+            await worker.WaitForExitAsync(token).ConfigureAwait(false);
+            if (!_ready.Task.IsCompletedSuccessfully)
+                throw new IOException("Чтение вывода консоли завершено до получения первого кадра.");
+            if (worker.ExitCode != 0) throw new IOException("Чтение вывода консоли завершено с ошибкой.");
+            return null;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -154,6 +160,7 @@ internal sealed class ConsoleCapture : IDisposable
                 var initial = true;
                 while (!disconnected.IsCompleted)
                 {
+                    var sourceExited = target.HasExited;
                     var rows = buffer.ReadNewRows(CancellationToken.None);
                     if (initial || rows.Length > 0)
                     {
@@ -162,7 +169,7 @@ internal sealed class ConsoleCapture : IDisposable
                         output.Flush();
                         initial = false;
                     }
-                    if (target.HasExited || disconnected.Wait(PollInterval)) break;
+                    if (sourceExited || disconnected.Wait(PollInterval)) break;
                 }
                 return 0;
             }

@@ -22,8 +22,6 @@ internal sealed class ViewportScrollBar : ScrollBar
         AutomationProperties.SetName(this, "Вертикальная прокрутка");
     }
 
-    protected override Type StyleKeyOverride => typeof(ScrollBar);
-
     internal void SetOwner(ScrollViewer? owner)
     {
         if (ReferenceEquals(_owner, owner)) return;
