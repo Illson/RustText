@@ -54,7 +54,7 @@
                     <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
                         <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,5,8,0">
                             <Grid ColumnDefinitions="*,Auto">
-                                <ScrollViewer Name="TabHeaderScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                                <ScrollViewer Name="TabHeaderScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
                                     <ItemsPresenter Name="PART_ItemsPresenter" ItemsPanel="{TemplateBinding ItemsPanel}" />
                                 </ScrollViewer>
                                 <ContentPresenter Grid.Column="1" Content="{TemplateBinding HeaderActions}"
