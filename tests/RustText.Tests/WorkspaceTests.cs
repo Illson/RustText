@@ -2271,15 +2271,14 @@ public sealed class WorkspaceTests
             var show = CallAsync(window, "ShowSettingsAsync");
             await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any());
             var dialog = Assert.Single(window.OwnedWindows);
-            await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<ComboBox>().Any());
-            var boxes = dialog.GetVisualDescendants().OfType<ComboBox>().ToArray();
-            var mode = boxes.Single(box => box.Items.Cast<object>().Contains("Выбранное пространство"));
+            await SelectSettingsSectionAsync(dialog, "SettingsSectionWorkspaces");
+            var mode = DialogControl<ComboBox>(dialog, "SettingsWorkspaceStartupMode");
             mode.SelectedIndex = 1;
-            var spaces = boxes.Single(box => box.Items.OfType<WorkspaceEntry>().Any());
+            var spaces = DialogControl<ComboBox>(dialog, "SettingsStartupWorkspace");
             Assert.True(spaces.IsEnabled);
             spaces.SelectedItem = spaces.Items.OfType<WorkspaceEntry>().Single(entry => entry.Name == "Logs");
             await HeadlessTests.WaitForAsync(() => spaces.GetVisualDescendants().OfType<TextBlock>().Any(label => label.Text == "Logs"));
-            Click(dialog.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "Сохранить")));
+            Click(DialogControl<Button>(dialog, "SettingsSave"));
             await show;
             var persisted = await StorageService.OpenForTesting(profile).LoadSettingsAsync();
             Assert.Equal(WorkspaceStartupMode.Specific, persisted.WorkspaceStartupMode);
@@ -2729,9 +2728,9 @@ public sealed class WorkspaceTests
             await HeadlessTests.WaitForAsync(() => Read<TextBlock>(tab, "Label").Text == "Моя вкладка");
             var settingsTask = CallAsync(window, "ShowSettingsAsync");
             var settings = Assert.Single(window.OwnedWindows);
-            await HeadlessTests.WaitForAsync(() => settings.GetVisualDescendants().OfType<CheckBox>().Any());
-            settings.GetVisualDescendants().OfType<CheckBox>().Single(box => Equals(box.Content, "Число строк у вкладок без имени")).IsChecked = false;
-            Click(settings.GetVisualDescendants().OfType<Button>().Single(b => Equals(b.Content, "Сохранить")));
+            await SelectSettingsSectionAsync(settings, "SettingsSectionDraftArchive");
+            DialogControl<CheckBox>(settings, "SettingsShowDraftLines").IsChecked = false;
+            Click(DialogControl<Button>(settings, "SettingsSave"));
             await settingsTask;
             Assert.False(count.IsVisible);
             await CallAsync(window, "CloseTabAsync", tab);
@@ -2941,6 +2940,18 @@ public sealed class WorkspaceTests
     }
 
     private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+    private static async Task SelectSettingsSectionAsync(Window dialog, string id)
+    {
+        await HeadlessTests.WaitForAsync(() => dialog.GetVisualDescendants().OfType<ListBoxItem>()
+            .Any(item => AutomationProperties.GetAutomationId(item) == id));
+        DialogControl<ListBoxItem>(dialog, id).IsSelected = true;
+    }
+
+    private static T DialogControl<T>(Window dialog, string id) where T : Control =>
+        dialog.GetVisualDescendants().OfType<T>()
+            .Single(control => AutomationProperties.GetAutomationId(control) == id);
+
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
     private static object Field(MainWindow window, string name) => typeof(MainWindow).GetField(name, Private)!.GetValue(window)!;
     private static object? Invoke(MainWindow window, string name, params object?[] args) =>
