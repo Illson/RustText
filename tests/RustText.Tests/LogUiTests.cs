@@ -481,9 +481,9 @@ public sealed class LogUiTests
             await InvokeTask(window, "OpenPathAsync", path, true, null);
             var log = ActiveLog(window);
             var text = (TextBox)Field(log, "_logText");
-            var minimap = (Control)Field(log, "_minimap");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
             await HeadlessTests.WaitForAsync(() => Page(log) is not null && minimap.Bounds.Height > 100
-                && ((System.Collections.ICollection)Field(log, "_miniSamples")).Count == 64);
+                && minimap.Widths.Length == 32);
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));
             Assert.Contains("Строки 1–80", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
             var gutter = (TextBlock)Field(log, "_lineGutterText");

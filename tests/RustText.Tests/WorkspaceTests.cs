@@ -29,12 +29,44 @@ public sealed class WorkspaceTests
     [Theory]
     [InlineData(1, 700, 1)]
     [InlineData(20, 700, 20)]
-    [InlineData(300, 700, 160)]
-    [InlineData(300, 1800, 160)]
+    [InlineData(300, 700, 64)]
+    [InlineData(300, 1800, 64)]
     [InlineData(0, 700, 0)]
+    [InlineData(4000, 120, 20)]
     [InlineData(20, 1, 0)]
     public void TextMinimapUsesAtMostOneSamplePerDocumentLine(int lineCount, double height, int expected) =>
         Assert.Equal(expected, DocumentMinimap.GetRowCount(lineCount, height));
+
+    [Fact]
+    public Task TypingInLargeDocumentUpdatesWatermarkWithoutCopyingTheText() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "");
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.Watermark = "Введите текст";
+            await HeadlessTests.WaitForAsync(() => editor.GetVisualDescendants().OfType<TextBlock>()
+                .Any(block => block.Name == "PART_Watermark"));
+            var watermark = editor.GetVisualDescendants().OfType<TextBlock>().Single(block => block.Name == "PART_Watermark");
+            Assert.True(watermark.IsVisible);
+            Assert.Equal(editor.Watermark, watermark.Text);
+
+            editor.Text = string.Concat(Enumerable.Repeat(new string('я', 80) + "\n", 12_000));
+            editor.CaretOffset = editor.Document.TextLength;
+            editor.TextArea.PerformTextInput("ж");
+            Assert.False(watermark.IsVisible);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 4; i++) editor.TextArea.PerformTextInput("ж");
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.True(allocated < editor.Document.TextLength * sizeof(char), $"Allocated {allocated} bytes for four edits.");
+            Assert.Equal("жжжжж", editor.Document.GetText(editor.CaretOffset - 5, 5));
+
+            editor.Clear();
+            Assert.True(watermark.IsVisible);
+        }
+        finally { await CloseAsync(window); }
+    });
 
     [Fact]
     public Task ClosingDetachedWindowRestoresInputInRemainingWindow() => HeadlessTests.RunAsync(async profile =>

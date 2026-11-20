@@ -65,7 +65,6 @@ internal sealed partial class LogView : UserControl, IDisposable
     private readonly DispatcherTimer _searchDebounce = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly List<long> _previousOffsets = [];
     private readonly ObservableCollection<SearchResult> _searchResults = [];
-    private readonly List<string> _miniSamples = [];
     private readonly TextBlock _fileLabel = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBox _logText = new()
     {
@@ -181,6 +180,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private bool _searchHasMore;
     private bool _indexBuilding;
     private bool _minimapLoading;
+    private bool _minimapRefreshPending;
     private bool _minimapDragging;
     private double? _pendingMinimapRatio;
     private long _minimapRequest;
@@ -505,7 +505,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _searchStatusText.Text = string.Empty;
         _searchResults.Clear();
         _searchResultButtons.Children.Clear();
-        _miniSamples.Clear();
+        _minimap.Widths = [];
         _previousOffsets.Clear();
         _skippedSearchLines.Clear();
         _displayRowStarts = [];
@@ -604,7 +604,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         content.Children.Add(_logText);
         Grid.SetColumn(_levelBands, 1);
         content.Children.Add(_levelBands);
-        _minimap.Samples = _miniSamples;
         AutomationProperties.SetName(_minimap, "Прокрутка лога");
         AutomationProperties.SetAutomationId(_minimap, "LogMinimap");
         Grid.SetColumn(_minimap, 2);
@@ -2121,15 +2120,17 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async void LoadMinimapSamples()
     {
-        if (_closed || _minimapLoading)
+        if (_closed) return;
+        if (_minimapLoading)
         {
+            _minimapRefreshPending = true;
             return;
         }
+        _minimapRefreshPending = false;
         var length = _file.Length;
         if (length == 0)
         {
-            _miniSamples.Clear();
-            _minimap.InvalidateVisual();
+            _minimap.Widths = [];
             return;
         }
         _minimapLoading = true;
@@ -2138,14 +2139,13 @@ internal sealed partial class LogView : UserControl, IDisposable
         var start = _hiddenOffset;
         try
         {
-            var samples = await Task.Run(() => BuildMinimapSamples(reader, start, length, _closing.Token), _closing.Token);
+            var token = _closing.Token;
+            var widths = await Task.Run(() => reader.ReadMinimapWidths(start, length, token), token);
             if (_closed || generation != _dataGeneration || start != _hiddenOffset)
             {
                 return;
             }
-            _miniSamples.Clear();
-            _miniSamples.AddRange(samples);
-            _minimap.InvalidateVisual();
+            _minimap.Widths = widths;
         }
         catch (OperationCanceledException) when (_closing.IsCancellationRequested)
         {
@@ -2160,26 +2160,11 @@ internal sealed partial class LogView : UserControl, IDisposable
         finally
         {
             _minimapLoading = false;
-            if (!_closed && (generation != _dataGeneration || start != _hiddenOffset))
+            if (!_closed && (_minimapRefreshPending || generation != _dataGeneration || start != _hiddenOffset))
             {
                 Dispatcher.UIThread.Post(LoadMinimapSamples);
             }
         }
-    }
-
-    private static IReadOnlyList<string> BuildMinimapSamples(LogDataReader reader, long start, long fileLength, CancellationToken token)
-    {
-        var samples = new List<string>(64);
-        var range = Math.Max(0, fileLength - start - 1);
-        for (var index = 0; index < 64; index++)
-        {
-            token.ThrowIfCancellationRequested();
-            var pageOffset = start + (long)(range * (index / 63d));
-            var page = reader.ReadPage(pageOffset, pageSize: 1, maxFrameBytes: 256, maxPageBytes: 256, cancellationToken: token);
-            var text = page.Rows.FirstOrDefault()?.Text ?? string.Empty;
-            samples.Add(ClipText(text, 32));
-        }
-        return samples;
     }
 
     private void RefreshButtons()

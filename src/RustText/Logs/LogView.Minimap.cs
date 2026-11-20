@@ -20,14 +20,22 @@ internal sealed partial class LogView
         _minimap.UpdateViewport(start / range, end / range);
     }
 
-    private sealed class LogMinimap : Control
+    internal sealed class LogMinimap : Control
     {
         private readonly Pen _viewportBorder = new(FocusTheme.Accent, 1);
         private double _start;
         private double _end;
         private bool _hasPage;
 
-        public IReadOnlyList<string> Samples { get; set; } = [];
+        public byte[] Widths
+        {
+            get;
+            set
+            {
+                field = value;
+                InvalidateVisual();
+            }
+        } = [];
 
         public LogMinimap()
         {
@@ -61,8 +69,11 @@ internal sealed partial class LogView
 
         public void UpdateViewport(double start, double end)
         {
-            _start = Math.Clamp(start, 0, 1);
-            _end = Math.Clamp(end, _start, 1);
+            start = Math.Clamp(start, 0, 1);
+            end = Math.Clamp(end, start, 1);
+            if (_hasPage && _start == start && _end == end) return;
+            _start = start;
+            _end = end;
             _hasPage = true;
             InvalidateVisual();
         }
@@ -74,10 +85,10 @@ internal sealed partial class LogView
             var marker = ViewportMarker;
             if (marker.Height > 0) context.FillRectangle(FocusTheme.MinimapViewport, marker);
 
-            var rowHeight = Bounds.Height / Math.Max(1, Samples.Count);
-            for (var index = 0; index < Samples.Count; index++)
+            var rowHeight = Bounds.Height / Math.Max(1, Widths.Length);
+            for (var index = 0; index < Widths.Length; index++)
             {
-                var width = Math.Clamp(Samples[index].Length, 3, 32) / 32d * Math.Max(0, Bounds.Width - 12);
+                var width = Math.Max(3, (int)Widths[index]) / (double)LogDataReader.MinimapColumns * Math.Max(0, Bounds.Width - 12);
                 context.FillRectangle(FocusTheme.LogMinimapInk, new Rect(6, (index + .5) * rowHeight, width, 1));
             }
             if (marker.Height > 0) context.DrawRectangle(null, _viewportBorder, marker);
