@@ -131,11 +131,14 @@ public sealed class SettingsSidebarTests
     {
         var menu = window.FindControl<Menu>("TopMenu")!;
         var tools = menu.Items.OfType<MenuItem>().Single(item => Header(item) == "_Инструменты");
-        var entries = tools.Items.OfType<MenuItem>().Select(Header).ToArray();
+        var rootEntries = tools.Items.OfType<MenuItem>().Select(Header).ToArray();
+        var history = tools.Items.OfType<MenuItem>().Single(item => Header(item) == "История и черновики");
+        var historyEntries = history.Items.OfType<MenuItem>().Select(Header).ToArray();
 
-        Assert.Equal(1, entries.Count(label => label == "Настройки…"));
-        Assert.Equal(1, entries.Count(label => label == "Архив черновиков…"));
-        Assert.DoesNotContain("Черновики и архив…", entries);
+        Assert.Equal(1, rootEntries.Count(label => label == "Настройки…"));
+        Assert.Equal(1, historyEntries.Count(label => label == "Архив черновиков…"));
+        Assert.DoesNotContain("Архив черновиков…", rootEntries);
+        Assert.DoesNotContain("Черновики и архив…", historyEntries);
     }
 
     private static void SelectSection(Window dialog, string automationId)
