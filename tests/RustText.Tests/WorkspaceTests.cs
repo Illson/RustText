@@ -910,6 +910,44 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task SearchAllTabsClosesLevelFilterBeforeHighlightingLogHit() => HeadlessTests.RunAsync(async profile =>
+    {
+        var logPath = Path.Combine(profile, "filtered-search.log");
+        var notesPath = Path.Combine(profile, "notes.txt");
+        await File.WriteAllTextAsync(logPath, "Info marker\nError failure\n");
+        await File.WriteAllTextAsync(notesPath, "search from this tab");
+        var window = await OpenWorkspaceAsync(logPath, notesPath);
+        try
+        {
+            var logTab = Tabs(window).Single(tab => Read<string>(tab, "Path") == logPath);
+            var log = Read<LogView>(logTab, "Log");
+            await log.InitialPageLoad;
+            await log.ShowLevelFilterAsync();
+            var logType = typeof(LogView);
+            var panel = (LogLevelFilterPanel)logType.GetField("_levelFilter", Private)!.GetValue(log)!;
+            panel.SetLevels(LogLevel.Error);
+            var filtered = (TextBox)logType.GetField("_filteredLogText", Private)!.GetValue(log)!;
+            await HeadlessTests.WaitForAsync(() => filtered.Text == "Error failure");
+            Assert.Equal(notesPath, Read<string>(ActiveTab(window), "Path"));
+
+            Invoke(window, "OpenSearchPanel", false);
+            ((TextBox)Field(window, "_searchInput")).Text = "marker";
+            ((ToggleButton)Field(window, "_allTabs")).IsChecked = true;
+            await CallAsync(window, "FindAsync");
+            var results = (ListBox)Field(window, "_searchResults");
+            results.SelectedItem = Assert.Single(results.Items.OfType<ListBoxItem>(), item =>
+                item.Content!.ToString()!.Contains("Info marker", StringComparison.Ordinal));
+
+            var filterViewport = (Control)logType.GetField("_levelFilterViewport", Private)!.GetValue(log)!;
+            await HeadlessTests.WaitForAsync(() => ReferenceEquals(ActiveTab(window), logTab)
+                && LogText(log).SelectedText == "marker");
+            Assert.False(filterViewport.IsVisible);
+            Assert.True(LogText(log).IsEffectivelyVisible);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task SearchAllTabsReloadsChangedLogPageAtSameOffsetBeforeHighlightingHit() => HeadlessTests.RunAsync(async profile =>
     {
         var logPath = Path.Combine(profile, "same-offset.log");

@@ -456,6 +456,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
         if (!IsSearchHitCurrent(snapshot, hit)) return RemoveStaleSearchHit(hit);
         if (_closed || _busy || PageNavigationBlocked) return false;
+        if (_levelFilterViewport?.IsVisible == true) CloseInlineLevelFilter();
         StopFollowingEnd();
         _activeSearchResult = _searchResults.IndexOf(hit);
         if (!DisplaysSearchHit(hit))
