@@ -7,6 +7,7 @@ namespace RustText.Tests;
 public sealed class NativePayloadBootstrapTests
 {
     private const string Hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    private static readonly string[] PayloadNames = ["libHarfBuzzSharp.dll", "libSkiaSharp.dll", "av_libglesv2.dll"];
 
     [Fact]
     public void ParsePayloadHashesAcceptsEntriesInAnyOrder()
@@ -44,5 +45,77 @@ public sealed class NativePayloadBootstrapTests
 
         Assert.True(NativePayloadBootstrap.HashMatches(path, SHA256.HashData(bytes)));
         Assert.False(NativePayloadBootstrap.HashMatches(path, SHA256.HashData("different payload"u8)));
+    }
+
+    [Fact]
+    public void IsCompleteAcceptsAValidCacheContainingAllPayloads()
+    {
+        using var directory = new TempDirectory();
+        var hashes = WritePayloads(directory.Path);
+
+        Assert.True(NativePayloadBootstrap.IsComplete(directory.Path, hashes));
+    }
+
+    [Fact]
+    public void IsCompleteRejectsACacheWithOneCorruptedPayload()
+    {
+        using var directory = new TempDirectory();
+        var hashes = WritePayloads(directory.Path);
+        File.WriteAllBytes(Path.Combine(directory.Path, "libSkiaSharp.dll"), "damaged"u8.ToArray());
+
+        Assert.False(NativePayloadBootstrap.IsComplete(directory.Path, hashes));
+    }
+
+    [Fact]
+    public void IsCompleteRethrowsOriginalFileErrorInsteadOfAggregateException()
+    {
+        using var directory = new TempDirectory();
+        var hashes = WritePayloads(directory.Path);
+        using var lockedFile = new FileStream(Path.Combine(directory.Path, "libSkiaSharp.dll"),
+            FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var error = Record.Exception(() => NativePayloadBootstrap.IsComplete(directory.Path, hashes));
+
+        Assert.IsAssignableFrom<IOException>(error);
+        Assert.IsNotType<AggregateException>(error);
+    }
+
+    [Fact]
+    public void IsCompletePreservesFirstFileErrorWhenLastPayloadIsMissing()
+    {
+        using var directory = new TempDirectory();
+        var hashes = WritePayloads(directory.Path);
+        using var lockedFile = new FileStream(Path.Combine(directory.Path, "libHarfBuzzSharp.dll"),
+            FileMode.Open, FileAccess.Read, FileShare.None);
+        File.Delete(Path.Combine(directory.Path, "av_libglesv2.dll"));
+
+        var error = Record.Exception(() => NativePayloadBootstrap.IsComplete(directory.Path, hashes));
+
+        Assert.IsAssignableFrom<IOException>(error);
+        Assert.IsNotType<AggregateException>(error);
+    }
+
+    [Fact]
+    public void IsCompleteReturnsForEarlierCorruptionBeforeLaterFileError()
+    {
+        using var directory = new TempDirectory();
+        var hashes = WritePayloads(directory.Path);
+        File.WriteAllBytes(Path.Combine(directory.Path, "libHarfBuzzSharp.dll"), "damaged"u8.ToArray());
+        using var lockedFile = new FileStream(Path.Combine(directory.Path, "libSkiaSharp.dll"),
+            FileMode.Open, FileAccess.Read, FileShare.None);
+
+        Assert.False(NativePayloadBootstrap.IsComplete(directory.Path, hashes));
+    }
+
+    private static Dictionary<string, byte[]> WritePayloads(string directory)
+    {
+        var hashes = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < PayloadNames.Length; index++)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes($"synthetic native payload {index}");
+            File.WriteAllBytes(Path.Combine(directory, PayloadNames[index]), bytes);
+            hashes.Add(PayloadNames[index], SHA256.HashData(bytes));
+        }
+        return hashes;
     }
 }
