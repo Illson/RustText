@@ -31,6 +31,54 @@ public sealed class LogUiTests
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
     [Theory]
+    [InlineData(TextEncodingKind.Utf8)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian)]
+    [InlineData(TextEncodingKind.Utf16BigEndian)]
+    public Task TimeJumpSkipsTimestampsInLongLineContinuations(TextEncodingKind encoding) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "timestamps.log");
+        var continuedLine = "entry " + new string('x', 20 * 1024) + " 2026-11-20 11:45:00.000 [INFO] continuation";
+        const string matchingLine = "2026-11-20 12:00:00 [INFO] matching entry";
+        var text = continuedLine + "\n" + matchingLine + "\n";
+        Encoding codec = encoding switch
+        {
+            TextEncodingKind.Utf16LittleEndian => new UnicodeEncoding(false, true),
+            TextEncodingKind.Utf16BigEndian => new UnicodeEncoding(true, true),
+            _ => new UTF8Encoding(true)
+        };
+        var bytes = codec.GetPreamble().Concat(codec.GetBytes(text)).ToArray();
+        await File.WriteAllBytesAsync(path, bytes);
+        var matchingOffset = codec.GetPreamble().Length + codec.GetByteCount(continuedLine + "\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(encoding, AutoRefresh: false));
+        try
+        {
+            var findTimeOffset = typeof(LogView).GetMethod("FindTimeOffset", Private)!;
+            var result = (long?)findTimeOffset.Invoke(log,
+                [new DateTime(2026, 11, 20, 11, 30, 0), CancellationToken.None]);
+
+            Assert.Equal(matchingOffset, result);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public void TryReadTimestampSkipsExcessFractionAndAcceptsSupportedForms()
+    {
+        var parser = typeof(LogView).GetMethod("TryReadTimestamp", BindingFlags.Static | BindingFlags.NonPublic)!;
+        DateTime? Parse(string value)
+        {
+            object?[] arguments = [value, null];
+            var parsed = (bool)parser.Invoke(null, arguments)!;
+            return parsed ? (DateTime)arguments[1]! : null;
+        }
+
+        Assert.Null(Parse("2026-11-20T12:00:00.123456789 [INFO] too precise"));
+        Assert.Equal(new DateTime(2026, 11, 20, 12, 0, 0, 250), Parse("2026-11-20T12:00:00.250 [INFO] T separator")!.Value);
+        Assert.Equal(new DateTime(2026, 11, 20, 12, 0, 0, 250), Parse("2026-11-20 12:00:00.250 [INFO] space separator")!.Value);
+        Assert.Equal(TimeSpan.FromHours(12) + TimeSpan.FromMilliseconds(250), Parse("12:00:00.250 [INFO] clock only")?.TimeOfDay);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -267,11 +315,11 @@ public sealed class LogUiTests
             await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Fatal fatal-row-000", StringComparison.Ordinal) == true);
             Assert.False(scrollbar.IsEffectivelyVisible);
             Assert.DoesNotContain("Info info-row-", filtered.Text);
-            Assert.False(((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            Assert.False(source.IsEffectivelyVisible);
             Assert.Equal(originalPage, source.Text);
 
             ((Button)Field(log, "_levelFilterButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await HeadlessTests.WaitForAsync(() => !filterPanel.IsVisible && ((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            await HeadlessTests.WaitForAsync(() => !filterPanel.IsVisible && source.IsEffectivelyVisible);
             Assert.True(scrollbar.IsEffectivelyVisible);
             Assert.Equal(pageOffset, Page(log)!.StartOffset);
             Assert.Equal(originalPage, source.Text);
@@ -280,6 +328,88 @@ public sealed class LogUiTests
             Assert.False(filterPanel.IsVisible);
             Assert.Equal(originalPage, source.Text);
             Assert.False(log.IsReadOnly);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task PausedTxtLogKeepsSourceLineNumbersAndNavigatesWithFilteredMinimap() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels-live.txt");
+        var original = string.Concat(Enumerable.Range(1, 160).Select(row =>
+            $"[{(row % 2 == 0 ? "ERR" : "INF")}] row-{row:D4}\n"));
+        await File.WriteAllTextAsync(path, original, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true));
+        try
+        {
+            var source = (TextBox)Field(log, "_logText");
+            source.SelectAll();
+            var sourceSelection = SelectedText(source);
+            var sourcePage = Page(log);
+            var pause = (Button)Field(log, "_pauseButton");
+            pause.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal("Продолжить", pause.Content);
+            await WriteAppend(path, Encoding.UTF8.GetBytes("[ERR] appended while paused\n"));
+
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            var panel = (LogLevelFilterPanel)Field(log, "_levelFilter");
+            panel.SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            var gutter = (TextBlock)Field(log, "_lineGutterText");
+            var gutterScroll = (ScrollViewer)Field(log, "_lineGutterScrollViewer");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("row-0160", StringComparison.Ordinal) == true
+                && minimap.Bounds.Height > 100);
+            Assert.True(gutter.IsEffectivelyVisible);
+            Assert.True(minimap.IsEffectivelyVisible);
+            Assert.DoesNotContain("[INF]", filtered.Text);
+            Assert.DoesNotContain("appended while paused", filtered.Text);
+            Assert.Equal(new[] { "2", "4", "6" }, gutter.Text!.Split(Environment.NewLine).Take(3));
+
+            var scroll = Assert.Single(filtered.GetVisualDescendants().OfType<ScrollViewer>());
+            await HeadlessTests.WaitForAsync(() => scroll.ScrollBarMaximum.Y > 96);
+            window.UpdateLayout();
+            scroll.Offset = new Vector(0, scroll.ScrollBarMaximum.Y);
+            window.UpdateLayout();
+            try
+            {
+                await HeadlessTests.WaitForAsync(() => Math.Abs(gutterScroll.Offset.Y - scroll.Offset.Y) < 1);
+            }
+            catch (OperationCanceledException)
+            {
+                var labelCount = gutter.Text?.Split(Environment.NewLine).Length;
+                Assert.Fail($"Text scroll {scroll.Offset.Y}/{scroll.ScrollBarMaximum.Y}, gutter scroll {gutterScroll.Offset.Y}/{gutterScroll.ScrollBarMaximum.Y}, gutter extent {gutterScroll.Extent.Height}, gutter viewport {gutterScroll.Viewport.Height}, labels {labelCount}.");
+            }
+            scroll.Offset = default;
+            window.UpdateLayout();
+
+            var firstMarker = minimap.ViewportMarker;
+            Point MinimapPoint() => minimap.TranslatePoint(
+                new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height * .75), window)!.Value;
+            await HeadlessTests.WaitForAsync(() => ReferenceEquals(window.InputHitTest(MinimapPoint()), minimap));
+            var target = MinimapPoint();
+            window.MouseMove(target);
+            window.MouseDown(target, MouseButton.Left);
+            Assert.True((bool)Field(log, "_minimapDragging"));
+            window.MouseUp(target, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => FirstRowNumber(filtered.Text) > 2);
+            var firstRow = FirstRowNumber(filtered.Text);
+            Assert.InRange(firstRow, 112, 128);
+            Assert.Equal(firstRow.ToString(), gutter.Text!.Split(Environment.NewLine)[0]);
+            Assert.True(minimap.ViewportMarker.Y > firstMarker.Y);
+            Assert.DoesNotContain("appended while paused", filtered.Text);
+            Assert.Same(sourcePage, Page(log));
+
+            pause.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("appended while paused", StringComparison.Ordinal) == true);
+            Assert.EndsWith(Environment.NewLine + "161", gutter.Text);
+
+            panel.SetLevels(LogLevel.All);
+            await HeadlessTests.WaitForAsync(() => source.IsEffectivelyVisible);
+            Assert.Equal(sourceSelection, SelectedText(source));
+            Assert.True(gutter.IsEffectivelyVisible);
+            Assert.True(minimap.IsEffectivelyVisible);
+            Assert.StartsWith("1" + Environment.NewLine, gutter.Text);
         }
         finally { await CloseLogAsync(window, log); }
     });
@@ -301,6 +431,105 @@ public sealed class LogUiTests
             Assert.False(((LogLevelFilterPanel)Field(log, "_levelFilter")!).IsVisible);
             Assert.Equal("pending edit", source.Text);
             Assert.False(log.IsReadOnly);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task FilteredMinimapWheelAdvancesFromCurrentFilteredPageInBothDirections() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "filtered-wheel.log");
+        var contents = string.Concat(Enumerable.Range(0, 480).Select(row =>
+            row % 2 == 0 ? $"Error row-{row:D4}\n" : $"Info row-{row:D4}\n"));
+        await File.WriteAllTextAsync(path, contents);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true
+                && minimap.Bounds.Height > 100);
+            var origin = minimap.TranslatePoint(new Point(0, 0), window) ?? throw new InvalidOperationException("Minimap is not attached.");
+            var point = origin + new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height / 2);
+
+            var firstPage = filtered.Text;
+            window.MouseWheel(point, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => filtered.Text != firstPage);
+            var secondPage = filtered.Text;
+            Assert.True(FirstRowNumber(secondPage) > FirstRowNumber(firstPage));
+
+            window.MouseWheel(point, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => filtered.Text != secondPage);
+            var thirdPage = filtered.Text;
+            Assert.True(FirstRowNumber(thirdPage) > FirstRowNumber(secondPage));
+
+            window.MouseWheel(point, new Vector(0, 1));
+            await HeadlessTests.WaitForAsync(() => filtered.Text != thirdPage);
+            Assert.True(FirstRowNumber(filtered.Text) < FirstRowNumber(thirdPage));
+
+            var beforeClick = filtered.Text;
+            window.MouseDown(point, MouseButton.Left);
+            window.MouseUp(point, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => filtered.Text != beforeClick);
+            var afterClick = filtered.Text;
+            window.MouseWheel(point, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => filtered.Text != afterClick);
+            Assert.True(FirstRowNumber(filtered.Text) > FirstRowNumber(afterClick));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task FilteredMinimapJumpToNoMatchesCanReturnToPreviousResults() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "filtered-empty-jump.log");
+        var contents = string.Concat(Enumerable.Range(0, 480).Select(row =>
+            row < 240 ? $"Error row-{row:D4}\n" : $"Info row-{row:D4}\n"));
+        await File.WriteAllTextAsync(path, contents);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            var previous = (Button)Field(log, "_previousButton");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true
+                && minimap.Bounds.Height > 100);
+            var origin = minimap.TranslatePoint(new Point(0, 0), window) ?? throw new InvalidOperationException("Minimap is not attached.");
+            var target = origin + new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height * .9);
+            window.MouseDown(target, MouseButton.Left);
+            window.MouseUp(target, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.Length == 0 && previous.IsEnabled);
+
+            previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task PageEditingClosesAnActiveLevelFilterBeforeShowingTheEditor() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "edit-filtered-page.log");
+        await File.WriteAllTextAsync(path, "Info ordinary\nError editable\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            await HeadlessTests.WaitForAsync(() => filtered.Text == "Error editable");
+            Assert.True(filtered.IsEffectivelyVisible);
+
+            await InvokeTask(log, "TogglePageEditAsync");
+            var editor = PageEditor(log);
+            var filterViewport = (Control)Field(log, "_levelFilterViewport");
+            await HeadlessTests.WaitForAsync(() => Field(log, "_pageEdit") is not null
+                && !filterViewport.IsVisible && editor.IsEffectivelyVisible);
+            Assert.Equal("Info ordinary\nError editable\n", editor.Text);
         }
         finally { await CloseLogAsync(window, log); }
     });
@@ -815,6 +1044,237 @@ public sealed class LogUiTests
     }
 
     [Fact]
+    public Task SearchEnumeratesRepeatedMatchesOnOneLineAcrossBatchesAndF3MovesBack() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "same-line-search.log");
+        await File.WriteAllTextAsync(path, string.Join(' ', Enumerable.Repeat("needle", 70)));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            var results = (System.Collections.ICollection)Field(log, "_searchResults");
+            Assert.Equal(32, results.Count);
+            Assert.True((bool)Field(log, "_searchHasMore"));
+
+            for (var index = 0; index < 33; index++)
+                await log.NavigateMatchAsync(backward: false);
+
+            Assert.Equal(64, results.Count);
+            var text = (TextBox)Field(log, "_logText");
+            Assert.Equal("needle", SelectedText(text));
+            var thirtyThirdStart = SelectionStart(text);
+            Assert.Equal(32 * 7, thirtyThirdStart);
+
+            await log.NavigateMatchAsync(backward: true);
+            Assert.Equal("needle", SelectedText(text));
+            Assert.Equal(thirtyThirdStart - 7, SelectionStart(text));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchContinuesZeroLengthRegexMatchesAcrossBatches() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "zero-width-search.log");
+        await File.WriteAllTextAsync(path, new string('a', 40));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "(?=a)";
+            ((ToggleButton)Field(log, "_regexBox")).IsChecked = true;
+            await InvokeTask(log, "SearchAsync", false);
+            var results = (System.Collections.IList)Field(log, "_searchResults");
+            Assert.Equal(32, results.Count);
+            Assert.Equal(Enumerable.Range(0, 32), results.Cast<object>().Select(hit => (int)hit.GetType().GetProperty("MatchIndex")!.GetValue(hit)!));
+
+            for (var index = 0; index < 33; index++)
+                await log.NavigateMatchAsync(backward: false);
+
+            Assert.Equal(40, results.Count);
+            Assert.False((bool)Field(log, "_searchHasMore"));
+            var text = (TextBox)Field(log, "_logText");
+            Assert.Equal(32, text.CaretIndex);
+            Assert.Empty(SelectedText(text));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchSkipsOverLimitLinesAndFindsTheNextLine() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "oversized-search.log");
+        await File.WriteAllTextAsync(path, "needle" + new string('x', 1024 * 1024) + "\nneedle after limit\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            var hit = Assert.Single(((System.Collections.IList)Field(log, "_searchResults")).Cast<object>());
+            Assert.True((long)hit.GetType().GetProperty("Offset")!.GetValue(hit)! > 1024 * 1024);
+            Assert.Contains("Пропущена строка", log.StatusText);
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Equal("needle", SelectedText((TextBox)Field(log, "_logText")));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchNavigationRejectsHitsAfterTheSourceFileChanges() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "stale-search.log");
+        await File.WriteAllTextAsync(path, "needle first\nneedle second\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            Assert.NotEmpty((System.Collections.ICollection)Field(log, "_searchResults"));
+            var originalOffset = log.CurrentOffset;
+
+            await File.WriteAllTextAsync(path, "replacement content\n");
+            await log.NavigateMatchAsync(backward: false);
+
+            Assert.Empty((System.Collections.ICollection)Field(log, "_searchResults"));
+            Assert.Equal(originalOffset, log.CurrentOffset);
+            Assert.Contains("Файл изменился", log.StatusText);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task LocalSearchReloadsChangedEditableLineBeyondThePageBoundary() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "paged-search.log");
+        var prefix = new string('x', LogDataReader.DefaultPageBytes + 32);
+        await File.WriteAllTextAsync(path, prefix + "before\n");
+        var timestamp = File.GetLastWriteTimeUtc(path);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, EditPages: true));
+        try
+        {
+            Assert.DoesNotContain("marker", PageEditor(log).Text);
+            await File.WriteAllTextAsync(path, prefix + "marker\n");
+            File.SetLastWriteTimeUtc(path, timestamp.AddSeconds(5));
+
+            ((TextBox)Field(log, "_searchBox")).Text = "marker";
+            await log.NavigateMatchAsync(backward: false);
+
+            Assert.Equal("marker", PageEditor(log).SelectedText);
+            Assert.Equal(prefix.Length, PageEditor(log).SelectionStart);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchNavigationKeepsCompletedPrefixHitsAfterAppendButRejectsOpenTailHit() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "append-search.log");
+        await File.WriteAllTextAsync(path, "needle stable\nneedle unfinished");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            Assert.Equal(2, ((System.Collections.ICollection)Field(log, "_searchResults")).Count);
+
+            await File.AppendAllTextAsync(path, " extended\nneedle appended\n");
+
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Equal("needle", SelectedText((TextBox)Field(log, "_logText")));
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Single(((System.Collections.ICollection)Field(log, "_searchResults")).Cast<object>());
+            Assert.Contains("Строка изменилась", log.StatusText);
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Equal("needle", SelectedText((TextBox)Field(log, "_logText")));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task SearchNavigationRejectsRewrittenHitOutsideAppendWitnessAfterGrowth(bool rewriteBoundary) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "append-rewrite-search.log");
+        var content = new string('a', 600) + "\nneedle center\n" + new string('z', 600) + "\n";
+        await File.WriteAllTextAsync(path, content);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            Assert.Single(((System.Collections.ICollection)Field(log, "_searchResults")).Cast<object>());
+
+            await using (var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            {
+                stream.Position = rewriteBoundary ? 600 : 601;
+                await stream.WriteAsync(Encoding.UTF8.GetBytes(rewriteBoundary ? "x" : "xxxxxx"));
+            }
+            await File.AppendAllTextAsync(path, "tail\n");
+
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Empty((System.Collections.ICollection)Field(log, "_searchResults"));
+            Assert.Contains("Строка изменилась", log.StatusText);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task AutomaticSearchStopsInsideOversizedPhysicalLineAndCursorCanContinue() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "oversized-continuation.log");
+        const string prefix = "prefix\n";
+        await File.WriteAllTextAsync(path, prefix + new string('x', 20 * 1024 * 1024) + "\nneedle after limit\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var snapshot = log.CaptureSearchSnapshot();
+            var options = new SearchOptions("needle", false, false, false);
+            var start = Encoding.UTF8.GetByteCount(prefix);
+            var automatic = await log.SearchSnapshotAsync(snapshot, options, new LogSearchCursor(start, 0), 32,
+                CancellationToken.None);
+            Assert.Empty(automatic.Hits);
+            Assert.True(automatic.HasMore);
+            Assert.NotNull(automatic.NextCursor);
+            Assert.True(automatic.NextCursor!.SkipLine);
+            Assert.Equal(start + 16 * 1024 * 1024, automatic.NextCursor.Offset);
+
+            var continued = await log.SearchSnapshotAsync(snapshot, options, automatic.NextCursor, 32,
+                CancellationToken.None, long.MaxValue);
+            var hit = Assert.Single(continued.Hits);
+            Assert.True(hit.Offset > 20 * 1024 * 1024);
+            Assert.Equal("needle after limit", hit.Preview);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchResumesAnOrdinaryLineAcrossByteAndResultLimits() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-across-batches.log");
+        await File.WriteAllTextAsync(path, "prefix-needle-needle-suffix\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var snapshot = log.CaptureSearchSnapshot();
+            var options = new SearchOptions("^prefix-needle|needle|^e", true, true, false);
+            var hits = new List<LogSearchHit>();
+            LogSearchCursor? cursor = null;
+            for (var batch = 0; batch < 12; batch++)
+            {
+                var page = await log.SearchSnapshotAsync(snapshot, options, cursor, 1, CancellationToken.None, maxScanBytes: 8);
+                hits.AddRange(page.Hits);
+                cursor = page.NextCursor;
+                if (cursor is null) break;
+            }
+            Assert.Null(cursor);
+            Assert.Equal([0, 14], hits.Select(hit => hit.MatchIndex));
+            Assert.Equal([13, 6], hits.Select(hit => hit.MatchLength));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public async Task SearchFindsCompletedAppendedUtf8AndNullBytesRemainReadable()
     {
         await HeadlessTests.RunAsync(async _ =>
@@ -882,6 +1342,33 @@ public sealed class LogUiTests
             await CloseLogAsync(afterRewrite.Window, afterRewrite.Log);
         });
     }
+
+    [Fact]
+    public Task SequentialSearchHonorsSnapshotAndResumesAtTheByteBudget() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "bounded.log");
+        var prefix = string.Concat(Enumerable.Repeat("x\n", 240));
+        await File.WriteAllTextAsync(path, prefix + "needle original\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var snapshot = log.CaptureSearchSnapshot();
+            await File.AppendAllTextAsync(path, "needle appended\n");
+            var options = new SearchOptions("needle", false, false, false);
+
+            var first = await log.SearchSnapshotAsync(snapshot, options, null, 32, CancellationToken.None, maxScanBytes: 322);
+            Assert.Empty(first.Hits);
+            Assert.True(first.HasMore);
+            Assert.Equal(322L, Assert.IsType<LogSearchCursor>(first.NextCursor).Offset);
+
+            var last = await log.SearchSnapshotAsync(snapshot, options, first.NextCursor, 32, CancellationToken.None);
+            var hit = Assert.Single(last.Hits);
+            Assert.Equal((long)prefix.Length, hit.Offset);
+            Assert.Equal("needle original", hit.Preview);
+            Assert.False(last.HasMore);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
 
     private static async Task<(Window Window, LogView Log)> ShowLogAsync(string path, LogTabState? state)
     {

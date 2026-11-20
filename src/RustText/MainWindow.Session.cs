@@ -1,4 +1,3 @@
-using System.Collections.Immutable;
 using System.Text;
 using Avalonia;
 using Avalonia.Controls;
@@ -336,13 +335,15 @@ public partial class MainWindow
         var selection = editor is null ? default : MultiCaretEditing.Primary(editor.TextArea);
         var selectionStart = selection.Start;
         var selectionLength = selection.Length;
-        var lineEndings = tab.OriginalEndings.IsDefaultOrEmpty ? null : tab.OriginalEndings.Select(value => (byte)value).ToArray();
+        var lineEndings = tab.Format.MixedEndings?.Select(value => (byte)value).ToArray();
         return new SessionTab(tab.Id, tab.Path, tab.Encoding, selectionStart, selectionLength,
             caret < selectionStart + selectionLength, editor?.HorizontalOffset ?? 0, editor?.VerticalOffset ?? 0,
             LogOffset: log?.Offset, LineCount: editor?.Document.LineCount,
-            LastWorkedMs: tab.LastWorked.ToUnixTimeMilliseconds(), LineEnding: tab.Ending,
+            LastWorkedMs: tab.LastWorked.ToUnixTimeMilliseconds(), LineEnding: tab.Format.Ending,
             LineEndingMap: lineEndings, Stamp: tab.Stamp, Log: log)
         {
+            DiskEncoding = tab.DiskEncoding != tab.Encoding ? tab.DiskEncoding : null,
+            AutoDetectEncoding = tab.AutoDetectEncoding,
             JsonValidationDisabled = tab.JsonDisabled,
             AutoRefresh = tab.AutoRefresh,
             DraftLogMode = editor is null ? null : false,
@@ -637,11 +638,11 @@ public partial class MainWindow
     {
         tab.CustomTitle = saved.CustomTitle;
         tab.Path = saved.Path;
-        tab.Encoding = saved.Encoding;
-        tab.Ending = saved.LineEnding;
+        tab.Format = EditorFileFormat.From(saved.Encoding, saved.LineEnding,
+            saved.LineEndingMap?.Select(value => (LineEndingKind)value));
+        tab.DiskEncoding = saved.DiskEncoding ?? saved.Encoding;
+        tab.AutoDetectEncoding = SavedAutoDetectEncoding(saved);
         tab.Stamp = saved.Stamp;
-        tab.OriginalEndings = saved.LineEndingMap is { } markers
-            ? markers.Select(value => (LineEndingKind)value).ToImmutableArray() : default;
         tab.JsonDisabled = saved.JsonValidationDisabled;
         tab.AutoRefresh = saved.AutoRefresh ?? true;
         tab.LastWorked = saved.LastWorkedMs is { } ms ? DateTimeOffset.FromUnixTimeMilliseconds(ms) : DateTimeOffset.Now;
@@ -739,14 +740,15 @@ public partial class MainWindow
             }
             else if (saved.Path is { } path)
             {
-                if (!TryShareFileEditor(tab, saved.Encoding))
+                var encoding = SavedReadEncoding(saved);
+                if (encoding is null || !TryShareFileEditor(tab, encoding.Value))
                 {
                     if (new FileInfo(path).Length > DocumentFiles.MaximumDocumentBytes)
-                        AttachLog(tab, path, saved.Encoding,
-                            new LogTabState(saved.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh, EditPages: true));
+                        AttachLog(tab, path, encoding,
+                            new LogTabState(encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh, EditPages: true));
                     else
                     {
-                        var loaded = await DocumentFiles.ReadAsync(path, saved.Encoding, token);
+                        var loaded = await DocumentFiles.ReadAsync(path, encoding, token);
                         if (!IsCurrentTab()) return;
                         AttachLoadedEditor(tab, loaded);
                     }
@@ -786,8 +788,16 @@ public partial class MainWindow
     private void RestoreSavedLog(WorkTab tab, string path, SessionTab saved)
     {
         var state = saved.Log ?? new LogTabState(saved.Encoding, saved.LogOffset ?? 0, WordWrap: _wordWrap);
+        tab.AutoDetectEncoding = SavedAutoDetectEncoding(saved);
+        if (tab.AutoDetectEncoding) state = state with { Encoding = null };
         AttachLog(tab, path, state.Encoding, state);
     }
+
+    private static bool SavedAutoDetectEncoding(SessionTab saved) =>
+        saved.AutoDetectEncoding ?? (saved.Log?.Encoding is null && saved.Encoding != TextEncodingKind.Windows1251);
+
+    private static TextEncodingKind? SavedReadEncoding(SessionTab saved) =>
+        SavedAutoDetectEncoding(saved) ? null : saved.DiskEncoding ?? saved.Encoding;
 
     private static void RestoreEditorView(WorkTab tab, SessionTab saved)
     {
@@ -1015,10 +1025,12 @@ public partial class MainWindow
 
     private async Task RestoreClosedEditorAsync(WorkTab tab, string path, SessionTab saved)
     {
-        if (tab.Encoding != saved.Encoding)
+        tab.AutoDetectEncoding = SavedAutoDetectEncoding(saved);
+        tab.DiskEncoding = saved.DiskEncoding ?? saved.Encoding;
+        if (tab.AutoDetectEncoding || tab.Encoding != saved.Encoding)
         {
             var revision = tab.Revision;
-            var loaded = await DocumentFiles.ReadAsync(path, saved.Encoding, _lifetime.Token);
+            var loaded = await DocumentFiles.ReadAsync(path, SavedReadEncoding(saved), _lifetime.Token);
             if (tab.Dirty || tab.Revision != revision || !_tabs.ContainsKey(tab.Id))
             {
                 return;
@@ -1048,7 +1060,7 @@ public partial class MainWindow
         var editor = tab.Editor;
         var log = tab.Log?.CaptureState();
         var selection = editor is null ? default : MultiCaretEditing.Primary(editor.TextArea);
-        var entry = new RecentFileEntry(path, tab.Encoding, tab.IsLog, selection.Start,
+        var entry = new RecentFileEntry(path, tab.ReadEncoding, tab.IsLog, selection.Start,
             selection.Length, log?.Offset, editor?.Document.LineCount,
             Reversed: editor is not null && editor.CaretOffset < selection.End,
             ScrollX: editor?.HorizontalOffset ?? 0,

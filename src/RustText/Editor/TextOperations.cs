@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -11,6 +12,7 @@ internal sealed record SearchHit(int Offset, int Length, int Line, string Previe
 internal sealed record SearchSummary(IReadOnlyList<SearchHit> Hits, int Count, bool TimedOut, IReadOnlyList<CaretRange>? Carets);
 internal sealed record JsonProblem(int Offset, int Line, int Column, string Message);
 internal sealed record ListComparison(string Common, string LeftOnly, string RightOnly);
+internal sealed record ReplaceAllResult(string Text, int Count, ImmutableList<LineEndingKind>? MixedEndings = null);
 
 internal static class TextOperations
 {
@@ -117,28 +119,39 @@ internal static class TextOperations
         return previous ?? last;
     }
 
-    public static (string Text, int Count) ReplaceAll(string text, Regex regex, string replacement, bool expandGroups)
+    public static ReplaceAllResult ReplaceAll(string text, Regex regex, string replacement, bool expandGroups,
+        CancellationToken cancellationToken = default, ImmutableList<LineEndingKind>? originalEndings = null)
     {
         var started = Stopwatch.GetTimestamp();
         var builder = new StringBuilder(text.Length);
+        ReplacementLineEndings? endings = null;
         var count = 0;
         var previousEnd = 0;
         for (var match = regex.Match(text); match.Success; match = match.NextMatch())
         {
-            CheckBudget(started);
+            CheckOperation();
+            if (originalEndings is not null)
+                endings ??= new ReplacementLineEndings(text, originalEndings, regex, replacement, expandGroups, CheckOperation);
+
             builder.Append(text.AsSpan(previousEnd, match.Index - previousEnd));
-            builder.Append(expandGroups ? match.Result(replacement) : replacement);
+            var inserted = expandGroups ? match.Result(replacement) : replacement;
+            builder.Append(inserted);
+            endings?.AppendSource(previousEnd, match.Index);
+            endings?.AppendReplacement(match, inserted);
             previousEnd = match.Index + match.Length;
             count++;
         }
 
-        if (count == 0)
-        {
-            return (text, 0);
-        }
-
+        if (count == 0) return new ReplaceAllResult(text, 0, originalEndings);
         builder.Append(text.AsSpan(previousEnd));
-        return (builder.ToString(), count);
+        endings?.AppendSource(previousEnd, text.Length);
+        return new ReplaceAllResult(builder.ToString(), count, endings?.Result.ToImmutable());
+
+        void CheckOperation()
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CheckBudget(started);
+        }
     }
 
     private static void CheckBudget(long started)
@@ -291,7 +304,7 @@ internal static class TextOperations
         return Encoding.UTF8.GetString(memory.GetBuffer().AsSpan(0, (int)memory.Length));
     }
 
-    private static bool IsJsonLinesPath(string? path)
+    internal static bool IsJsonLinesPath(string? path)
     {
         var extension = Path.GetExtension(path.AsSpan());
         return extension.Equals(".jsonl", StringComparison.OrdinalIgnoreCase)

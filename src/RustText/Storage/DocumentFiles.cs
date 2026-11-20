@@ -60,7 +60,6 @@ public static class DocumentFiles
         if (before != after) throw new IOException("Файл изменился во время чтения.");
 
         var (decoded, detected) = Decode(bytes, encoding);
-        if (decoded.Contains('\0')) throw new InvalidDataException("Файл содержит нулевые символы.");
         var (normalized, endings, style) = NormalizeNewlines(decoded);
         return new(normalized, detected, style, endings, before);
     }
@@ -83,27 +82,46 @@ public static class DocumentFiles
                 output.Flush(flushToDisk: true);
             }
             cancellationToken.ThrowIfCancellationRequested();
+            var stamp = new FileStamp(bytes.LongLength, File.GetLastWriteTimeUtc(temporary),
+                Convert.ToHexString(SHA256.HashData(bytes)));
+            cancellationToken.ThrowIfCancellationRequested();
             if (expectedStamp is null)
             {
-                if (File.Exists(fullPath)) throw new IOException("Файл уже существует. Сохранение отменено, чтобы не затереть данные.");
-                // Non-overwriting rename closes the check/use race for Save As.
                 File.Move(temporary, fullPath, overwrite: false);
             }
             else
             {
-                // Keep the original handle open while publishing. On Windows this denies
-                // new write handles but allows replacement of the directory entry.
-                await using var guard = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 1, FileOptions.Asynchronous | FileOptions.RandomAccess);
+                using var publishLock = AcquireSaveLock(fullPath);
+                await using var guard = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+                    1, FileOptions.Asynchronous | FileOptions.RandomAccess);
                 var current = await FileStamp.CaptureAsync(guard, cancellationToken).ConfigureAwait(false);
-                if (current != expectedStamp) throw new IOException("Файл изменился на диске. Сохранение отменено, чтобы не затереть внешние изменения.");
+                if (current != expectedStamp)
+                    throw new IOException("Файл изменился на диске. Сохранение отменено, чтобы не затереть внешние изменения.");
                 cancellationToken.ThrowIfCancellationRequested();
                 File.Replace(temporary, fullPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
             }
-            return await FileStamp.CaptureAsync(fullPath, cancellationToken).ConfigureAwait(false);
+            return stamp;
         }
         finally
         {
             try { File.Delete(temporary); } catch (FileNotFoundException) { }
+        }
+    }
+
+    internal static FileStream AcquireSaveLock(string targetPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
+        var fullPath = Path.GetFullPath(targetPath);
+        var directory = Path.GetDirectoryName(fullPath) ?? throw new IOException("Не удалось определить папку файла.");
+        var nameHash = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFileName(fullPath).ToUpperInvariant()));
+        var lockPath = Path.Combine(directory, $".rusttext-save-{Convert.ToHexString(nameHash)}.lock");
+        try
+        {
+            return new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose);
+        }
+        catch (IOException ex) when ((ex.HResult & 0xffff) is 32 or 80 or 183)
+        {
+            throw new IOException("Файл занят другой операцией сохранения. Повторите сохранение после её завершения.", ex);
         }
     }
 
@@ -118,7 +136,14 @@ public static class DocumentFiles
             if (c != '\n') { builder.Append(c); continue; }
             var ending = !originalEndings.IsDefault && map < originalEndings.Length ? originalEndings[map] : lineEnding == LineEndingKind.Mixed ? LineEndingKind.Lf : lineEnding;
             map++;
-            builder.Append(ending switch { LineEndingKind.CrLf => "\r\n", LineEndingKind.Cr => "\r", _ => "\n" });
+            // A bare CR and the next logical LF would be read back as a single CRLF.
+            builder.Append(ending switch
+            {
+                LineEndingKind.Cr => "\r",
+                LineEndingKind.CrLf => "\r\n",
+                _ when builder.Length > 0 && builder[^1] == '\r' => "\r\n",
+                _ => "\n"
+            });
         }
         var textToWrite = builder.ToString();
         var selected = GetEncoding(encoding);
@@ -139,16 +164,29 @@ public static class DocumentFiles
 
     private static (string Text, TextEncodingKind Encoding) Decode(byte[] bytes, TextEncodingKind? requested)
     {
-        var kind = requested ?? (bytes.AsSpan().StartsWith(new byte[] { 0xFF, 0xFE }) ? TextEncodingKind.Utf16LittleEndian
-            : bytes.AsSpan().StartsWith(new byte[] { 0xFE, 0xFF }) ? TextEncodingKind.Utf16BigEndian
-            : bytes.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF }) ? TextEncodingKind.Utf8Bom : TextEncodingKind.Utf8);
+        var kind = requested ?? EncodingFromPreamble(bytes);
         var skip = 0;
         if (kind == TextEncodingKind.Utf8Bom && bytes.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF })) skip = 3;
         if (kind == TextEncodingKind.Utf16LittleEndian && bytes.AsSpan().StartsWith(new byte[] { 0xFF, 0xFE })) skip = 2;
         if (kind == TextEncodingKind.Utf16BigEndian && bytes.AsSpan().StartsWith(new byte[] { 0xFE, 0xFF })) skip = 2;
-        try { return (GetEncoding(kind).GetString(bytes, skip, bytes.Length - skip), kind); }
+        try
+        {
+            var decoded = GetEncoding(kind).GetString(bytes, skip, bytes.Length - skip);
+            if (decoded.Contains('\0')) throw new InvalidDataException("Файл содержит нулевые символы.");
+            return (decoded, kind);
+        }
         catch (DecoderFallbackException ex) { throw new InvalidDataException($"Файл не соответствует {kind}.", ex); }
     }
+
+    private static TextEncodingKind EncodingFromPreamble(ReadOnlySpan<byte> bytes) => bytes switch
+    {
+        [0xFF, 0xFE, ..] => TextEncodingKind.Utf16LittleEndian,
+        [0xFE, 0xFF, ..] => TextEncodingKind.Utf16BigEndian,
+        [0xEF, 0xBB, 0xBF, ..] => TextEncodingKind.Utf8Bom,
+        _ => TextEncodingKind.Utf8
+    };
+
+    internal static TextEncodingKind DetectEncoding(byte[] bytes) => Decode(bytes, null).Encoding;
 
     internal static Encoding GetEncoding(TextEncodingKind kind) => kind switch
     {

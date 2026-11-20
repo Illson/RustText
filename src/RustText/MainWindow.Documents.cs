@@ -139,6 +139,7 @@ public partial class MainWindow
         var tab = AddTab(select: false);
         tab.Path = fullPath;
         tab.Encoding = encoding ?? TextEncodingKind.Utf8;
+        tab.AutoDetectEncoding = encoding is null;
         tab.PendingFileOpenMode = mode;
         tab.Loading = true;
         tab.Item.Content = new TextBlock { Text = "Ожидание загрузки…", Margin = new Thickness(18) };
@@ -254,9 +255,8 @@ public partial class MainWindow
     {
         tab.Stamp = loaded.Stamp;
         tab.DiskStatus = null;
-        tab.Encoding = loaded.Encoding;
-        tab.Ending = loaded.LineEnding;
-        tab.OriginalEndings = loaded.OriginalLineEndings;
+        tab.DiskEncoding = loaded.Encoding;
+        tab.Format = EditorFileFormat.From(loaded.Encoding, loaded.LineEnding, loaded.OriginalLineEndings);
         document.UndoStack.MarkAsOriginalFile();
         AttachEditor(tab, document, resetDirtyState: true);
     }
@@ -299,12 +299,15 @@ public partial class MainWindow
         GroupedLineNumberMargin.ReplaceExisting(editor);
         EditorCaret.Attach(editor.TextArea);
         editor.Options.ShowBoxForControlCharacters = true;
-        editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
+        var jsonColorizer = new JsonColorizer();
+        editor.TextArea.TextView.LineTransformers.Add(jsonColorizer);
         var logLevels = new LogLevelColorizer();
         editor.TextArea.TextView.LineTransformers.Add(logLevels);
         editor.TextArea.TextView.BackgroundRenderers.Add(logLevels);
         tab.Editor = editor;
         SetSyntax(editor, tab.Path);
+        var jsonFolding = new JsonFolding(editor, jsonColorizer);
+        tab.JsonFolding = jsonFolding;
         if (resetDirtyState)
         {
             tab.RestoredDirty = false;
@@ -312,6 +315,12 @@ public partial class MainWindow
         }
         tab.Highlights = new SearchHighlights(editor);
         editor.TextArea.TextView.BackgroundRenderers.Add(tab.Highlights);
+        var formatHistory = DocumentFormatHistory.For(document, tab.Format);
+        tab.Format = formatHistory.Current;
+        void FormatChanged(EditorFileFormat format) => tab.Format = format;
+        formatHistory.Changed += FormatChanged;
+        tab.JsonErrorMarker = new JsonErrorMarker(editor.TextArea.TextView);
+        editor.TextArea.TextView.BackgroundRenderers.Add(tab.JsonErrorMarker);
         var undoStack = document.UndoStack;
         var multiCaret = new MultiCaretEditing(editor.TextArea,
             edits => edits.Sum(edit => (long)edit.Text.Length - edit.Range.Length) <= MaxEditorCharacters, SetStatus);
@@ -393,7 +402,7 @@ public partial class MainWindow
                 SetSyntax(editor, null);
             }
             UpdateTab(tab);
-            ScheduleJsonValidation(tab);
+            ScheduleJsonValidation(tab, jsonFolding.Schedule(tab.Path));
             if (PanelHost.IsVisible && (ReferenceEquals(tab, ActiveTab) || _allTabs.IsChecked == true))
             {
                 ScheduleSearch();
@@ -441,6 +450,7 @@ public partial class MainWindow
         tab.EditorSubscriptions =
         [
             () => FocusTheme.ThemeChanged -= redrawForTheme,
+            () => formatHistory.Changed -= FormatChanged,
             () => undoStack.PropertyChanged -= undoHandler,
             () => editor.TextChanged -= textChangedHandler,
             () => editor.TextArea.Caret.PositionChanged -= caretHandler,
@@ -457,7 +467,7 @@ public partial class MainWindow
         tab.MinimapDock = minimapDock;
         WatchEditorFile(tab);
         UpdateTab(tab);
-        ScheduleJsonValidation(tab);
+        ScheduleJsonValidation(tab, jsonFolding.Schedule(tab.Path));
         if (PanelHost.IsVisible && ReferenceEquals(tab, ActiveTab) && _searchCancellation is null) ScheduleSearch();
     }
 
@@ -587,6 +597,8 @@ public partial class MainWindow
 
         tab.JsonCancellation?.Cancel();
         tab.JsonCancellation = null;
+        tab.JsonFolding?.Dispose();
+        tab.JsonFolding = null;
         foreach (var unsubscribe in tab.EditorSubscriptions)
         {
             unsubscribe();
@@ -597,6 +609,11 @@ public partial class MainWindow
             editor.TextArea.TextView.BackgroundRenderers.Remove(highlights);
         }
         tab.Highlights = null;
+        if (tab.JsonErrorMarker is { } errorMarker)
+        {
+            editor.TextArea.TextView.BackgroundRenderers.Remove(errorMarker);
+            tab.JsonErrorMarker = null;
+        }
         tab.Minimap?.Dispose();
         tab.Minimap = null;
         tab.MinimapDock = null;
@@ -635,7 +652,12 @@ public partial class MainWindow
         else _ = DetachEditor(tab);
         log.SetTextSize(_fontSize);
         tab.Log = log;
-        if (draftName is null) tab.Encoding = log.DetectedEncoding;
+        if (_closing) log.SetWindowCloseInputBlocked(true);
+        if (draftName is null)
+        {
+            tab.Encoding = log.DetectedEncoding;
+            if (encoding is not null) tab.DiskEncoding = encoding;
+        }
         tab.OpeningPage = !log.InitialPageLoad.IsCompleted;
         if (tab.OpeningPage)
         {
@@ -679,17 +701,23 @@ public partial class MainWindow
         if (tab.Log is { } log)
         {
             if (log.HasPendingEdit) throw new IOException("Сохраните или отмените правки страницы.");
-            if (tab.Recovery is null) AttachLog(tab, path, encoding, log.CaptureState() with { Encoding = encoding });
+            if (tab.Recovery is null)
+            {
+                tab.AutoDetectEncoding = encoding is null;
+                AttachLog(tab, path, encoding, log.CaptureState() with { Encoding = encoding });
+            }
             return;
         }
 
         if (tab.Editor is { } editor)
         {
-            await ApplyEditorReloadAsync(tab, editor, DocumentFiles.ReadAsync(path, encoding, _lifetime.Token));
+            await ApplyEditorReloadAsync(tab, editor, DocumentFiles.ReadAsync(path, encoding, _lifetime.Token),
+                autoDetectEncoding: encoding is null);
         }
     }
 
-    private async Task ApplyEditorReloadAsync(WorkTab tab, TextEditor editor, Task<LoadedDocument> read)
+    private async Task ApplyEditorReloadAsync(WorkTab tab, TextEditor editor, Task<LoadedDocument> read,
+        bool autoDetectEncoding)
     {
         var revision = tab.Revision;
         var path = tab.Path;
@@ -709,6 +737,8 @@ public partial class MainWindow
         }
 
         ReplaceEditorFromDisk(tab, editor, loaded);
+        foreach (var (_, view) in DocumentViews(tab))
+            view.AutoDetectEncoding = autoDetectEncoding;
     }
 
     private void ReplaceEditorFromDisk(WorkTab tab, TextEditor editor, LoadedDocument loaded, string? diskStatus = null,
@@ -787,9 +817,12 @@ public partial class MainWindow
 
         var text = editor.Text;
         var revision = tab.Revision;
+        var format = tab.Format;
+        TextEncodingKind? diskEncoding = changedPath ? null : tab.DiskEncoding ?? tab.Encoding;
         var iconPosition = expected is null ? null : await DesktopIconPosition.CaptureAsync(path, _lifetime.Token);
-        var preSaveVersionWarning = expected is null ? null : await CaptureVersionAsync(path, tab.Encoding, expected);
-        var stamp = await DocumentFiles.SaveAsync(path, text, tab.Encoding, tab.Ending, expected, tab.OriginalEndings, _lifetime.Token);
+        var preSaveVersionWarning = expected is null ? null : await CaptureVersionAsync(path, diskEncoding, expected);
+        var stamp = await DocumentFiles.SaveAsync(path, text, format.Encoding, format.Ending, expected,
+            format.MixedEndings?.ToImmutableArray() ?? default, _lifetime.Token);
         var views = DocumentViews(tab);
         if (changedPath && views.Length > 1)
         {
@@ -803,6 +836,10 @@ public partial class MainWindow
         }
         tab.Path = path;
         SetSyntax(editor, path);
+        if (changedPath)
+        {
+            ScheduleJsonValidation(tab, tab.JsonFolding?.Schedule(path));
+        }
         tab.Stamp = stamp;
         WatchEditorFile(tab);
         if (iconPosition is not null)
@@ -814,13 +851,14 @@ public partial class MainWindow
         foreach (var (owner, savedTab) in savedViews)
         {
             savedTab.Stamp = stamp;
+            savedTab.DiskEncoding = format.Encoding;
             savedTab.DiskStatus = null;
             if (tab.Revision == revision) savedTab.RestoredDirty = savedTab.Dirty = false;
             owner.UpdateTab(savedTab);
         }
         if (tab.Revision == revision) editor.Document.UndoStack.MarkAsOriginalFile();
         await RecordRecentAsync(tab);
-        var postSaveVersionWarning = await CaptureVersionAsync(path, tab.Encoding, stamp);
+        var postSaveVersionWarning = await CaptureVersionAsync(path, format.Encoding, stamp);
         var versionWarning = preSaveVersionWarning ?? postSaveVersionWarning;
         SetStatus(versionWarning is null
             ? $"Сохранено · {path}"
@@ -867,7 +905,8 @@ public partial class MainWindow
             {
                 if (tab.Path is { } path && !tab.Dirty)
                 {
-                    AttachLog(tab, path, tab.Encoding, new LogTabState(tab.Encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh));
+                    var encoding = tab.ReadEncoding;
+                    AttachLog(tab, path, encoding, new LogTabState(encoding, WordWrap: _wordWrap, AutoRefresh: tab.AutoRefresh));
                 }
                 else
                 {
@@ -916,14 +955,16 @@ public partial class MainWindow
                 {
                     if (log.EditsPagesByDefault || new FileInfo(path).Length > DocumentFiles.MaximumDocumentBytes)
                     {
-                        AttachLog(tab, path, tab.Encoding, log.CaptureState() with { EditPages = !log.EditsPagesByDefault });
+                        var encoding = tab.ReadEncoding;
+                        AttachLog(tab, path, encoding, log.CaptureState() with { Encoding = encoding, EditPages = !log.EditsPagesByDefault });
                     }
                     else
                     {
                         if (!log.TryBeginModeSwitch()) return;
                         try
                         {
-                            var loaded = await DocumentFiles.ReadAsync(path, tab.Encoding, source.Token);
+                            var encoding = tab.ReadEncoding;
+                            var loaded = await DocumentFiles.ReadAsync(path, encoding, source.Token);
                             if (!IsCurrent() || !ReferenceEquals(tab.Log, log)) return;
                             AttachLoadedEditor(tab, loaded);
                         }
@@ -1006,6 +1047,14 @@ public partial class MainWindow
 
             await RememberClosedAsync(tab);
             await RecordRecentAsync(tab);
+
+            var tabs = tab.Group.Tabs;
+            if (ReferenceEquals(tabs.SelectedItem, tab.Item) && tabs.Items.Count > 1)
+            {
+                var index = tabs.SelectedIndex;
+                tabs.SelectedIndex = index > 0 ? index - 1 : 1;
+            }
+
             RemoveTab(tab);
             if (_tabs.Count == 0)
             {
@@ -1060,6 +1109,7 @@ public partial class MainWindow
 
         offset = Math.Clamp(offset, 0, editor.Document.TextLength);
         count = Math.Clamp(count, 0, editor.Document.TextLength - offset);
+        tab.JsonFolding?.Reveal(offset);
         editor.Select(offset, count);
         editor.CaretOffset = offset + count;
         editor.ScrollToLine(editor.Document.GetLineByOffset(offset).LineNumber);
@@ -1155,7 +1205,7 @@ public partial class MainWindow
         var count = MultiCaretEditing.Count(area);
         var carets = count > 1 ? $" · Курсоры: {LineNumbers.Format(count)}" : "";
         var position = FormatCaretStatus(area.Caret.Line, area.Selection.Length);
-        FormatText.Text = $"{position} · Стлб. {LineNumbers.Format(area.Caret.Column)} · {EncodingName(tab.Encoding)} · {tab.Ending}{carets}";
+        FormatText.Text = $"{position} · Стлб. {LineNumbers.Format(area.Caret.Column)} · {EncodingName(tab.Encoding)} · {tab.Format.Ending}{carets}";
     }
 
     private void UpdateLogPosition(WorkTab tab)
@@ -1199,10 +1249,11 @@ public partial class MainWindow
 
     private bool SamePath(string? left, string? right) => string.Equals(left, right, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
-    private void ScheduleJsonValidation(WorkTab tab)
+    private void ScheduleJsonValidation(WorkTab tab, Task<string?>? sharedTextTask = null)
     {
         tab.JsonCancellation?.Cancel();
         tab.JsonError = null;
+        tab.JsonErrorMarker?.SetOffset(null);
         if (tab.JsonBanner is not { } banner || tab.Editor is not { } editor)
         {
             return;
@@ -1221,10 +1272,11 @@ public partial class MainWindow
 
         var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         tab.JsonCancellation = source;
-        _ = ValidateJsonAsync(tab, editor, source);
+        _ = ValidateJsonAsync(tab, editor, source, sharedTextTask);
     }
 
-    private async Task ValidateJsonAsync(WorkTab tab, TextEditor editor, CancellationTokenSource source)
+    private async Task ValidateJsonAsync(WorkTab tab, TextEditor editor, CancellationTokenSource source,
+        Task<string?>? sharedTextTask)
     {
         try
         {
@@ -1235,18 +1287,18 @@ public partial class MainWindow
                 return;
             }
 
-            var snapshot = editor.Document.CreateSnapshot();
-            var problem = await Task.Run(() =>
-            {
-                using var reader = snapshot.CreateReader();
-                var text = reader.ReadToEnd();
-                return TextOperations.LooksLikeJson(text, path)
+            var text = sharedTextTask is null
+                ? await ReadDocumentTextAsync(editor.Document, source.Token)
+                : await sharedTextTask;
+            var problem = text is null
+                ? null
+                : await Task.Run(() => TextOperations.LooksLikeJson(text, path)
                     ? TextOperations.ValidateJson(text, path, source.Token)
-                    : null;
-            }, source.Token);
+                    : null, source.Token);
             if (!source.IsCancellationRequested && ReferenceEquals(tab.Editor, editor) && problem is not null)
             {
                 tab.JsonError = problem;
+                tab.JsonErrorMarker?.SetOffset(problem.Offset);
                 tab.JsonMessage!.Text = $"Ошибка JSON · строка {problem.Line}, столбец {problem.Column}";
                 ToolTip.SetTip(tab.JsonMessage, problem.Message);
                 tab.JsonBanner!.IsVisible = true;
@@ -1267,6 +1319,16 @@ public partial class MainWindow
 
             source.Dispose();
         }
+    }
+
+    private static async Task<string> ReadDocumentTextAsync(TextDocument document, CancellationToken token)
+    {
+        var snapshot = document.CreateSnapshot();
+        return await Task.Run(() =>
+        {
+            using var reader = snapshot.CreateReader();
+            return reader.ReadToEnd();
+        }, token);
     }
 
     private static bool ShouldCheckJson(TextDocument document, string? path)
@@ -1308,7 +1370,7 @@ public partial class MainWindow
             FontSize = 11, Foreground = FocusTheme.Muted, VerticalAlignment = VerticalAlignment.Center, IsVisible = false
         };
         public TextBlock Label { get; set; } = null!;
-        public TextBlock DirtyMark { get; set; } = null!;
+        public Control DirtyMark { get; set; } = null!;
         public TextBlock LoadMark { get; set; } = null!;
         public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }
@@ -1323,9 +1385,12 @@ public partial class MainWindow
         public FileOpenMode? PendingFileOpenMode { get; set; }
         public SessionTab? Deferred { get => field; set { field = value; RefreshHeaderMark(); } }
         public SessionTab? Recovery { get; set; }
-        public TextEncodingKind Encoding { get; set; }
-        public LineEndingKind Ending { get; set; } = OperatingSystem.IsWindows() ? LineEndingKind.CrLf : LineEndingKind.Lf;
-        public ImmutableArray<LineEndingKind> OriginalEndings { get; set; }
+        public EditorFileFormat Format { get; set; } = new(TextEncodingKind.Utf8,
+            OperatingSystem.IsWindows() ? LineEndingKind.CrLf : LineEndingKind.Lf);
+        public TextEncodingKind Encoding { get => Format.Encoding; set => Format = Format with { Encoding = value }; }
+        public bool AutoDetectEncoding { get; set; } = true;
+        public TextEncodingKind? DiskEncoding { get; set; }
+        public TextEncodingKind? ReadEncoding => AutoDetectEncoding ? null : DiskEncoding ?? Encoding;
         public FileStamp? Stamp { get; set; }
         public string? DiskStatus { get; set; }
         public bool Dirty { get; set; }
@@ -1338,6 +1403,8 @@ public partial class MainWindow
         public bool AutoRefresh { get; set; } = true;
         public EditorFileWatch? FileWatch { get; set; }
         public bool JsonDisabled { get; set; }
+        public JsonFolding? JsonFolding { get; set; }
+        public JsonErrorMarker? JsonErrorMarker { get; set; }
         public long Revision { get; set; }
         public DateTimeOffset LastWorked { get; set; } = DateTimeOffset.Now;
         public SearchHighlights? Highlights { get; set; }

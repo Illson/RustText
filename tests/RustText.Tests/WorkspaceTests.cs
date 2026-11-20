@@ -881,6 +881,182 @@ public sealed class WorkspaceTests
         finally { await CloseAsync(window); }
     });
 
+
+    [Fact]
+    public Task SearchAllTabsIncludesAndOpensMatchingLogRows() => HeadlessTests.RunAsync(async profile =>
+    {
+        var logPath = Path.Combine(profile, "messages.log");
+        var textPath = Path.Combine(profile, "notes.txt");
+        await File.WriteAllTextAsync(logPath, "unrelated\nlog marker\n");
+        await File.WriteAllTextAsync(textPath, "text marker");
+        var window = await OpenWorkspaceAsync(logPath, textPath);
+        try
+        {
+            var logTab = Tabs(window).Single(tab => Read<string>(tab, "Path") == logPath);
+            var log = Read<LogView>(logTab, "Log");
+            await log.InitialPageLoad;
+            Invoke(window, "OpenSearchPanel", false);
+            ((TextBox)Field(window, "_searchInput")).Text = "marker";
+            ((ToggleButton)Field(window, "_allTabs")).IsChecked = true;
+            await CallAsync(window, "FindAsync");
+            var results = (ListBox)Field(window, "_searchResults");
+            Assert.Equal("Найдено 2", ((TextBlock)Field(window, "_searchStatus")).Text);
+            results.SelectedItem = Assert.Single(results.Items.OfType<ListBoxItem>(), item =>
+                item.Content!.ToString()!.Contains("log marker", StringComparison.Ordinal));
+            await HeadlessTests.WaitForAsync(() => ReferenceEquals(ActiveTab(window), logTab)
+                && LogText(log).SelectedText == "marker");
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task SearchAllTabsClosesLevelFilterBeforeHighlightingLogHit() => HeadlessTests.RunAsync(async profile =>
+    {
+        var logPath = Path.Combine(profile, "filtered-search.log");
+        var notesPath = Path.Combine(profile, "notes.txt");
+        await File.WriteAllTextAsync(logPath, "Info marker\nError failure\n");
+        await File.WriteAllTextAsync(notesPath, "search from this tab");
+        var window = await OpenWorkspaceAsync(logPath, notesPath);
+        try
+        {
+            var logTab = Tabs(window).Single(tab => Read<string>(tab, "Path") == logPath);
+            var log = Read<LogView>(logTab, "Log");
+            await log.InitialPageLoad;
+            await log.ShowLevelFilterAsync();
+            var logType = typeof(LogView);
+            var panel = (LogLevelFilterPanel)logType.GetField("_levelFilter", Private)!.GetValue(log)!;
+            panel.SetLevels(LogLevel.Error);
+            var filtered = (TextBox)logType.GetField("_filteredLogText", Private)!.GetValue(log)!;
+            await HeadlessTests.WaitForAsync(() => filtered.Text == "Error failure");
+            Assert.Equal(notesPath, Read<string>(ActiveTab(window), "Path"));
+
+            Invoke(window, "OpenSearchPanel", false);
+            ((TextBox)Field(window, "_searchInput")).Text = "marker";
+            ((ToggleButton)Field(window, "_allTabs")).IsChecked = true;
+            await CallAsync(window, "FindAsync");
+            var results = (ListBox)Field(window, "_searchResults");
+            results.SelectedItem = Assert.Single(results.Items.OfType<ListBoxItem>(), item =>
+                item.Content!.ToString()!.Contains("Info marker", StringComparison.Ordinal));
+
+            var filterViewport = (Control)logType.GetField("_levelFilterViewport", Private)!.GetValue(log)!;
+            await HeadlessTests.WaitForAsync(() => ReferenceEquals(ActiveTab(window), logTab)
+                && LogText(log).SelectedText == "marker");
+            Assert.False(filterViewport.IsVisible);
+            Assert.True(LogText(log).IsEffectivelyVisible);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task SearchAllTabsReloadsChangedLogPageAtSameOffsetBeforeHighlightingHit() => HeadlessTests.RunAsync(async profile =>
+    {
+        var logPath = Path.Combine(profile, "same-offset.log");
+        var notesPath = Path.Combine(profile, "notes.txt");
+        await File.WriteAllTextAsync(logPath, "before\n");
+        await File.WriteAllTextAsync(notesPath, "notes without a match");
+        var window = await OpenWorkspaceAsync(logPath, notesPath);
+        try
+        {
+            var logTab = Tabs(window).Single(tab => Read<string>(tab, "Path") == logPath);
+            var log = Read<LogView>(logTab, "Log");
+            await log.InitialPageLoad;
+            Assert.Equal("before", LogText(log).Text);
+            log.SetAutoRefresh(false);
+            Assert.Equal(notesPath, Read<string>(ActiveTab(window), "Path"));
+
+            var timestamp = File.GetLastWriteTimeUtc(logPath);
+            await File.WriteAllTextAsync(logPath, "marker\n");
+            File.SetLastWriteTimeUtc(logPath, timestamp);
+
+            Invoke(window, "OpenSearchPanel", false);
+            ((TextBox)Field(window, "_searchInput")).Text = "marker";
+            ((ToggleButton)Field(window, "_allTabs")).IsChecked = true;
+            await CallAsync(window, "FindAsync");
+            var results = (ListBox)Field(window, "_searchResults");
+            results.SelectedItem = Assert.Single(results.Items.OfType<ListBoxItem>(), item =>
+                item.Content!.ToString()!.Contains("marker", StringComparison.Ordinal));
+
+            await HeadlessTests.WaitForAsync(() => ReferenceEquals(ActiveTab(window), logTab)
+                && LogText(log).SelectionEnd > LogText(log).SelectionStart);
+            Assert.Equal("marker", LogText(log).SelectedText);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData("1234 56", @"\d+", "$&$&", "12341234 56", 9, "56")]
+    [InlineData("12 34", @"(\d)\d", "$1", "1 34", 2, "34")]
+    [InlineData("abc", @"\w", "", "bc", 0, "b")]
+    [InlineData("abc abc", "(?=a)", ">", ">abc abc", 5, "")]
+    [InlineData("aa", "(?=a)", "", "aa", 1, "")]
+    public Task SingleRegexReplaceAdvancesPastExpandedReplacement(string text, string pattern,
+        string replacement, string expected, int nextOffset, string nextMatch) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "replace.txt");
+        await File.WriteAllTextAsync(path, text);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            Invoke(window, "OpenSearchPanel", true);
+            ((TextBox)Field(window, "_searchInput")).Text = pattern;
+            ((TextBox)Field(window, "_replacement")).Text = replacement;
+            ((ToggleButton)Field(window, "_regexOption")).IsChecked = true;
+            await CallAsync(window, "FindAsync");
+            await CallAsync(window, "NavigateSearchAsync", false);
+            await CallAsync(window, "ReplaceAsync", false);
+            Assert.Equal(expected, editor.Text);
+            Assert.Equal(nextMatch, editor.SelectedText);
+            Assert.Equal(nextOffset, editor.SelectionStart);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ZeroLengthReplaceAtEndWrapsToFirstOccurrence() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "anchors.txt");
+        await File.WriteAllTextAsync(path, "a\nb");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            Invoke(window, "OpenSearchPanel", true);
+            ((TextBox)Field(window, "_searchInput")).Text = "$";
+            ((TextBox)Field(window, "_replacement")).Text = "!";
+            ((ToggleButton)Field(window, "_regexOption")).IsChecked = true;
+            editor.CaretOffset = editor.Document.TextLength;
+            await CallAsync(window, "NavigateSearchAsync", false);
+            await CallAsync(window, "ReplaceAsync", false);
+            Assert.Equal("a\nb!", editor.Text);
+            Assert.Equal(1, editor.CaretOffset);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ForwardSearchWrapsAfterZeroLengthMatchAtEndOfFile() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "anchors.txt");
+        await File.WriteAllTextAsync(path, "a\nb");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            Invoke(window, "OpenSearchPanel", false);
+            ((TextBox)Field(window, "_searchInput")).Text = "$";
+            ((ToggleButton)Field(window, "_regexOption")).IsChecked = true;
+            await CallAsync(window, "FindAsync");
+            foreach (var offset in new[] { 1, 3, 1, 3 })
+            {
+                await CallAsync(window, "NavigateSearchAsync", false);
+                Assert.Equal(offset, editor.CaretOffset);
+                Assert.Equal(0, editor.SelectionLength);
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
     [Fact]
     public Task EditorSearchSeedsLiteralSelectionAndRefreshesAsTheQueryChanges() => HeadlessTests.RunAsync(async profile =>
     {
@@ -1876,7 +2052,7 @@ public sealed class WorkspaceTests
             var editor = Read<TextEditor>(tab, "Editor");
             var loaded = await DocumentFiles.ReadAsync(path);
             var pending = new TaskCompletionSource<LoadedDocument>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var reload = CallAsync(window, "ApplyEditorReloadAsync", tab, editor, pending.Task);
+            var reload = CallAsync(window, "ApplyEditorReloadAsync", tab, editor, pending.Task, true);
 
             editor.TextArea.Focus();
             editor.CaretOffset = editor.Document.TextLength;
@@ -1921,9 +2097,15 @@ public sealed class WorkspaceTests
 
             var selectedSurface = TabSurface(selected);
             var inactiveSurface = TabSurface(inactive);
+            var titleBar = window.FindControl<Border>("TitleBar")!;
             var selectedBackground = SolidColor(selectedSurface.Background);
-            var selectedAccent = SolidColor(selectedSurface.BorderBrush);
             var inactiveBackground = SolidColor(inactiveSurface.Background);
+            Assert.Equal(default(Thickness), titleBar.BorderThickness);
+            Assert.Equal(default(Thickness), selectedSurface.BorderThickness);
+            var titleBarBottom = titleBar.TranslatePoint(new Point(0, titleBar.Bounds.Height), window)!.Value.Y;
+            var tabTop = selectedSurface.TranslatePoint(default, window)!.Value.Y;
+            Assert.Equal(2, tabTop - titleBarBottom);
+            Assert.NotEqual(selectedBackground, inactiveBackground);
             var hoverPoint = inactiveSurface.TranslatePoint(
                 new Point(inactiveSurface.Bounds.Width / 2, inactiveSurface.Bounds.Height / 2), window)
                 ?? throw new InvalidOperationException("Inactive tab surface is not attached.");
@@ -1933,7 +2115,6 @@ public sealed class WorkspaceTests
 
             Assert.NotEqual(inactiveBackground, SolidColor(inactiveSurface.Background));
             Assert.Equal(selectedBackground, SolidColor(selectedSurface.Background));
-            Assert.Equal(selectedAccent, SolidColor(selectedSurface.BorderBrush));
             Assert.Same(selected, tabs.SelectedItem);
         }
         finally
@@ -1941,6 +2122,47 @@ public sealed class WorkspaceTests
             await CloseAsync(window);
         }
     });
+    [Fact]
+    public Task UnsavedTabShowsGreenMarkAlignedWithHeaderAndCloseIcon() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "");
+            var tab = ActiveTab(window);
+            var label = Read<TextBlock>(tab, "Label");
+            var count = Read<TextBlock>(tab, "LineCountLabel");
+            var mark = Read<Avalonia.Controls.Shapes.Ellipse>(tab, "DirtyMark");
+            var header = Assert.IsType<Grid>(Read<TabItem>(tab, "Item").Header);
+            var close = Assert.Single(header.Children.OfType<Button>());
+            var icon = Assert.IsType<Avalonia.Controls.Shapes.Path>(close.Content);
+
+            Assert.Equal(0, mark.Opacity);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Insert(0, "first line\nsecond line");
+            window.UpdateLayout();
+
+            Assert.True(count.IsVisible);
+            Assert.Equal("2 стр.", count.Text);
+            Assert.Equal(1, mark.Opacity);
+            var green = SolidColor(mark.Fill);
+            Assert.True(green.G > green.R && green.G > green.B);
+            Assert.True(icon.Bounds.Height > 0);
+            var iconCenter = CenterY(icon);
+            Assert.All(new Control[] { label, count, mark }, control =>
+                Assert.InRange(Math.Abs(CenterY(control) - iconCenter), 0, 1));
+
+            editor.Document.UndoStack.Undo();
+            Assert.Equal(0, mark.Opacity);
+
+            double CenterY(Control control) => control.TranslatePoint(new Point(0, control.Bounds.Height / 2), window)!.Value.Y;
+        }
+        finally
+        {
+            await CloseAsync(window);
+        }
+    });
+
     [Fact]
     public Task ReloadCompletionDoesNotReopenClosedTab() => HeadlessTests.RunAsync(async profile =>
     {
@@ -1955,7 +2177,7 @@ public sealed class WorkspaceTests
             var editor = Read<TextEditor>(tab, "Editor");
             var loaded = await DocumentFiles.ReadAsync(second);
             var pending = new TaskCompletionSource<LoadedDocument>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var reload = CallAsync(window, "ApplyEditorReloadAsync", tab, editor, pending.Task);
+            var reload = CallAsync(window, "ApplyEditorReloadAsync", tab, editor, pending.Task, true);
             await CallAsync(window, "CloseTabAsync", tab);
             pending.SetResult(loaded);
             await reload;
@@ -2159,6 +2381,37 @@ public sealed class WorkspaceTests
             await CloseAsync(window);
         }
     });
+
+    [Theory]
+    [InlineData(2, 1)]
+    [InlineData(3, 2)]
+    [InlineData(0, 1)]
+    public Task CtrlWClosesActiveTabAndSelectsNeighbor(int closedIndex, int nextIndex) =>
+        HeadlessTests.RunAsync(async _ =>
+        {
+            var window = await OpenWorkspaceAsync();
+            try
+            {
+                for (var index = 0; index < 4; index++)
+                    Invoke(window, "NewTab", "");
+
+                var tabs = Read<WorkspaceTabs>(Field(window, "_active"), "Tabs");
+                var original = tabs.Items.OfType<TabItem>().ToArray();
+                var closed = original[closedIndex];
+                tabs.SelectedItem = closed;
+                Read<TextEditor>(ActiveTab(window), "Editor").TextArea.Focus();
+
+                Press(window, Key.W, RawInputModifiers.Control, PhysicalKey.W, "w");
+
+                await HeadlessTests.WaitForAsync(() => !tabs.Items.Contains(closed));
+                Assert.Equal(3, tabs.Items.Count);
+                Assert.Same(original[nextIndex], tabs.SelectedItem);
+            }
+            finally
+            {
+                await CloseAsync(window);
+            }
+        });
 
     [Fact]
     public Task ClosedHistoryAndDeferredDraftSurviveFourChangedSessions() => HeadlessTests.RunAsync(async _ =>

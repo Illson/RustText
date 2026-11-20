@@ -10,8 +10,7 @@
         Opened="WindowChromeOpened" Closed="WindowChromeClosed"
         Background="{x:Static local:FocusTheme.Editor}" Foreground="{x:Static local:FocusTheme.Text}" FontSize="13">
     <Grid RowDefinitions="Auto,*,Auto,Auto">
-        <Border x:Name="TitleBar" Background="{x:Static local:FocusTheme.TitleBar}" BorderBrush="{x:Static local:FocusTheme.Border}"
-                BorderThickness="0,0,0,1" MinHeight="36">
+        <Border x:Name="TitleBar" Background="{x:Static local:FocusTheme.TitleBar}" MinHeight="36">
             <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="8,0,0,0">
                 <StackPanel Orientation="Horizontal" Spacing="3" VerticalAlignment="Center">
                     <Menu Classes="focus-menu" VerticalAlignment="Center">

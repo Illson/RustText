@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -41,6 +42,12 @@ internal sealed record LogTabState(
     bool? IndexOptIn = null,
     bool EditPages = false);
 
+internal sealed record LogSearchCursor(long Offset, int MatchIndex, bool SkipLine = false,
+    long LineOffset = -1, string PendingText = "");
+internal sealed record LogSearchHit(long Offset, long? LineNumber, string Preview, int MatchIndex, int MatchLength,
+    int LineLengthBytes, string LineDigest, bool WasIncomplete);
+internal sealed record LogSearchPage(IReadOnlyList<LogSearchHit> Hits, LogSearchCursor? NextCursor, bool HasMore, string? Message);
+
 internal sealed record LogFileIdentity(ulong Volume, int[] Id);
 internal sealed record LogSystemTime(long SecsSinceEpoch, uint NanosSinceEpoch);
 internal sealed record LogFingerprint(LogSystemTime? Modified, int[] Digest);
@@ -49,10 +56,11 @@ internal sealed partial class LogView : UserControl, IDisposable
 {
     private const int HistoryLimit = 100;
     private const int SearchResultsPerPage = 32;
+    private const int MaximumSearchResultsPerCall = 256;
+    private const int MaximumSearchBytesPerCall = 16 * 1024 * 1024;
     private const int MaximumSearchLineBytes = 1024 * 1024;
     private const int IndexBatchBytes = 16 * 1024 * 1024;
     private const long LargeLogIndexOptInBytes = 128L * 1024 * 1024;
-    private static readonly TimeSpan SearchRegexTimeout = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(1);
 
     private readonly string _path;
@@ -65,7 +73,8 @@ internal sealed partial class LogView : UserControl, IDisposable
     private readonly DispatcherTimer _refreshTimer;
     private readonly DispatcherTimer _searchDebounce = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly List<long> _previousOffsets = [];
-    private readonly ObservableCollection<SearchResult> _searchResults = [];
+    private readonly ObservableCollection<LogSearchHit> _searchResults = [];
+    private LogSearchSnapshot? _searchSnapshot;
     private readonly TextBlock _fileLabel = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBox _logText = new()
     {
@@ -165,7 +174,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private LogFileIdentity? _bookmarkIdentity;
     private LogFingerprint? _bookmarkFingerprint;
     private long _hiddenOffset;
-    private long _searchOffset;
+    private LogSearchCursor? _searchCursor;
     private long _indexedTo;
     private long _indexedLineCount;
     private long? _totalLineCount;
@@ -404,6 +413,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     public async Task NavigateMatchAsync(bool backward)
     {
+        if (_closed || _busy || PageNavigationBlocked) return;
         if (_levelFilterViewport?.IsVisible == true) CloseInlineLevelFilter();
         if (string.IsNullOrEmpty(_searchBox.Text))
         {
@@ -425,49 +435,81 @@ internal sealed partial class LogView : UserControl, IDisposable
             var index = backward
                 ? (_activeSearchResult <= 0 ? _searchResults.Count - 1 : _activeSearchResult - 1)
                 : (_activeSearchResult + 1) % _searchResults.Count;
-            await OpenSearchHitAsync(_searchResults[index]);
-        }
-    }
-
-    private async Task OpenSearchHitAsync(SearchResult hit)
-    {
-        StopFollowingEnd();
-        _activeSearchResult = _searchResults.IndexOf(hit);
-        var end = hit.MatchIndex + hit.MatchLength;
-        if (_page?.Rows.FirstOrDefault()?.StartOffset != hit.Offset)
-        {
-            await LoadPageAsync(hit.Offset, saveHistory: true);
-        }
-
-        if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && end > FirstDisplayedLineLength())
-        {
-            await LoadPageAsync(hit.Offset, saveHistory: false,
-                maxPageBytes: MaximumSearchLineBytes);
-        }
-
-        if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && hit.MatchLength > 0
-            && hit.MatchIndex >= 0 && end <= FirstDisplayedLineLength())
-        {
-            if (_pageEdit is not null)
+            var hit = _searchResults[index];
+            if (_searchSnapshot is not { } snapshot || !IsSearchSnapshotCurrent(snapshot))
             {
-                _pageEditor!.Select(hit.MatchIndex, hit.MatchLength);
+                ClearSearchResults();
+                SetSearchStatus("Файл изменился. Повторите поиск.");
                 return;
             }
-            _logText.CaretIndex = end;
-            _logText.SelectionStart = hit.MatchIndex;
-            _logText.SelectionEnd = end;
+            await OpenSearchHitAsync(hit, snapshot);
         }
     }
 
-    private int FirstDisplayedLineLength()
+    private async Task<bool> OpenSearchHitAsync(LogSearchHit hit, LogSearchSnapshot snapshot)
     {
-        var rows = _page!.Rows;
-        var length = rows[0].Text.Length;
-        for (var index = 1; index < rows.Count && rows[index].ContinuesLine; index++)
+        if (!IsSearchSnapshotCurrent(snapshot))
         {
-            length += rows[index].Text.Length;
+            ClearSearchResults();
+            SetSearchStatus("Файл изменился. Повторите поиск.");
+            return false;
         }
-        return length;
+        if (!IsSearchHitCurrent(snapshot, hit)) return RemoveStaleSearchHit(hit);
+        if (_closed || _busy || PageNavigationBlocked) return false;
+        if (_levelFilterViewport?.IsVisible == true) CloseInlineLevelFilter();
+        StopFollowingEnd();
+        _activeSearchResult = _searchResults.IndexOf(hit);
+        if (!DisplaysSearchHit(hit))
+        {
+            var pageBytes = Math.Clamp(hit.LineLengthBytes, LogDataReader.DefaultPageBytes, MaximumSearchLineBytes);
+            var readStamp = FileStamp.Read(_path, _file);
+            if (readStamp.Identity != snapshot.Stamp.Identity) return false;
+            await LoadPageAsync(hit.Offset, saveHistory: true, maxPageBytes: pageBytes, expectedPageStamp: readStamp);
+            if (_closed) return false;
+            if (!IsSearchSnapshotCurrent(snapshot))
+            {
+                ClearSearchResults();
+                SetSearchStatus("Файл изменился. Повторите поиск.");
+                return false;
+            }
+            if (!IsSearchHitCurrent(snapshot, hit)) return RemoveStaleSearchHit(hit);
+            if (PageNavigationBlocked || !DisplaysSearchHit(hit)) return false;
+        }
+
+        if (_pageEdit is not null)
+        {
+            _pageEditor!.Select(hit.MatchIndex, hit.MatchLength);
+            return true;
+        }
+        var end = hit.MatchIndex + hit.MatchLength;
+        _logText.CaretIndex = end;
+        _logText.SelectionStart = hit.MatchIndex;
+        _logText.SelectionEnd = end;
+        return true;
+    }
+
+    private bool RemoveStaleSearchHit(LogSearchHit hit)
+    {
+        var index = _searchResults.IndexOf(hit);
+        if (index >= 0)
+        {
+            _searchResults.RemoveAt(index);
+            if (index < _searchResultButtons.Children.Count) _searchResultButtons.Children.RemoveAt(index);
+            if (_activeSearchResult > index) _activeSearchResult--;
+            else if (_activeSearchResult == index) _activeSearchResult = index - 1;
+        }
+        SetSearchStatus("Строка изменилась после поиска. Повторите поиск для этой строки.");
+        return false;
+    }
+
+    private bool DisplaysSearchHit(LogSearchHit hit)
+    {
+        if (_page?.Rows.FirstOrDefault()?.StartOffset != hit.Offset) return false;
+        var line = (_pageEdit?.Original ?? _logText.Text).AsSpan();
+        var end = line.IndexOfAny('\r', '\n');
+        if (end >= 0) line = line[..end];
+        return hit.MatchIndex >= 0 && hit.MatchLength >= 0 && hit.MatchIndex <= line.Length - hit.MatchLength
+            && SearchLineDigest(line) == hit.LineDigest;
     }
 
     public void FocusSearch()
@@ -611,6 +653,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         var content = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"),
+            RowDefinitions = new RowDefinitions("*,Auto"),
             ColumnSpacing = 0,
             Background = FocusTheme.Editor,
         };
@@ -641,6 +684,10 @@ internal sealed partial class LogView : UserControl, IDisposable
         _contentViewport.Children.Add(content);
         _levelFilterViewport = BuildLevelFilterViewport();
         _levelFilterViewport.IsVisible = false;
+        Grid.SetColumn(_levelFilterViewport, 1);
+        Grid.SetRow(_filterStatus, 1);
+        Grid.SetColumnSpan(_filterStatus, 4);
+        content.Children.Add(_filterStatus);
         _levelFilter!.IsVisible = false;
         var logViewport = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
         logViewport.Children.Add(_levelFilter!);
@@ -954,11 +1001,26 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void OnMinimapPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
-        if (_page is not { } page || e.Delta.Y == 0)
+        if (e.Delta.Y == 0)
         {
             return;
         }
 
+        if (_levelFilterViewport?.IsVisible == true)
+        {
+            if (_filteredPage is not { Rows.Count: > 0 } filteredPage) return;
+            var first = filteredPage.Rows[0];
+            var last = filteredPage.Rows[^1];
+            var filteredPageBytes = Math.Max(1, last.EndOffset - first.StartOffset);
+            var filteredNext = Math.Clamp(first.StartOffset - (long)Math.Sign(e.Delta.Y) * filteredPageBytes,
+                _hiddenOffset, _filterSnapshotLength);
+            var filteredRange = Math.Max(1, _filterSnapshotLength - _hiddenOffset);
+            _ = NavigateMinimapToRatioAsync((filteredNext - _hiddenOffset) / (double)filteredRange);
+            e.Handled = true;
+            return;
+        }
+
+        if (_page is not { } page) return;
         var pageBytes = Math.Max(1, page.NextOffset - page.StartOffset);
         var next = Math.Clamp(page.StartOffset - (long)Math.Sign(e.Delta.Y) * pageBytes, _hiddenOffset, _file.Length);
         var range = Math.Max(1, _file.Length - _hiddenOffset);
@@ -967,7 +1029,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     }
 
     private async Task LoadPageAsync(long offset, bool saveHistory = true, PagePosition position = PagePosition.Start,
-        int maxPageBytes = LogDataReader.DefaultPageBytes)
+        int maxPageBytes = LogDataReader.DefaultPageBytes, FileStamp? expectedPageStamp = null)
     {
         if (_closed || _busy || PageNavigationBlocked)
         {
@@ -980,8 +1042,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             var firstOffset = _hiddenOffset;
             var reader = _reader;
+            var generation = _dataGeneration;
             var token = _closing.Token;
-            var stamp = _fileStamp;
+            var stamp = expectedPageStamp ?? _fileStamp;
             var (page, firstLine, edit) = await Task.Run(() =>
             {
                 var pageBytes = maxPageBytes;
@@ -991,7 +1054,8 @@ internal sealed partial class LogView : UserControl, IDisposable
                 var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token) : null;
                 return (result, first, pageEdit);
             }, token);
-            if (_closed || (position == PagePosition.FollowEnd && !FollowEnd && _page is not null))
+            if (_closed || generation != _dataGeneration || !ReferenceEquals(reader, _reader)
+                || (position == PagePosition.FollowEnd && !FollowEnd && _page is not null))
             {
                 return;
             }
@@ -1054,6 +1118,18 @@ internal sealed partial class LogView : UserControl, IDisposable
                 StartIndexIfNeeded();
             }
             UpdatePageLineNumbers(page, firstLine);
+            if (firstLine is null && page.Rows.Count > 0)
+            {
+                bool indexCoversPage;
+                lock (_lineIndexGate)
+                {
+                    indexCoversPage = page.Rows[0].StartOffset <= _indexedTo;
+                }
+                if (indexCoversPage)
+                {
+                    _ = RefreshCurrentPageNumbersAsync(reader, page, generation);
+                }
+            }
             SetStatus(page.WasTruncated
                 ? "Файл изменился во время чтения. Позиция пересчитана по открытому файлу."
                 : EditsPagesByDefault ? PageEditHint : string.Empty);
@@ -1092,10 +1168,16 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task NavigateMinimapToRatioAsync(double ratio)
     {
-        if (_closed || PageNavigationBlocked) return;
-        StopFollowingEnd();
+        if (_closed) return;
         var request = ++_minimapRequest;
         ratio = Math.Clamp(ratio, 0, 1);
+        if (_levelFilterViewport?.IsVisible == true)
+        {
+            await NavigateFilteredMinimapAsync(ratio, _reader, request, _closing.Token);
+            return;
+        }
+        if (PageNavigationBlocked) return;
+        StopFollowingEnd();
         if (_busy)
         {
             _pendingMinimapRatio = ratio;
@@ -1245,8 +1327,9 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void ClearSearchResults()
     {
-        _searchOffset = _hiddenOffset;
+        _searchCursor = null;
         _searchResults.Clear();
+        _searchSnapshot = null;
         _searchResultButtons.Children.Clear();
         _searchHasMore = false;
         _activeSearchResult = -1;
@@ -1271,6 +1354,12 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
 
         if (_closed || _busy || PageNavigationBlocked) return;
+        if (continueSearch && _searchSnapshot is { } previousSnapshot && !IsSearchSnapshotCurrent(previousSnapshot))
+        {
+            ClearSearchResults();
+            SetSearchStatus("Файл изменился. Повторите поиск.");
+            return;
+        }
         _searchCancellation?.Cancel();
         using var source = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
         _searchCancellation = source;
@@ -1279,7 +1368,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (!continueSearch || !string.Equals(query, _lastSearchText, StringComparison.Ordinal))
             ClearSearchResults();
         _lastSearchText = query;
-        var startOffset = _searchOffset;
         var regex = _regexBox.IsChecked == true;
         var caseSensitive = _caseBox.IsChecked == true;
         var wholeWord = _wholeWordBox.IsChecked == true;
@@ -1287,9 +1375,18 @@ internal sealed partial class LogView : UserControl, IDisposable
         SetSearchStatus("Поиск в логе…");
         try
         {
-            var result = await Task.Run(() => SearchFile(query, regex, caseSensitive, wholeWord, startOffset, token), token);
+            var snapshot = continueSearch ? _searchSnapshot ?? CaptureSearchSnapshot() : CaptureSearchSnapshot();
+            _searchSnapshot = snapshot;
+            var result = await SearchSnapshotAsync(snapshot, new SearchOptions(query, regex, caseSensitive, wholeWord),
+                continueSearch ? _searchCursor : null, SearchResultsPerPage, token, long.MaxValue);
             if (_closed || token.IsCancellationRequested || generation != _dataGeneration) return;
-            foreach (var hit in result.Results)
+            if (!IsSearchSnapshotCurrent(snapshot) || result.Message == "Файл изменился. Повторите поиск.")
+            {
+                ClearSearchResults();
+                SetSearchStatus("Файл изменился. Повторите поиск.");
+                return;
+            }
+            foreach (var hit in result.Hits)
             {
                 _searchResults.Add(hit);
                 var button = new Button
@@ -1305,10 +1402,13 @@ internal sealed partial class LogView : UserControl, IDisposable
                     }
                 };
                 SetButtonStyle(button, "focus-quiet");
-                button.Click += async (_, _) => await OpenSearchHitAsync(hit);
+                button.Click += async (_, _) =>
+                {
+                    if (ReferenceEquals(_searchSnapshot, snapshot)) await OpenSearchHitAsync(hit, snapshot);
+                };
                 _searchResultButtons.Children.Add(button);
             }
-            _searchOffset = result.NextOffset;
+            _searchCursor = result.NextCursor;
             _searchHasMore = result.HasMore;
             var count = _searchResults.Count;
             var status = count == 0 ? "Совпадений не найдено." : $"Найдено {count:N0}";
@@ -1335,37 +1435,138 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
     }
 
-    private SearchPage SearchFile(string query, bool useRegex, bool matchCase, bool wholeWord, long offset, CancellationToken token)
+    internal sealed record LogSearchSnapshot(long Generation, FileStamp Stamp, long Length,
+        long HiddenOffset, byte[] PrefixWitness, LogDataReader Reader);
+
+    internal LogSearchSnapshot CaptureSearchSnapshot()
     {
-        Regex? expression = null;
-        if (useRegex)
+        var current = FileStamp.Read(_path, _file);
+        var sameFile = current.Identity == _fileStamp.Identity;
+        var length = sameFile ? current.Length : _file.Length;
+        byte[] witness;
+        try { witness = _reader.ComputeBookmarkDigest(length); }
+        catch (Exception error) when (error is EndOfStreamException or ArgumentOutOfRangeException) { witness = []; }
+        return new LogSearchSnapshot(_dataGeneration, sameFile ? current : _fileStamp,
+            length, _hiddenOffset, witness, _reader);
+    }
+
+    internal bool IsSearchSnapshotCurrent(LogSearchSnapshot snapshot)
+    {
+        if (_closed) return false;
+        try
         {
-            var pattern = wholeWord ? $"\\b(?:{query})\\b" : query;
-            expression = new Regex(pattern, RegexOptions.Compiled | (matchCase ? RegexOptions.None : RegexOptions.IgnoreCase), SearchRegexTimeout);
+            if (snapshot.Generation != _dataGeneration || !ReferenceEquals(snapshot.Reader, _reader)) return false;
+            if (snapshot.PrefixWitness.Length != SHA256.HashSizeInBytes) return false;
+            var current = FileStamp.Read(_path, _file);
+            if (current.Identity != snapshot.Stamp.Identity || current.Length < snapshot.Length) return false;
+            if (current.Length == snapshot.Length) return current == snapshot.Stamp;
+            return snapshot.Reader.ComputeBookmarkDigest(snapshot.Length).AsSpan().SequenceEqual(snapshot.PrefixWitness);
         }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ObjectDisposedException or ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+    }
 
-        var results = new List<SearchResult>(SearchResultsPerPage);
-        var reader = _reader;
-        var cursor = Math.Max(Math.Max(offset, _hiddenOffset), reader.PreambleLength);
-        var pageEnd = _file.Length;
-        var pendingLine = new StringBuilder();
-        var pendingOffset = cursor;
-        var lineNumber = FindLineNumber(reader, cursor, token);
+    private bool IsSearchHitCurrent(LogSearchSnapshot snapshot, LogSearchHit hit)
+    {
+        try
+        {
+            var currentStamp = FileStamp.Read(_path, _file);
+            if (currentStamp == snapshot.Stamp) return true;
+            if (hit.WasIncomplete || currentStamp.Identity != snapshot.Stamp.Identity
+                || currentStamp.Length <= snapshot.Length) return false;
+            if (hit.Offset != snapshot.HiddenOffset && hit.Offset != snapshot.Reader.PreambleLength
+                && !snapshot.Reader.IsNewlineBefore(hit.Offset)) return false;
+            var currentText = snapshot.Reader.ReadTerminatedLineText(hit.Offset, hit.LineLengthBytes);
+            return currentText is not null && SearchLineDigest(currentText) == hit.LineDigest;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ObjectDisposedException or ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+    }
+
+    private static string SearchLineDigest(ReadOnlySpan<char> text) =>
+        Convert.ToHexString(SHA256.HashData(MemoryMarshal.AsBytes(text)));
+
+    internal async Task<LogSearchPage> SearchSnapshotAsync(LogSearchSnapshot snapshot, SearchOptions options,
+        LogSearchCursor? cursor, int maxResults, CancellationToken token,
+        long maxScanBytes = MaximumSearchBytesPerCall)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(options);
+        if (maxResults is < 1 or > MaximumSearchResultsPerCall)
+            throw new ArgumentOutOfRangeException(nameof(maxResults));
+        if (maxScanBytes < 4)
+            throw new ArgumentOutOfRangeException(nameof(maxScanBytes));
+        if (!IsSearchSnapshotCurrent(snapshot))
+            return new LogSearchPage([], null, false, "Файл изменился. Повторите поиск.");
+
+        var start = cursor ?? new LogSearchCursor(snapshot.HiddenOffset, 0);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, _closing.Token);
+        try
+        {
+            var result = await Task.Run(() => SearchFile(snapshot, options, start, maxResults, maxScanBytes, linked.Token), linked.Token);
+            return IsSearchSnapshotCurrent(snapshot)
+                ? result
+                : new LogSearchPage([], null, false, "Файл изменился. Повторите поиск.");
+        }
+        catch (OperationCanceledException) when (_closing.IsCancellationRequested && !token.IsCancellationRequested)
+        {
+            return new LogSearchPage([], null, false, "Вкладка закрыта.");
+        }
+        catch (ObjectDisposedException) when (_closing.IsCancellationRequested)
+        {
+            return new LogSearchPage([], null, false, "Вкладка закрыта.");
+        }
+    }
+
+    internal async Task<bool> NavigateToSearchHitAsync(LogSearchSnapshot snapshot, LogSearchHit hit)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(hit);
+        if (PageNavigationBlocked || _closed || _busy || !IsSearchSnapshotCurrent(snapshot)) return false;
+        return await OpenSearchHitAsync(hit, snapshot);
+    }
+
+    private LogSearchPage SearchFile(LogSearchSnapshot snapshot, SearchOptions options, LogSearchCursor cursor,
+        int maxResults, long maxScanBytes, CancellationToken token)
+    {
+        var expression = TextOperations.BuildRegex(options);
+
+        var results = new List<LogSearchHit>(maxResults);
+        var reader = snapshot.Reader;
+        var searchOffset = Math.Max(Math.Max(cursor.Offset, snapshot.HiddenOffset), reader.PreambleLength);
+        var pageEnd = snapshot.Length;
+        var readAheadEnd = searchOffset + Math.Min(maxScanBytes, Math.Max(0, pageEnd - searchOffset));
+        using var scan = reader.BeginSequentialScan(readAheadEnd: readAheadEnd);
+        var pendingLine = new StringBuilder(cursor.PendingText);
+        var cursorLineStart = cursor.LineOffset >= 0 ? cursor.LineOffset : searchOffset;
+        var pendingOffset = cursorLineStart;
+        var lineNumber = FindLineNumber(reader, searchOffset, token);
         string? notice = null;
-        var skippingOversizedLine = false;
-        var nextOffset = cursor;
+        var skippingOversizedLine = cursor.SkipLine;
+        var nextOffset = searchOffset;
 
-        while (cursor < pageEnd && results.Count < SearchResultsPerPage)
+        while (nextOffset < pageEnd)
         {
             token.ThrowIfCancellationRequested();
-            var page = reader.ReadPage(cursor, cancellationToken: token);
-            if (page.NextOffset <= cursor) break;
+            var maxPageBytes = (int)Math.Clamp(maxScanBytes - (nextOffset - searchOffset), 4, LogDataReader.DefaultPageBytes);
+            var page = scan.ReadPage(nextOffset, token, endOffset: pageEnd, maxPageBytes: maxPageBytes);
+            if (page.NextOffset <= nextOffset) break;
             foreach (var row in page.Rows)
             {
                 token.ThrowIfCancellationRequested();
+                if (!row.StartsWithinLine)
+                {
+                    pendingOffset = row.StartOffset;
+                    pendingLine.Clear();
+                    skippingOversizedLine = false;
+                }
                 nextOffset = row.EndOffset;
-                if (!row.StartsWithinLine) pendingOffset = row.StartOffset;
-                if (row.EndOffset - pendingOffset > MaximumSearchLineBytes)
+                var matchIndex = pendingOffset == cursorLineStart ? cursor.MatchIndex : 0;
+                if (!skippingOversizedLine && row.EndOffset - pendingOffset > MaximumSearchLineBytes)
                 {
                     skippingOversizedLine = true;
                     notice = $"Пропущена строка длиннее лимита поиска в {MaximumSearchLineBytes:N0} байт.";
@@ -1374,48 +1575,53 @@ internal sealed partial class LogView : UserControl, IDisposable
                 if (row.IsTruncated)
                 {
                     if (!skippingOversizedLine) pendingLine.Append(row.Text);
+                    if (nextOffset - searchOffset >= maxScanBytes)
+                    {
+                        var nextCursor = skippingOversizedLine ? new LogSearchCursor(nextOffset, 0, SkipLine: true)
+                            : new LogSearchCursor(nextOffset, matchIndex, LineOffset: pendingOffset, PendingText: pendingLine.ToString());
+                        return new LogSearchPage(results, nextCursor, true, notice);
+                    }
                     continue;
                 }
 
                 if (!skippingOversizedLine)
                 {
                     var text = pendingLine.Length == 0 ? row.Text : pendingLine.Append(row.Text).ToString();
-                    if (FindMatch(text, query, expression, matchCase, wholeWord) is { } match)
+                    var match = expression.Match(text, Math.Clamp(matchIndex, 0, text.Length));
+                    var lineDigest = match.Success ? SearchLineDigest(text) : "";
+                    var wasIncomplete = match.Success && nextOffset == pageEnd && !reader.IsNewlineBefore(pageEnd);
+                    var lineLengthBytes = checked((int)(nextOffset - pendingOffset));
+                    while (match.Success)
                     {
-                        results.Add(new SearchResult(pendingOffset, lineNumber, ClipText(text), match.Index, match.Length));
+                        results.Add(new LogSearchHit(pendingOffset, lineNumber, ClipMatch(text, match.Index), match.Index,
+                            match.Length, lineLengthBytes, lineDigest, wasIncomplete));
+                        var nextMatch = match.NextMatch();
+                        if (results.Count >= maxResults)
+                        {
+                            var nextCursor = nextMatch.Success
+                                ? new LogSearchCursor(pendingOffset, nextMatch.Index)
+                                : nextOffset < pageEnd ? new LogSearchCursor(nextOffset, 0) : null;
+                            return new LogSearchPage(results, nextCursor, nextCursor is not null, notice);
+                        }
+                        if (!nextMatch.Success) break;
+                        match = nextMatch;
                     }
                 }
                 pendingLine.Clear();
                 skippingOversizedLine = false;
                 lineNumber++;
-                if (results.Count == SearchResultsPerPage) break;
+
+                if (nextOffset - searchOffset >= maxScanBytes)
+                {
+                    var nextCursor = nextOffset < pageEnd ? new LogSearchCursor(nextOffset, 0) : null;
+                    return new LogSearchPage(results, nextCursor, nextCursor is not null, notice);
+                }
             }
-            cursor = page.NextOffset;
             if (!page.HasMore) break;
+            nextOffset = page.NextOffset;
         }
 
-        var resultNextOffset = results.Count == SearchResultsPerPage ? nextOffset : cursor;
-        return new SearchPage(results, resultNextOffset, resultNextOffset < _file.Length, notice);
-    }
-
-    private static MatchSpan? FindMatch(string text, string query, Regex? expression, bool matchCase, bool wholeWord)
-    {
-        if (expression is not null)
-        {
-            var match = expression.Match(text);
-            return match.Success ? new MatchSpan(match.Index, match.Length) : null;
-        }
-        var comparison = matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-        var found = text.IndexOf(query, comparison);
-        while (found >= 0)
-        {
-            if (!wholeWord || IsWordBoundary(text, found - 1) && IsWordBoundary(text, found + query.Length))
-            {
-                return new MatchSpan(found, query.Length);
-            }
-            found = text.IndexOf(query, found + 1, comparison);
-        }
-        return null;
+        return new LogSearchPage(results, null, false, notice);
     }
 
     private bool IsContinuationAt(long offset)
@@ -1426,9 +1632,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
         return !_reader.IsNewlineBefore(offset);
     }
-
-    private static bool IsWordBoundary(string text, int index) => index < 0 || index >= text.Length
-        || !(char.IsLetterOrDigit(text[index]) || text[index] == '_');
 
     private async Task JumpToTimeAsync()
     {
@@ -1467,22 +1670,21 @@ internal sealed partial class LogView : UserControl, IDisposable
     private long? FindTimeOffset(DateTime requested, CancellationToken token)
     {
         var cursor = _hiddenOffset;
-        long line = 0;
+        using var scan = _reader.BeginSequentialScan();
         while (cursor < _file.Length)
         {
             token.ThrowIfCancellationRequested();
-            var page = _reader.ReadPage(cursor, cancellationToken: token);
+            var page = scan.ReadPage(cursor, token);
             if (page.Rows.Count == 0 || page.NextOffset <= cursor)
             {
                 break;
             }
             foreach (var row in page.Rows)
             {
-                if (IsContinuationAt(row.StartOffset))
+                if (row.StartsWithinLine)
                 {
                     continue;
                 }
-                line++;
                 if (TryReadTimestamp(row.Text, out var timestamp) && timestamp >= requested)
                 {
                     return row.StartOffset;
@@ -1498,18 +1700,48 @@ internal sealed partial class LogView : UserControl, IDisposable
         RegexOptions.Compiled,
         TimeSpan.FromMilliseconds(20));
 
+    private static readonly string[] TimestampDateFormats = ["yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss"];
+    private static readonly string[] TimestampClockFormats = ["HH:mm:ss.FFFFFFF", "HH:mm:ss"];
+
     private static bool TryReadTimestamp(string line, out DateTime timestamp)
     {
         var match = TimestampPattern.Match(line);
         if (match.Success)
         {
-            var value = match.Groups["date"].Success
-                ? $"{match.Groups["date"].Value} {match.Groups["time"].Value}"
-                : match.Groups["clock"].Value;
-            var formats = match.Groups["date"].Success
-                ? new[] { "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss" }
-                : new[] { "HH:mm:ss.FFFFFFF", "HH:mm:ss" };
-            if (DateTime.TryParseExact(value, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp))
+            var date = match.Groups["date"];
+            var time = match.Groups["time"];
+            var clock = match.Groups["clock"];
+            Span<char> value = stackalloc char[32];
+            int length;
+            string[] formats;
+            if (date.Success)
+            {
+                var dateSpan = date.ValueSpan;
+                var timeSpan = time.ValueSpan;
+                if (timeSpan.Length > 16)
+                {
+                    timestamp = default;
+                    return false;
+                }
+                dateSpan.CopyTo(value);
+                value[dateSpan.Length] = ' ';
+                timeSpan.CopyTo(value[(dateSpan.Length + 1)..]);
+                length = dateSpan.Length + 1 + timeSpan.Length;
+                formats = TimestampDateFormats;
+            }
+            else
+            {
+                var clockSpan = clock.ValueSpan;
+                if (clockSpan.Length > 16)
+                {
+                    timestamp = default;
+                    return false;
+                }
+                clockSpan.CopyTo(value);
+                length = clockSpan.Length;
+                formats = TimestampClockFormats;
+            }
+            if (DateTime.TryParseExact(value[..length], formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp))
             {
                 return true;
             }
@@ -1710,6 +1942,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private static void CommitTrim(string path, string staged, FileStream source, FileStamp expected, CancellationToken token)
     {
+        using var publishLock = DocumentFiles.AcquireSaveLock(path);
         token.ThrowIfCancellationRequested();
         if (ReadFileStamp(path, source) != expected)
         {
@@ -1953,6 +2186,11 @@ internal sealed partial class LogView : UserControl, IDisposable
                 {
                     _ = RefreshCurrentPageNumbersAsync(reader, page, generation);
                 }
+                if (_levelFilterViewport?.IsVisible == true && _filteredPage is { Rows.Count: > 0 } filteredPage
+                    && filteredPage.Rows[0].SourceLine is null && filteredPage.Rows[0].StartOffset <= _indexedTo)
+                {
+                    _ = RefreshFilteredLineNumbersAsync(reader, filteredPage, _filterGeneration);
+                }
                 if (_indexedTo > start.Offset && _indexedTo < _file.Length && !_indexPaused)
                 {
                     StartIndexIfNeeded();
@@ -1974,21 +2212,30 @@ internal sealed partial class LogView : UserControl, IDisposable
         LogLineCheckpoint closest;
         lock (_lineIndexGate)
         {
-            if (offset - reader.PreambleLength > 128 * 1024 && offset > _indexedTo)
+            if (offset > _indexedTo)
             {
-                return null;
-            }
+                if (offset - _indexedTo > 128 * 1024)
+                {
+                    return null;
+                }
 
-            closest = new(reader.PreambleLength, 0);
-            var low = 0;
-            var high = _lineIndex.Count;
-            while (low < high)
-            {
-                var middle = low + (high - low) / 2;
-                if (_lineIndex[middle].Offset <= offset) low = middle + 1;
-                else high = middle;
+                closest = _indexedTo >= reader.PreambleLength
+                    ? new LogLineCheckpoint(_indexedTo, _indexedLineCount)
+                    : new LogLineCheckpoint(reader.PreambleLength, 0);
             }
-            if (low > 0) closest = _lineIndex[low - 1];
+            else
+            {
+                closest = new(reader.PreambleLength, 0);
+                var low = 0;
+                var high = _lineIndex.Count;
+                while (low < high)
+                {
+                    var middle = low + (high - low) / 2;
+                    if (_lineIndex[middle].Offset <= offset) low = middle + 1;
+                    else high = middle;
+                }
+                if (low > 0) closest = _lineIndex[low - 1];
+            }
         }
 
         var result = reader.ScanLineBreaks(closest, offset, null, token);
@@ -2081,6 +2328,8 @@ internal sealed partial class LogView : UserControl, IDisposable
             : "";
         var last = _displaySourceLineNumbers.LastOrDefault(value => value.HasValue);
         var max = Math.Max(KnownLineCount ?? 0, last ?? 0);
+        if (_levelFilterViewport?.IsVisible == true)
+            max = Math.Max(max, _filteredSourceLineNumbers.LastOrDefault(value => value.HasValue) ?? 0);
         var text = new FormattedText(LineNumbers.Format(max), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
             new Typeface(_lineGutterText.FontFamily), _lineGutterText.FontSize, _lineGutterText.Foreground);
         _lineGutterScrollViewer.Width = Math.Max(32, Math.Ceiling(text.Width) + 16);
@@ -2095,7 +2344,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_pageEdit is null)
         {
             UpdateLineGutterText();
-            _levelBands.InvalidateVisual();
+            if (_levelFilterViewport?.IsVisible != true) _levelBands.InvalidateVisual();
         }
     }
 
@@ -2125,6 +2374,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void OnLogScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
+        if (_levelFilterViewport?.IsVisible == true) return;
         if (_logScrollViewer is { } scrollViewer)
         {
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
@@ -2135,14 +2385,19 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void UpdateLineGutterText()
     {
-        if (_displaySourceLineNumbers.Length == 0)
+        var isFiltered = _levelFilterViewport?.IsVisible == true;
+        var sourceLineNumbers = isFiltered ? _filteredSourceLineNumbers : _displaySourceLineNumbers;
+        var scrollViewer = isFiltered ? _filteredLogScrollViewer : _logScrollViewer;
+        if (sourceLineNumbers.Length == 0)
         {
             _lineGutterText.Text = string.Empty;
             return;
         }
 
         var values = new List<string>();
-        var layout = _logText.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault()?.TextLayout;
+        // Filtered rows are never wrapped. Their gutter can be built directly from the page,
+        // even when the text box has not laid out all of its text yet.
+        var layout = isFiltered ? null : _logText.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault()?.TextLayout;
         if (layout is not null && layout.TextLines.Count > 0)
         {
             var text = _logText.Text ?? string.Empty;
@@ -2157,17 +2412,17 @@ internal sealed partial class LogView : UserControl, IDisposable
 
                 var startsLogicalRow = start == _displayRowStarts[rowIndex];
                 values.Add(startsLogicalRow
-                    ? _displaySourceLineNumbers[rowIndex] is { } line ? LineNumbers.Format(line) : "?"
+                    ? sourceLineNumbers[rowIndex] is { } line ? LineNumbers.Format(line) : "?"
                     : string.Empty);
             }
         }
         else
         {
-            values.AddRange(_displaySourceLineNumbers.Select(value => value is { } line ? LineNumbers.Format(line) : "?"));
+            values.AddRange(sourceLineNumbers.Select(value => value is { } line ? LineNumbers.Format(line) : "?"));
         }
 
         _lineGutterText.Text = string.Join(Environment.NewLine, values);
-        if (_logScrollViewer is { } scrollViewer)
+        if (scrollViewer is not null)
         {
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
         }
@@ -2228,7 +2483,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         var enabled = !_busy && !PageNavigationBlocked;
         UpdatePageModeControls();
         _levelFilterButton.IsVisible = !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path));
-        _levelBands.IsVisible = _levelFilterButton.IsVisible && _pageEdit is null;
+        _levelBands.IsVisible = _levelFilterButton.IsVisible && _pageEdit is null && _levelFilterViewport?.IsVisible != true;
         _levelFilterButton.IsEnabled = CanFilterLevels || _levelFilterOpen;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
         _liveLabel.Text = _isDraft ? "" : _consoleDisconnectMessage is not null ? "● Источник отключён"
@@ -2295,9 +2550,16 @@ internal sealed partial class LogView : UserControl, IDisposable
         StatusChanged?.Invoke(text);
     }
 
-    private static string ClipText(string value, int maxLength = 160) => value.Length <= maxLength
-        ? value
-        : string.Concat(value.AsSpan(0, maxLength - 1), "…");
+    private static string ClipMatch(string value, int matchIndex, int maxLength = 160)
+    {
+        if (value.Length <= maxLength) return value;
+        var begin = Math.Max(0, matchIndex - 40);
+        var prefix = begin > 0 ? "…" : string.Empty;
+        var end = Math.Min(value.Length, begin + maxLength - prefix.Length);
+        var suffix = end < value.Length ? "…" : string.Empty;
+        if (suffix.Length > 0) end--;
+        return string.Concat(prefix, value.AsSpan(begin, end - begin), suffix);
+    }
 
     private bool TryParseRequestedTime(string text, out DateTime requested)
     {
@@ -2349,12 +2611,12 @@ internal sealed partial class LogView : UserControl, IDisposable
             info.Exists, $"fallback:{info.CreationTimeUtc.Ticks}:{info.Exists}");
     }
 
-    private readonly record struct FileStamp(long Length, DateTime LastWriteUtc, DateTime CreationUtc, bool Exists, string Identity)
+    private static DateTime ToDateTime(Win32FileTime value) => DateTime.FromFileTimeUtc(((long)value.High << 32) | value.Low);
+
+    internal readonly record struct FileStamp(long Length, DateTime LastWriteUtc, DateTime CreationUtc, bool Exists, string Identity)
     {
         public static FileStamp Read(string path, FileStream file) => ReadFileStamp(path, file);
     }
-
-    private static DateTime ToDateTime(Win32FileTime value) => DateTime.FromFileTimeUtc(((long)value.High << 32) | value.Low);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -2400,7 +2662,4 @@ internal sealed partial class LogView : UserControl, IDisposable
         public uint FileIndexLow;
     }
 
-    private readonly record struct MatchSpan(int Index, int Length);
-    private sealed record SearchResult(long Offset, long? LineNumber, string Preview, int MatchIndex, int MatchLength);
-    private sealed record SearchPage(IReadOnlyList<SearchResult> Results, long NextOffset, bool HasMore, string? Message);
 }

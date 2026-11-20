@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -70,19 +71,41 @@ internal static partial class NativePayloadBootstrap
 
     private static Dictionary<string, byte[]>? ReadPayloadHashes(Assembly assembly)
     {
+        using var stream = assembly.GetManifestResourceStream(ResourcePrefix + "sha256");
+        if (stream is null) return null;
+
+        using var reader = new StreamReader(stream);
+        return ParsePayloadHashes(reader);
+    }
+
+    internal static Dictionary<string, byte[]> ParsePayloadHashes(TextReader reader)
+    {
+        var expectedNames = new HashSet<string>(NativeFiles, StringComparer.OrdinalIgnoreCase);
         var result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (var name in NativeFiles)
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
         {
-            using var stream = assembly.GetManifestResourceStream(ResourcePrefix + name);
-            if (stream is null)
+            var separator = line.IndexOf(' ');
+            if (separator <= 0 || line.Length != separator + 65)
             {
-                if (result.Count == 0) return null;
-                throw new InvalidDataException($"Не найден встроенный ресурс {name}.");
+                throw new InvalidDataException("Недопустимая запись контрольной суммы встроенной библиотеки.");
             }
 
-            if (stream.Length == 0) throw new InvalidDataException($"Встроенная библиотека {name} пуста.");
-            result.Add(name, SHA256.HashData(stream));
+            var name = line[..separator];
+            if (!expectedNames.Contains(name) || result.ContainsKey(name))
+                throw new InvalidDataException($"Недопустимое имя встроенной библиотеки в контрольных суммах: {name}.");
+            try
+            {
+                result.Add(name, Convert.FromHexString(line.AsSpan(separator + 1)));
+            }
+            catch (FormatException error)
+            {
+                throw new InvalidDataException($"Недопустимая контрольная сумма встроенной библиотеки {name}.", error);
+            }
         }
+
+        if (result.Count != NativeFiles.Length)
+            throw new InvalidDataException("В списке контрольных сумм отсутствует встроенная библиотека.");
 
         return result;
     }
@@ -173,19 +196,43 @@ internal static partial class NativePayloadBootstrap
         }
     }
 
-    private static bool IsComplete(string directory, Dictionary<string, byte[]> hashes)
+    internal static bool IsComplete(string directory, Dictionary<string, byte[]> hashes)
     {
         if (!Directory.Exists(directory) || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return false;
-        foreach (var (name, expectedHash) in hashes)
+        var checks = new Task<PayloadHashCheck>[NativeFiles.Length];
+        for (var i = 0; i < NativeFiles.Length; i++)
         {
+            var name = NativeFiles[i];
+            var expectedHash = hashes[name];
             var path = Path.Combine(directory, name);
-            if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0
-                || !HashMatches(path, expectedHash)) return false;
+            checks[i] = Task.Run(() =>
+            {
+                try
+                {
+                    if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                        return new PayloadHashCheck(false, null);
+                    return new PayloadHashCheck(HashMatches(path, expectedHash), null);
+                }
+                catch (Exception error)
+                {
+                    return new PayloadHashCheck(false, error);
+                }
+            });
+        }
+
+        var results = Task.WhenAll(checks).GetAwaiter().GetResult();
+        foreach (var result in results)
+        {
+            if (result.Error is not null)
+                ExceptionDispatchInfo.Capture(result.Error).Throw();
+            if (!result.IsValid) return false;
         }
         return true;
     }
 
-    private static bool HashMatches(string path, byte[] expected)
+    private readonly record struct PayloadHashCheck(bool IsValid, Exception? Error);
+
+    internal static bool HashMatches(string path, byte[] expected)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
             128 * 1024, FileOptions.SequentialScan);

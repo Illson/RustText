@@ -123,6 +123,103 @@ public sealed class LogTests
         Assert.Equal(file.Length, eof.NextOffset);
     }
 
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8, false)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, true)]
+    [InlineData(TextEncodingKind.Utf16BigEndian, true)]
+    [InlineData(TextEncodingKind.Windows1251, false)]
+    public void SequentialScanPreservesRowsAcrossPageAndBufferBoundaries(TextEncodingKind encoding, bool bom)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "sequential.log");
+        var shortLines = string.Concat(Enumerable.Repeat("Юг > лог\r\n", 9_000));
+        var longLine = new string('я', 132_000);
+        File.WriteAllBytes(path, Encode(shortLines + longLine + "\r\nпоследняя", encoding, bom));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        using var scan = reader.BeginSequentialScan();
+
+        long offset = 0;
+        var pages = 0;
+        while (offset < file.Length)
+        {
+            var expected = reader.ReadPage(offset);
+            var actual = scan.ReadPage(offset);
+            Assert.Equal(expected.Rows.AsEnumerable(), actual.Rows);
+            Assert.Equal(expected.NextOffset, actual.NextOffset);
+            Assert.Equal(expected.HasMore, actual.HasMore);
+            Assert.True(actual.NextOffset > offset);
+            offset = actual.NextOffset;
+            pages++;
+        }
+
+        Assert.True(pages > 2);
+        Assert.Equal(file.Length, offset);
+    }
+
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8, false)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, true)]
+    [InlineData(TextEncodingKind.Utf16BigEndian, true)]
+    public void PageStartsWithinLineIsCorrectForOrdinaryAndSequentialReads(TextEncodingKind encoding, bool bom)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "page-starts.log");
+        var shortLines = string.Concat(Enumerable.Range(0, 81).Select(index => $"row-{index}\n"));
+        var longLine = new string('x', 20 * 1024) + "\nafter-long-line\n";
+        File.WriteAllBytes(path, Encode(shortLines + longLine, encoding, bom));
+
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        using var scan = reader.BeginSequentialScan();
+
+        var firstPage = reader.ReadPage(0);
+        var ordinaryNext = reader.ReadPage(firstPage.NextOffset);
+        var scanFirstPage = scan.ReadPage(0);
+        var scanNext = scan.ReadPage(scanFirstPage.NextOffset);
+
+        Assert.Equal(80, firstPage.Rows.Count);
+        Assert.False(ordinaryNext.Rows[0].StartsWithinLine);
+        Assert.False(scanNext.Rows[0].StartsWithinLine);
+
+        var longLineOffset = Encode(shortLines, encoding, bom).Length;
+        var ordinaryLongPage = reader.ReadPage(longLineOffset, maxPageBytes: 16 * 1024);
+        var ordinaryContinuation = reader.ReadPage(ordinaryLongPage.NextOffset, maxPageBytes: 16 * 1024);
+        using var shortScan = reader.BeginSequentialScan(16 * 1024);
+        var scanLongPage = shortScan.ReadPage(longLineOffset);
+        var scanContinuation = shortScan.ReadPage(scanLongPage.NextOffset);
+
+        Assert.True(ordinaryLongPage.Rows[0].IsTruncated);
+        Assert.True(ordinaryContinuation.Rows[0].StartsWithinLine);
+        Assert.True(scanLongPage.Rows[0].IsTruncated);
+        Assert.True(scanContinuation.Rows[0].StartsWithinLine);
+    }
+
+    [Fact]
+    public void SequentialScanReusesCursorAfterCancellationAndRereadsTruncatedFile()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "truncated.log");
+        File.WriteAllText(path, string.Concat(Enumerable.Repeat("previous\n", 600)));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        using var scan = reader.BeginSequentialScan();
+
+        var first = scan.ReadPage(0);
+        Assert.True(first.HasMore);
+        Assert.Throws<OperationCanceledException>(() => scan.ReadPage(first.NextOffset, new CancellationToken(true)));
+        Assert.Equal("previous", scan.ReadPage(first.NextOffset).Rows[0].Text);
+
+        using (var writer = new FileStream(path, FileMode.Truncate, FileAccess.Write, FileShare.ReadWrite))
+        {
+            writer.Write("replacement"u8);
+        }
+        var replacement = scan.ReadPage(0);
+        Assert.Equal("replacement", Assert.Single(replacement.Rows).Text);
+        Assert.Equal(file.Length, replacement.NextOffset);
+        Assert.False(replacement.HasMore);
+    }
+
     [Fact]
     public void GetEndOffset_1000CrDelimitedRowsReturnsLastEighty()
     {

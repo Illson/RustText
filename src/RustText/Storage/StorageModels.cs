@@ -6,6 +6,8 @@ namespace RustText.Demo;
 internal sealed record WorkspaceLayout(long GroupId, long[]? Tabs = null, long? ActiveTab = null, string? Split = null, double Ratio = 0.5, WorkspaceLayout? First = null, WorkspaceLayout? Second = null);
 internal sealed record SessionTab(long Id, string? Path, TextEncodingKind Encoding, int SelectionStart = 0, int SelectionLength = 0, bool Reversed = false, double ScrollX = 0, double ScrollY = 0, string? DraftRef = null, string? DraftSha256 = null, long? LogOffset = null, long? LineCount = null, long? LastWorkedMs = null, LineEndingKind LineEnding = LineEndingKind.Lf, byte[]? LineEndingMap = null, FileStamp? Stamp = null, LogTabState? Log = null)
 {
+    public TextEncodingKind? DiskEncoding { get; init; }
+    public bool? AutoDetectEncoding { get; init; }
     public bool JsonValidationDisabled { get; init; }
     public LegacyFileStamp? LegacyStamp { get; init; }
     public bool SelectionUsesUtf8 { get; init; }

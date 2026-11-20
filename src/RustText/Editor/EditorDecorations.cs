@@ -287,28 +287,29 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
             {
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 var count = 0;
-                foreach (var visual in view.VisualLines)
+                foreach (var line in VisibleDocumentLines(view, document))
                 {
-                    for (var number = visual.FirstDocumentLine.LineNumber; number <= visual.LastDocumentLine.LineNumber; number++)
+                    if (line.Length > 16 * 1024)
                     {
-                        var line = document.GetLineByNumber(number);
-                        if (line.Length > 16 * 1024)
+                        continue;
+                    }
+
+                    foreach (Match match in regex.Matches(document.GetText(line.Offset, line.Length)))
+                    {
+                        if (match.Length > 0)
                         {
-                            continue;
+                            all.AddSegment(view, new TextSegment { StartOffset = line.Offset + match.Index, Length = match.Length });
                         }
 
-                        foreach (Match match in regex.Matches(document.GetText(line.Offset, line.Length)))
+                        if (++count >= 5000 || System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds > 25)
                         {
-                            if (match.Length > 0)
-                            {
-                                all.AddSegment(view, new TextSegment { StartOffset = line.Offset + match.Index, Length = match.Length });
-                            }
-
-                            if (++count >= 5000 || System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds > 25)
-                            {
-                                break;
-                            }
+                            break;
                         }
+                    }
+
+                    if (count >= 5000 || System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds > 25)
+                    {
+                        break;
                     }
                 }
             }
@@ -328,7 +329,27 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
             active.AddSegment(view, new TextSegment { StartOffset = current.Offset, Length = current.Length });
             if (active.CreateGeometry() is { } selected)
             {
-            drawingContext.DrawGeometry(FocusTheme.CurrentMatch, null, selected);
+                drawingContext.DrawGeometry(FocusTheme.CurrentMatch, null, selected);
+            }
+        }
+    }
+
+    private static IEnumerable<DocumentLine> VisibleDocumentLines(TextView view, TextDocument document)
+    {
+        foreach (var visual in view.VisualLines)
+        {
+            var first = visual.FirstDocumentLine;
+            var line = first;
+            yield return line;
+            if (first == visual.LastDocumentLine) continue;
+
+            // A folded visual line can span many hidden document lines.
+            foreach (var element in visual.Elements)
+            {
+                var offset = first.Offset + element.RelativeTextOffset;
+                if (offset < line.Offset + line.TotalLength) continue;
+                line = document.GetLineByOffset(offset);
+                yield return line;
             }
         }
     }

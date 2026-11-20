@@ -51,7 +51,7 @@ public partial class MainWindow
             if (file.Length <= DocumentFiles.MaximumDocumentBytes)
             {
                 // Keep accepting edits until the disk snapshot is ready.
-                loaded = await DocumentFiles.ReadAsync(watch.Path, tab.Encoding, watch.Token);
+                loaded = await DocumentFiles.ReadAsync(watch.Path, tab.ReadEncoding, watch.Token);
                 if (!IsCurrent() || tab.Stamp != stamp || !ReferenceEquals(tab.Editor, editor)) return false;
                 if (tab.Loading || DocumentViews(tab).Any(view => view.Tab.Saving)) return true;
                 if (loaded.Stamp.Sha256 == stamp.Sha256)
@@ -67,13 +67,15 @@ public partial class MainWindow
             {
                 // Open the paged editor before moving the draft: opening the replacement can fail.
                 var views = DocumentViews(tab);
-                AttachLog(tab, watch.Path, tab.Encoding, new LogTabState(tab.Encoding, WordWrap: _wordWrap,
+                var encoding = tab.ReadEncoding;
+                AttachLog(tab, watch.Path, encoding, new LogTabState(encoding, WordWrap: _wordWrap,
                     AutoRefresh: tab.AutoRefresh, EditPages: true), preserveEditorChanges: dirty);
                 if (dirty) tab.Log?.ReportPreservedExternalEdit();
                 foreach (var (owner, peer) in views)
                 {
                     if (ReferenceEquals(peer, tab)) continue;
-                    owner.AttachLog(peer, watch.Path, peer.Encoding, new LogTabState(peer.Encoding, WordWrap: owner._wordWrap,
+                    var peerEncoding = peer.ReadEncoding;
+                    owner.AttachLog(peer, watch.Path, peerEncoding, new LogTabState(peerEncoding, WordWrap: owner._wordWrap,
                         AutoRefresh: peer.AutoRefresh, EditPages: true));
                     peer.RestoredDirty = peer.Dirty = false;
                     owner.UpdateTab(peer);
@@ -157,9 +159,7 @@ public partial class MainWindow
     private WorkTab AddExternalDraft(WorkTab source, TextDocument document)
     {
         var draft = AddRecoveryTab(source);
-        draft.Encoding = source.Encoding;
-        draft.Ending = source.Ending;
-        draft.OriginalEndings = source.OriginalEndings;
+        draft.Format = source.Format;
         draft.RestoredDirty = draft.Dirty = true;
         AttachEditor(draft, document);
         return draft;
