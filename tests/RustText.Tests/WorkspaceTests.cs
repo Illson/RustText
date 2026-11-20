@@ -1734,6 +1734,40 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task CtrlClickAboveCaretLimitKeepsExistingSelections() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "ctrl-click-limit.txt");
+        await File.WriteAllTextAsync(path, "a b\n" + string.Join('\n', Enumerable.Repeat("a", 9_999)));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var area = editor.TextArea;
+            var view = area.TextView;
+            view.EnsureVisualLines();
+            area.Focus();
+            area.Caret.Offset = 0;
+            Press(window, Key.L, RawInputModifiers.Control | RawInputModifiers.Shift, PhysicalKey.L, "L");
+
+            Assert.Equal(MultiCaretEditing.MaxCarets, MultiCaretEditing.Count(area));
+            var originalRanges = area.Selection.Segments
+                .Select(segment => (segment.StartOffset, segment.EndOffset)).ToArray();
+            var originalPrimary = MultiCaretEditing.Primary(area);
+            var point = view.TranslatePoint(view.GetVisualPosition(new TextViewPosition(1, 3),
+                VisualYPosition.LineMiddle) - view.ScrollOffset, window)!.Value;
+
+            window.MouseDown(point, MouseButton.Left, RawInputModifiers.Control);
+            window.MouseUp(point, MouseButton.Left, RawInputModifiers.Control);
+
+            Assert.Equal(MultiCaretEditing.MaxCarets, MultiCaretEditing.Count(area));
+            Assert.Equal(originalRanges, area.Selection.Segments
+                .Select(segment => (segment.StartOffset, segment.EndOffset)));
+            Assert.Equal(originalPrimary, MultiCaretEditing.Primary(area));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task AltClickTogglesCaretsAndUpAddsOneOnThePreviousLine() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "mouse.txt");

@@ -186,7 +186,15 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         var existing = Array.FindIndex(ranges, range => click.Offset >= range.Start && click.Offset <= range.End);
         if (existing < 0)
         {
-            SetCarets([.. ranges, new(click.Offset, click.Offset)], ranges.Length);
+            if (ranges.Length >= MaxCarets)
+            {
+                _status($"Слишком много курсоров. Допустимо до {LineNumbers.Format(MaxCarets)}.");
+                SetCarets(ranges, click.PrimaryIndex);
+            }
+            else
+            {
+                SetCarets([.. ranges, new(click.Offset, click.Offset)], ranges.Length);
+            }
         }
         else if (ranges.Length > 1)
         {
