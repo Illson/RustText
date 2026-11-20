@@ -53,12 +53,33 @@
                 <ControlTemplate>
                     <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
                         <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,5,8,0">
-                            <Grid ColumnDefinitions="*,Auto">
-                                <ScrollViewer Name="TabHeaderScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                                <Grid.Styles>
+                                    <Style Selector="Track#TabScrollPosition[Maximum=0]">
+                                        <Setter Property="IsVisible" Value="False" />
+                                    </Style>
+                                </Grid.Styles>
+                                <ScrollViewer Name="TabHeaderScroll" AllowAutoHide="False"
+                                              HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
                                     <ItemsPresenter Name="PART_ItemsPresenter" ItemsPanel="{TemplateBinding ItemsPanel}" />
                                 </ScrollViewer>
                                 <ContentPresenter Grid.Column="1" Content="{TemplateBinding HeaderActions}"
                                                   VerticalAlignment="Center" Margin="4,0,0,3" />
+                                <Track Name="TabScrollPosition" Grid.Row="1" Height="2" Orientation="Horizontal"
+                                       ClipToBounds="True" IsHitTestVisible="False" Opacity="0.65"
+                                       Maximum="{CompiledBinding #TabHeaderScroll.ScrollBarMaximum.X, Mode=OneWay}"
+                                       ViewportSize="{CompiledBinding #TabHeaderScroll.Viewport.Width, Mode=OneWay}"
+                                       Value="{CompiledBinding #TabHeaderScroll.Offset.X, Mode=OneWay}">
+                                    <Track.Thumb>
+                                        <Thumb>
+                                            <Thumb.Template>
+                                                <ControlTemplate>
+                                                    <Border Background="{x:Static local:FocusTheme.Muted}" CornerRadius="1" />
+                                                </ControlTemplate>
+                                            </Thumb.Template>
+                                        </Thumb>
+                                    </Track.Thumb>
+                                </Track>
                             </Grid>
                         </Border>
                         <Panel Grid.Row="1" ClipToBounds="True">
