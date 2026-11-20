@@ -16,8 +16,10 @@ namespace RustText.Tests;
 [Collection(HeadlessCollection.Name)]
 public sealed class MainWindowDropTests
 {
-    [Fact]
-    public Task DroppingLogOpensLogModeAndRefreshesAppendedError() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task DroppingLogOpensLogModeAndRefreshesAppendedError(bool alreadyInEditor) => HeadlessTests.RunAsync(async profile =>
     {
         var logPath = Path.Combine(profile, "dropped.log");
         var textPath = Path.Combine(profile, "dropped.txt");
@@ -29,6 +31,11 @@ public sealed class MainWindowDropTests
         {
             await HeadlessTests.WaitForAsync(() => (bool)typeof(MainWindow)
                 .GetField("_restoreFinished", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!);
+            if (alreadyInEditor)
+            {
+                var open = typeof(MainWindow).GetMethod("OpenPathAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                await (Task)open.Invoke(window, [logPath, false, null])!;
+            }
             var logFile = await window.StorageProvider.TryGetFileFromPathAsync(logPath);
             var textFile = await window.StorageProvider.TryGetFileFromPathAsync(textPath);
             Assert.NotNull(logFile);
@@ -44,7 +51,10 @@ public sealed class MainWindowDropTests
             await HeadlessTests.WaitForAsync(() => Tabs(window).Any(tab => Equals(TabPath(tab), logPath) && TabLog(tab) is not null)
                 && Tabs(window).Any(tab => Equals(TabPath(tab), textPath) && TabEditor(tab) is not null));
             var tabs = Tabs(window);
-            var log = Assert.IsType<LogView>(TabLog(Assert.Single(tabs, tab => Equals(TabPath(tab), logPath))));
+            var log = Assert.IsType<LogView>(TabLog(Assert.Single(tabs, tab => Equals(TabPath(tab), logPath)
+                && TabLog(tab) is not null)));
+            if (alreadyInEditor)
+                Assert.Single(tabs, tab => Equals(TabPath(tab), logPath) && TabEditor(tab) is not null);
             Assert.NotNull(TabEditor(Assert.Single(tabs, tab => Equals(TabPath(tab), textPath))));
             await log.InitialPageLoad;
 

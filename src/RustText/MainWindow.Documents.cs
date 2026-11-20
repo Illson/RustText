@@ -117,7 +117,8 @@ public partial class MainWindow
             throw new FileNotFoundException($"Файл не найден. {fullPath}", fullPath);
         }
 
-        var mode = editPages ? FileOpenMode.PagedEditor : asLog ? FileOpenMode.Log : FileOpenMode.Editor;
+        var openAsLog = asLog || (preferLog && file.Length <= LargeFilePromptBytes);
+        var mode = editPages ? FileOpenMode.PagedEditor : openAsLog ? FileOpenMode.Log : FileOpenMode.Editor;
         if (mode == FileOpenMode.Editor)
         {
             var existingEditor = _tabs.Values.FirstOrDefault(tab =>
@@ -129,10 +130,6 @@ public partial class MainWindow
                 var useLog = Settings.OpenLargeFilesAsLog ?? await ChooseLargeFileModeAsync(file);
                 if (useLog is null || _closed || _closing) return null;
                 mode = useLog == true ? FileOpenMode.Log : FileOpenMode.PagedEditor;
-            }
-            else if (preferLog)
-            {
-                mode = FileOpenMode.Log;
             }
             else if (file.Length > DocumentFiles.MaximumDocumentBytes)
             {

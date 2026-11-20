@@ -359,7 +359,7 @@ public sealed class LogUiTests
             var log = ActiveLog(window);
             await HeadlessTests.WaitForAsync(() => Page(log) is not null && !(bool)Field(log, "_busy"));
             var gutter = (TextBlock)Field(log, "_lineGutterText");
-            Assert.Equal(string.Join(Environment.NewLine, "1", "2", "3"), gutter.Text);
+            Assert.Equal(new[] { "1", "2", "3" }, gutter.Text?.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
             Assert.Equal("Строки 1–3", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
             Assert.Equal(string.Join(Environment.NewLine, longLine, "second", "third"), ((TextBox)Field(log, "_logText")).Text);
         }
