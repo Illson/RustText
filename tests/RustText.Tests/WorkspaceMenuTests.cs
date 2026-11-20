@@ -2,8 +2,10 @@ using System.Reflection;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Input;
+using Avalonia.Input.Raw;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.VisualTree;
@@ -18,8 +20,10 @@ public sealed class WorkspaceMenuTests
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
-    [Fact]
-    public Task TitleMenuCreatesAnEmptyWorkspaceAndRestoresItsBadgeAfterRestart() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData(false, "#BAA0F3")]
+    [InlineData(true, "#377562")]
+    public Task TitleMenuCreatesAnEmptyWorkspaceAndRestoresItsBadgeAfterRestart(bool customColor, string expectedColor) => HeadlessTests.RunAsync(async profile =>
     {
         var catalog = new WorkspaceCatalogStore(profile);
         await catalog.CreateAsync("Существующее пространство");
@@ -44,7 +48,32 @@ public sealed class WorkspaceMenuTests
             var dialog = Assert.Single(window.OwnedWindows);
             Assert.Equal("Новая рабочая область", dialog.Title);
             FindInput<TextBox>(dialog, "WorkspaceNameInput").Text = "Логи сборки";
-            FindInput<ComboBox>(dialog, "WorkspaceColorInput").SelectedItem = "Сиреневый";
+            var color = FindInput<ColorView>(dialog, "WorkspaceColorInput");
+            Assert.False(color.IsVisible);
+            var swatch = FindInput<ToggleButton>(dialog, "WorkspaceColor-BAA0F3");
+            Assert.Equal("Сиреневый", AutomationProperties.GetName(swatch));
+            Assert.True(swatch.Focus());
+            dialog.KeyPress(Key.Space, RawInputModifiers.None, PhysicalKey.Space, " ");
+            dialog.KeyRelease(Key.Space, RawInputModifiers.None, PhysicalKey.Space, " ");
+            Assert.True(swatch.IsChecked);
+            Assert.Equal(Color.Parse("#BAA0F3"), color.Color);
+            Assert.False(FindInput<ToggleButton>(dialog, "WorkspaceColor-75A9FF").IsChecked);
+            if (customColor)
+            {
+                var custom = FindInput<Button>(dialog, "WorkspaceCustomColor");
+                ClickControl(dialog, custom);
+                Assert.True(color.IsVisible);
+                Assert.Contains(color.GetVisualDescendants().OfType<ColorSpectrum>(), spectrum => spectrum.IsVisible);
+                ClickControl(dialog, swatch);
+                Assert.False(color.IsVisible);
+                Assert.True(swatch.IsChecked);
+                ClickControl(dialog, custom);
+                color.Color = Color.Parse(expectedColor);
+                Assert.False(swatch.IsChecked);
+            }
+
+            var preview = FindInput<Border>(dialog, "WorkspaceBadgePreview");
+            Assert.Equal(Color.Parse(expectedColor), Assert.IsAssignableFrom<ISolidColorBrush>(preview.BorderBrush).Color);
             var symbol = FindInput<TextBox>(dialog, "WorkspaceSymbolInput");
             symbol.Text = "AB";
             var create = dialog.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "Создать"));
@@ -55,15 +84,15 @@ public sealed class WorkspaceMenuTests
             symbol.Text = "★";
             create.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await HeadlessTests.WaitForAsync(() => !dialog.IsVisible && BadgeSymbol(window) == "★");
-            AssertBadge(window);
+            AssertBadge(window, expectedColor);
             Assert.Null(ActiveEditor(window));
             var saved = (await catalog.LoadAsync()).Workspaces.Single(entry => entry.Name == "Логи сборки");
             Assert.Equal("★", saved.Symbol);
-            Assert.Equal("#BAA0F3", saved.Color);
+            Assert.Equal(expectedColor, saved.Color);
 
             await CloseWindowAsync(window);
             window = await OpenWindowAsync();
-            AssertBadge(window);
+            AssertBadge(window, expectedColor);
             menu = await OpenMenuAsync(window);
             var defaultWorkspace = menu.Items.OfType<MenuItem>().Single(item => Header(item) == "По умолчанию");
             menu.IsSubMenuOpen = false;
@@ -84,12 +113,17 @@ public sealed class WorkspaceMenuTests
     private static async Task<MenuItem> OpenMenuAsync(MainWindow window)
     {
         var menu = window.FindControl<MenuItem>("WorkspaceMenuButton")!;
-        window.UpdateLayout();
-        var point = menu.TranslatePoint(new Point(menu.Bounds.Width / 2, menu.Bounds.Height / 2), window)!.Value;
-        window.MouseDown(point, MouseButton.Left);
-        window.MouseUp(point, MouseButton.Left);
+        ClickControl(window, menu);
         await HeadlessTests.WaitForAsync(() => menu.IsSubMenuOpen);
         return menu;
+    }
+
+    private static void ClickControl(Window window, Control control)
+    {
+        window.UpdateLayout();
+        var point = control.TranslatePoint(new Point(control.Bounds.Width / 2, control.Bounds.Height / 2), window)!.Value;
+        window.MouseDown(point, MouseButton.Left);
+        window.MouseUp(point, MouseButton.Left);
     }
 
     private static string Header(MenuItem item) => item.Header is TextBlock text ? text.Text! : (string)item.Header!;
@@ -99,11 +133,11 @@ public sealed class WorkspaceMenuTests
 
     private static string? BadgeSymbol(MainWindow window) => window.FindControl<TextBlock>("WorkspaceBadgeSymbol")!.Text;
 
-    private static void AssertBadge(MainWindow window)
+    private static void AssertBadge(MainWindow window, string expectedColor)
     {
         Assert.Equal("★", BadgeSymbol(window));
         var outline = Assert.IsAssignableFrom<ISolidColorBrush>(window.FindControl<Border>("WorkspaceBadge")!.BorderBrush);
-        Assert.Equal(Color.Parse("#BAA0F3"), outline.Color);
+        Assert.Equal(Color.Parse(expectedColor), outline.Color);
         Assert.Contains("Логи сборки", AutomationProperties.GetName(window.FindControl<MenuItem>("WorkspaceMenuButton")!));
     }
 

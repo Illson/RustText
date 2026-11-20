@@ -80,7 +80,35 @@ public sealed class EmptyUntitledHistoryTests
         });
 
     [Fact]
-    public Task DetachedWorkspaceCloseRecoversNonemptyDraftButSkipsTransferredEmptyTab() =>
+    public Task MoreThanOneHundredFilteredEmptyHistoryEntriesDoNotDisableScratchHistoryCap() =>
+        HeadlessTests.RunAsync(async _ =>
+        {
+            var window = await OpenWorkspaceAsync();
+            try
+            {
+                await CallAsync(window, "EnterEmptyStartupAsync");
+                var oldEmptyEntries = Enumerable.Range(1, 101)
+                    .Select(id => new SessionTab(id, null, TextEncodingKind.Utf8) { UntitledName = "Без имени" })
+                    .ToList();
+                Call(window, "AddEmptyStartupHistory", new SessionState([], oldEmptyEntries));
+                Assert.Empty(ClosedTabs(window));
+
+                for (var i = 0; i < 101; i++)
+                {
+                    Invoke(window, "NewTab", $"scratch draft {i}");
+                    await CallAsync(window, "CloseTabAsync", ActiveTab(window));
+                }
+
+                Assert.Equal(100, ClosedTabs(window).Count);
+                Assert.All(ClosedTabs(window), tab => Assert.NotNull(tab.DraftRef));
+            }
+            finally { if (window.IsVisible) await CloseAsync(window); }
+        });
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public Task DetachedWorkspaceCloseRecoversNonemptyDraftButSkipsTransferredEmptyTab(bool closeDetachedFirst) =>
         HeadlessTests.RunAsync(async profile =>
         {
             const string expectedText = "recover this detached draft";
@@ -109,10 +137,20 @@ public sealed class EmptyUntitledHistoryTests
                 Invoke(source, "TransferTab", ActiveTab(source), detached, Field(detached, "_active"), null);
                 Assert.Equal(2, Tabs(detached).Length);
 
-                await CloseAsync(detached);
-                detached = null;
-                await CloseAsync(source);
-                source = null;
+                if (closeDetachedFirst)
+                {
+                    await CloseAsync(detached);
+                    detached = null;
+                    await CloseAsync(source);
+                    source = null;
+                }
+                else
+                {
+                    await CloseAsync(source);
+                    source = null;
+                    await CloseAsync(detached);
+                    detached = null;
+                }
                 await CloseAsync(primary);
                 primary = null;
 

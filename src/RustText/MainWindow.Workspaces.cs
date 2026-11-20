@@ -130,9 +130,7 @@ public partial class MainWindow
                     var name = await PromptAsync("Переименовать пространство", "Новое имя", workspace.Name);
                     if (name is null) return;
                     await _workspace.CatalogStore.RenameAsync(workspace.Id, name, _lifetime.Token);
-                    _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-                    foreach (var window in _workspace.Windows)
-                        window.RefreshWorkspaceButton();
+                    PublishWorkspaceCatalog(await _workspace.CatalogStore.LoadAsync(_lifetime.Token));
                     dialog.Close();
                     await ShowWorkspacesAsync();
                 }))));
@@ -177,9 +175,7 @@ public partial class MainWindow
             {
                 var restore = FocusButton(Button($"Восстановить «{item.Workspace.Name}»", () => Run(async () =>
                 {
-                    _workspace.Catalog = await _workspace.CatalogStore.RestoreDeletedAsync(item.Workspace.Id, _lifetime.Token);
-                    foreach (var window in _workspace.Windows)
-                        window.RefreshWorkspaceButton();
+                    PublishWorkspaceCatalog(await _workspace.CatalogStore.RestoreDeletedAsync(item.Workspace.Id, _lifetime.Token));
                     dialog.Close();
                     await ShowWorkspacesAsync();
                 })));
@@ -396,7 +392,7 @@ public partial class MainWindow
         }
         if (state is null && sourceStorage.HasSessionCheckpoint)
             throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
-        var copy = await _workspace.CatalogStore.CreateAsync(name, GetWorkspaceThemeKey(source.Id), _lifetime.Token,
+        var (copy, catalog) = await _workspace.CatalogStore.CreateWithCatalogAsync(name, GetWorkspaceThemeKey(source.Id), _lifetime.Token,
             symbol: source.Symbol, color: source.Color);
         try
         {
@@ -409,10 +405,10 @@ public partial class MainWindow
         }
         catch
         {
-            _workspace.Catalog = await _workspace.CatalogStore.DiscardIncompleteCopyAsync(copy.Id);
+            PublishWorkspaceCatalog(await _workspace.CatalogStore.DiscardIncompleteCopyAsync(copy.Id));
             throw;
         }
-        _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        PublishCreatedWorkspace(copy, catalog);
         dialog.Close();
         await SwitchWorkspaceAsync(copy.Id);
     }
@@ -421,7 +417,7 @@ public partial class MainWindow
     {
         await SaveWorkspaceSessionAsync(excludeWindow: null);
         var current = CurrentWorkspaceEntry();
-        var created = await _workspace.CatalogStore.CreateAsync(name, WorkspaceThemeKey, _lifetime.Token,
+        var (created, catalog) = await _workspace.CatalogStore.CreateWithCatalogAsync(name, WorkspaceThemeKey, _lifetime.Token,
             symbol: current?.Symbol, color: current?.Color);
         try
         {
@@ -431,11 +427,27 @@ public partial class MainWindow
         }
         catch
         {
-            _workspace.Catalog = await _workspace.CatalogStore.DiscardIncompleteCopyAsync(created.Id);
+            PublishWorkspaceCatalog(await _workspace.CatalogStore.DiscardIncompleteCopyAsync(created.Id));
             throw;
         }
-        _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        PublishCreatedWorkspace(created, catalog);
         await SwitchWorkspaceAsync(created.Id);
+    }
+
+    private void PublishCreatedWorkspace(WorkspaceEntry created, WorkspaceCatalog committedCatalog)
+    {
+        // Other windows can update the shared catalog while a workspace's files are copied.
+        var current = _workspace.Catalog ?? committedCatalog;
+        if (!current.Workspaces.Any(entry => entry.Id == created.Id))
+            current = current with { Workspaces = [.. current.Workspaces, created] };
+        PublishWorkspaceCatalog(current);
+    }
+
+    private void PublishWorkspaceCatalog(WorkspaceCatalog catalog)
+    {
+        _workspace.Catalog = catalog;
+        foreach (var window in _workspace.Windows)
+            window.RefreshWorkspaceButton();
     }
 
     private async Task CopyWorkspaceSessionAsync(StorageService source, StorageService destination)
@@ -482,9 +494,7 @@ public partial class MainWindow
                 var deletedCatalog = await _workspace.CatalogStore.DeleteAsync(workspace.Id,
                     Settings.WorkspaceHistoryLimit, _lifetime.Token);
                 ForgetCachedWorkspaceViews(workspace.Id);
-                _workspace.Catalog = deletedCatalog;
-                foreach (var window in _workspace.Windows)
-                    window.RefreshWorkspaceButton();
+                PublishWorkspaceCatalog(deletedCatalog);
             }
             finally { _workspace.SaveGate.Release(); }
         }

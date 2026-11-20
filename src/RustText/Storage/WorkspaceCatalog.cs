@@ -66,7 +66,11 @@ internal sealed class WorkspaceCatalogStore
     }
 
     public async Task<WorkspaceEntry> CreateAsync(string name, string? theme = null, CancellationToken cancellationToken = default,
-        string? symbol = null, string? color = null)
+        string? symbol = null, string? color = null) =>
+        (await CreateWithCatalogAsync(name, theme, cancellationToken, symbol, color).ConfigureAwait(false)).Entry;
+
+    public async Task<(WorkspaceEntry Entry, WorkspaceCatalog Catalog)> CreateWithCatalogAsync(string name, string? theme,
+        CancellationToken cancellationToken, string? symbol, string? color)
     {
         name = ValidateName(name);
         symbol = ValidateSymbol(symbol);
@@ -87,7 +91,7 @@ internal sealed class WorkspaceCatalogStore
             };
             var updated = catalog with { Workspaces = [.. catalog.Workspaces, entry] };
             await SaveCoreAsync(updated, cancellationToken).ConfigureAwait(false);
-            return entry;
+            return (entry, updated);
         }
         finally
         {

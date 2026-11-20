@@ -10,12 +10,6 @@ public partial class MainWindow
 {
     private const string DefaultWorkspaceSymbol = "›";
     private const string EmptyWorkspaceSymbol = "○";
-    private static readonly (string Name, string Hex)[] WorkspaceColors =
-    [
-        ("Синий", "#75A9FF"), ("Бирюзовый", "#60D4CD"), ("Зелёный", "#8AD196"),
-        ("Золотой", "#F1BF69"), ("Розовый", "#E88EB9"), ("Сиреневый", "#BAA0F3"),
-        ("Красный", "#F18A83"), ("Серый", "#A5ABB6")
-    ];
     private static readonly string[] WorkspaceSymbols = ["◆", "●", "▲", "★", "✦", "⚙", "▣"];
 
     private WorkspaceEntry? CurrentWorkspaceEntry() => _startEmpty ? null
@@ -67,17 +61,19 @@ public partial class MainWindow
     private async Task ShowCreateWorkspaceAsync()
     {
         var name = new TextBox { MaxLength = 80, PlaceholderText = "Например, Разбор логов" };
-        var color = new ComboBox
+        var color = new ColorView
         {
-            ItemsSource = WorkspaceColors.Select(choice => choice.Name).ToArray(), SelectedIndex = 0,
-            HorizontalAlignment = HorizontalAlignment.Stretch
+            Color = Color.Parse(WorkspaceColors[0].Hex), IsVisible = false,
+            IsAlphaEnabled = false, IsAlphaVisible = false, IsAccentColorsVisible = false,
+            IsColorComponentsVisible = false, IsColorPaletteVisible = false, IsColorModelVisible = false,
+            Height = 260, HorizontalAlignment = HorizontalAlignment.Stretch
         };
         var symbol = new TextBox { Text = WorkspaceSymbols[0], Width = 52, MaxLength = 32, HorizontalContentAlignment = HorizontalAlignment.Center };
         AutomationProperties.SetAutomationId(name, "WorkspaceNameInput");
         AutomationProperties.SetAutomationId(color, "WorkspaceColorInput");
         AutomationProperties.SetAutomationId(symbol, "WorkspaceSymbolInput");
         AutomationProperties.SetName(name, "Имя рабочей области");
-        AutomationProperties.SetName(color, "Цвет рамки");
+        AutomationProperties.SetName(color, "Точный цвет рамки");
         AutomationProperties.SetName(symbol, "Символ рабочего пространства");
 
         var symbols = new WrapPanel { ItemSpacing = 3, LineSpacing = 4 };
@@ -92,19 +88,20 @@ public partial class MainWindow
         var fields = new StackPanel
         {
             Spacing = 5,
-            Children = { new TextBlock { Text = "Цвет рамки" }, color, new TextBlock { Text = "Символ" }, symbols }
+            Children = { new TextBlock { Text = "Цвет рамки" }, CreateWorkspaceColorPalette(color), new TextBlock { Text = "Символ" }, symbols }
         };
-        var badge = CreateWorkspaceBadge(WorkspaceSymbols[0], WorkspaceColors[0].Hex, size: 48);
+        var badge = CreateWorkspaceBadge(WorkspaceSymbols[0], WorkspaceColorHex(color.Color), size: 48);
+        AutomationProperties.SetAutomationId(badge, "WorkspaceBadgePreview");
         var previewSymbol = (TextBlock)badge.Child!;
         var presentation = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 16 };
         presentation.Children.Add(fields);
         Grid.SetColumn(badge, 1);
         presentation.Children.Add(badge);
-        color.SelectionChanged += (_, _) => badge.BorderBrush = WorkspaceOutline(SelectedColor());
+        color.ColorChanged += (_, _) => badge.BorderBrush = new SolidColorBrush(color.Color);
         symbol.TextChanged += (_, _) => previewSymbol.Text = symbol.Text;
 
         var error = new TextBlock { Foreground = FocusTheme.Danger, TextWrapping = TextWrapping.Wrap, IsVisible = false };
-        var body = DialogPanel(new TextBlock { Text = "Имя" }, name, presentation, error);
+        var body = DialogPanel(new TextBlock { Text = "Имя" }, name, presentation, color, error);
         var dialog = Dialog("Новая рабочая область", body, 420);
         var create = FocusButton(new Button { Content = "Создать", IsDefault = true }, primary: true);
         var cancel = FocusButton(new Button { Content = "Отмена", IsCancel = true });
@@ -115,10 +112,9 @@ public partial class MainWindow
             try
             {
                 var glyph = WorkspaceCatalogStore.ValidateSymbol(symbol.Text ?? "");
-                var created = await _workspace.CatalogStore.CreateAsync(name.Text ?? "", WorkspaceThemeKey, _lifetime.Token,
-                    symbol: glyph, color: SelectedColor());
-                if (_workspace.Catalog is { } catalog)
-                    _workspace.Catalog = catalog with { Workspaces = [.. catalog.Workspaces, created] };
+                var (created, catalog) = await _workspace.CatalogStore.CreateWithCatalogAsync(name.Text ?? "", WorkspaceThemeKey, _lifetime.Token,
+                    symbol: glyph, color: WorkspaceColorHex(color.Color));
+                PublishCreatedWorkspace(created, catalog);
                 dialog.Close(created);
             }
             catch (Exception exception) when (IsUserError(exception))
@@ -133,8 +129,6 @@ public partial class MainWindow
         dialog.Opened += (_, _) => name.Focus();
         if (await dialog.ShowDialog<WorkspaceEntry?>(this) is { } result)
             await SwitchWorkspaceAsync(result.Id);
-
-        string SelectedColor() => WorkspaceColors[Math.Max(0, color.SelectedIndex)].Hex;
     }
 
     private static Border CreateWorkspaceBadge(string symbol, string? color, int size = 23) => new()

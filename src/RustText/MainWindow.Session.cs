@@ -159,7 +159,7 @@ public partial class MainWindow
         _closedTabs.RemoveAll(tab => IsKnownEmptyUntitledDraft(tab, SessionStorage));
         var openHistory = state.Tabs.Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)).ToArray();
         var closedHistory = (state.ClosedTabs ?? []).Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)).ToArray();
-        _emptyStartupPreserveAllHistory |= openHistory.Length > 0 || (state.ClosedTabs?.Count ?? 0) > 100;
+        _emptyStartupPreserveAllHistory |= openHistory.Length > 0 || closedHistory.Length > 100;
         _workspace.NextId = Math.Max(_workspace.NextId,
             state.Tabs.Concat(state.ClosedTabs ?? []).Select(tab => tab.Id).DefaultIfEmpty().Max());
         var existingIds = _closedTabs.Select(tab => tab.Id).ToHashSet();
