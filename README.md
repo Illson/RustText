@@ -1,8 +1,16 @@
 # RustText
 
-Редактор и просмотрщик больших логов для Windows x64 на .NET 11, Avalonia и AvaloniaEdit. Для запуска достаточно одного файла `rusttext.exe`. Он включает среду выполнения .NET. Графические библиотеки из EXE распаковываются в пользовательский кэш при первом запуске.
+**RustText is a portable text editor for Windows x64 for everyday editing and large files.**
+
+**Coming from Sublime Text?** Use `Ctrl+D` to add the next match and edit several occurrences at once. Open files side by side in split views and use regular expressions to find and replace text. When you open a large log, RustText can search the entire file, filter by severity, and follow new lines as they arrive.
+
+**RustText — текстовый редактор для Windows x64.** Редактируйте несколько выделений одновременно, открывайте файлы рядом и возвращайтесь к своим вкладкам и черновикам после перезапуска. Большие текстовые файлы можно редактировать постранично. Для JSON и JSON Lines есть подсветка, проверка и форматирование.
+
+[Скачать RustText для Windows x64](https://github.com/Illson/RustText/releases) · Распакуйте архив и запустите `rusttext.exe`.
 
 ## Запуск и сборка
+
+RustText использует .NET 11, Avalonia и AvaloniaEdit. Файл `rusttext.exe` включает среду выполнения .NET. Графические библиотеки из EXE распаковываются в пользовательский кэш при первом запуске.
 
 Запустите `rusttext.exe` или передайте ему путь к файлу.
 
