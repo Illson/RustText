@@ -39,9 +39,10 @@ internal static class LogLevelFilter
 
     internal static IEnumerable<LogRow> FileRows(LogDataReader reader, long offset, long length, CancellationToken token)
     {
+        using var scan = reader.BeginSequentialScan();
         while (offset < length)
         {
-            var page = reader.ReadPage(offset, maxPageBytes: 32 * 1024, cancellationToken: token, endOffset: length);
+            var page = scan.ReadPage(offset, token, maxPageBytes: 32 * 1024, endOffset: length);
             foreach (var row in page.Rows)
             {
                 if (row.StartOffset >= length) yield break;

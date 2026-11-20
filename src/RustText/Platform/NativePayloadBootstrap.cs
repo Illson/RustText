@@ -74,25 +74,32 @@ internal static partial class NativePayloadBootstrap
         if (stream is null) return null;
 
         using var reader = new StreamReader(stream);
+        var expectedNames = new HashSet<string>(NativeFiles, StringComparer.OrdinalIgnoreCase);
         var result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (var name in NativeFiles)
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
         {
-            var line = reader.ReadLine();
-            if (line is null || line.Length != name.Length + 65
-                || line[name.Length] != ' ' || !line.StartsWith(name, StringComparison.Ordinal))
+            var separator = line.IndexOf(' ');
+            if (separator <= 0 || line.Length != separator + 65)
             {
-                throw new InvalidDataException($"Не найдена контрольная сумма встроенной библиотеки {name}.");
+                throw new InvalidDataException("Недопустимая запись контрольной суммы встроенной библиотеки.");
             }
 
+            var name = line[..separator];
+            if (!expectedNames.Contains(name) || result.ContainsKey(name))
+                throw new InvalidDataException($"Недопустимое имя встроенной библиотеки в контрольных суммах: {name}.");
             try
             {
-                result.Add(name, Convert.FromHexString(line.AsSpan(name.Length + 1)));
+                result.Add(name, Convert.FromHexString(line.AsSpan(separator + 1)));
             }
             catch (FormatException error)
             {
                 throw new InvalidDataException($"Недопустимая контрольная сумма встроенной библиотеки {name}.", error);
             }
         }
+
+        if (result.Count != NativeFiles.Length)
+            throw new InvalidDataException("В списке контрольных сумм отсутствует встроенная библиотека.");
 
         return result;
     }

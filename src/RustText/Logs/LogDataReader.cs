@@ -229,7 +229,9 @@ internal sealed class LogDataReader
         var observedLength = Math.Min(_file.Length, endOffset);
         var requestedOffset = Math.Clamp(offset, 0, observedLength);
         var alignedOffset = requestedOffset < observedLength
-            ? AlignOffset(requestedOffset, observedLength)
+            ? scan?.IsExpectedOffset(requestedOffset) == true
+                ? requestedOffset
+                : AlignOffset(requestedOffset, observedLength)
             : requestedOffset;
         var readOffset = Math.Min(requestedOffset, alignedOffset);
         var readLength = (int)Math.Min((long)maxPageBytes + LookaheadBytes, observedLength - readOffset);
@@ -251,9 +253,9 @@ internal sealed class LogDataReader
             var position = firstPosition;
 
             var pageEnd = Math.Min(bytes.Length, maxPageBytes);
-            var rows = new List<LogRow>(Math.Min(pageSize, maxPageBytes / maxFrameBytes));
+            var rows = new List<LogRow>(pageSize);
             var inputStartsWithinLine = alignedOffset > _bomLength
-                && !IsNewlineBefore(handle, alignedOffset);
+                && !IsNewlineBefore(bytes, (int)(alignedOffset - readOffset));
 
             while (rows.Count < pageSize && position < pageEnd)
             {
@@ -359,13 +361,18 @@ internal sealed class LogDataReader
         private int _length;
         private bool _reuseWindow;
         private bool _disposed;
+        private bool _hasExpectedOffset;
+        private long _expectedOffset;
 
         public LogPage ReadPage(long offset, CancellationToken cancellationToken = default,
             int maxPageBytes = DefaultPageBytes, long endOffset = long.MaxValue)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(maxPageBytes, DefaultPageBytes);
             var page = reader.ReadPage(offset, DefaultPageSize, Math.Min(DefaultFrameBytes, maxPageBytes), maxPageBytes,
                 cancellationToken, endOffset, _reuseWindow ? this : null);
+            _expectedOffset = page.NextOffset;
+            _hasExpectedOffset = true;
             // A page limited by bytes already used most of its window. Only retain
             // a window when the preceding page stopped at the row limit early.
             _reuseWindow = page.Rows.Count == DefaultPageSize
@@ -377,15 +384,20 @@ internal sealed class LogDataReader
             return page;
         }
 
+        internal bool IsExpectedOffset(long offset) => _hasExpectedOffset && offset == _expectedOffset;
+
         internal ReadOnlySpan<byte> ReadWindow(SafeFileHandle handle, long offset, int length, long observedLength,
             CancellationToken cancellationToken)
         {
             var buffer = _buffer ??= ArrayPool<byte>.Shared.Rent(Capacity);
+            // Keep the delimiter lookahead while respecting the scan budget and the snapshot boundary.
+            var limit = Math.Min(observedLength, Math.Max(offset + length, readAheadEnd));
             if (offset < _offset || offset >= _offset + _length - LookaheadBytes || observedLength < _observedLength)
             {
                 _offset = offset;
                 _length = 0;
-                _length = ReadWindowInto(handle, offset, buffer.AsSpan(0, length), cancellationToken);
+                var initialLength = (int)Math.Min(Capacity, limit - offset);
+                _length = ReadWindowInto(handle, offset, buffer.AsSpan(0, initialLength), cancellationToken);
             }
             else if (offset + length > _offset + _length)
             {
@@ -398,8 +410,6 @@ internal sealed class LogDataReader
                 }
 
                 var end = _offset + _length;
-                // Preserve the requested lookahead at the budget boundary without prefetching another window.
-                var limit = Math.Min(observedLength, Math.Max(offset + length, readAheadEnd));
                 var count = (int)Math.Min(Capacity - _length, limit - end);
                 _length += ReadWindowInto(handle, end, buffer.AsSpan(_length, count), cancellationToken);
             }

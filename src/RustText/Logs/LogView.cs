@@ -1655,10 +1655,11 @@ internal sealed partial class LogView : UserControl, IDisposable
     private long? FindTimeOffset(DateTime requested, CancellationToken token)
     {
         var cursor = _hiddenOffset;
+        using var scan = _reader.BeginSequentialScan();
         while (cursor < _file.Length)
         {
             token.ThrowIfCancellationRequested();
-            var page = _reader.ReadPage(cursor, cancellationToken: token);
+            var page = scan.ReadPage(cursor, token);
             if (page.Rows.Count == 0 || page.NextOffset <= cursor)
             {
                 break;
@@ -1692,11 +1693,30 @@ internal sealed partial class LogView : UserControl, IDisposable
         var match = TimestampPattern.Match(line);
         if (match.Success)
         {
-            var value = match.Groups["date"].Success
-                ? $"{match.Groups["date"].Value} {match.Groups["time"].Value}"
-                : match.Groups["clock"].Value;
-            var formats = match.Groups["date"].Success ? TimestampDateFormats : TimestampClockFormats;
-            if (DateTime.TryParseExact(value, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp))
+            var date = match.Groups["date"];
+            var time = match.Groups["time"];
+            var clock = match.Groups["clock"];
+            Span<char> value = stackalloc char[32];
+            int length;
+            string[] formats;
+            if (date.Success)
+            {
+                var dateSpan = date.ValueSpan;
+                var timeSpan = time.ValueSpan;
+                dateSpan.CopyTo(value);
+                value[dateSpan.Length] = ' ';
+                timeSpan.CopyTo(value[(dateSpan.Length + 1)..]);
+                length = dateSpan.Length + 1 + timeSpan.Length;
+                formats = TimestampDateFormats;
+            }
+            else
+            {
+                var clockSpan = clock.ValueSpan;
+                clockSpan.CopyTo(value);
+                length = clockSpan.Length;
+                formats = TimestampClockFormats;
+            }
+            if (DateTime.TryParseExact(value[..length], formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp))
             {
                 return true;
             }
