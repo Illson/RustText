@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -195,17 +196,41 @@ internal static partial class NativePayloadBootstrap
         }
     }
 
-    private static bool IsComplete(string directory, Dictionary<string, byte[]> hashes)
+    internal static bool IsComplete(string directory, Dictionary<string, byte[]> hashes)
     {
         if (!Directory.Exists(directory) || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return false;
-        foreach (var (name, expectedHash) in hashes)
+        var checks = new Task<PayloadHashCheck>[NativeFiles.Length];
+        for (var i = 0; i < NativeFiles.Length; i++)
         {
+            var name = NativeFiles[i];
+            var expectedHash = hashes[name];
             var path = Path.Combine(directory, name);
-            if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0
-                || !HashMatches(path, expectedHash)) return false;
+            checks[i] = Task.Run(() =>
+            {
+                try
+                {
+                    if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                        return new PayloadHashCheck(false, null);
+                    return new PayloadHashCheck(HashMatches(path, expectedHash), null);
+                }
+                catch (Exception error)
+                {
+                    return new PayloadHashCheck(false, error);
+                }
+            });
+        }
+
+        var results = Task.WhenAll(checks).GetAwaiter().GetResult();
+        foreach (var result in results)
+        {
+            if (result.Error is not null)
+                ExceptionDispatchInfo.Capture(result.Error).Throw();
+            if (!result.IsValid) return false;
         }
         return true;
     }
+
+    private readonly record struct PayloadHashCheck(bool IsValid, Exception? Error);
 
     internal static bool HashMatches(string path, byte[] expected)
     {
