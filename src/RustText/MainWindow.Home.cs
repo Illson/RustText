@@ -28,6 +28,7 @@ public partial class MainWindow
         var fileSizes = new Dictionary<string, Task<long?>>(StringComparer.OrdinalIgnoreCase);
         var draftSizes = new Dictionary<string, Task<long?>>(StringComparer.OrdinalIgnoreCase);
         var revision = 0;
+        var timedRows = new List<(TextBlock Label, long? Lines, long Worked)>();
         foreach (var panel in new[] { recent, closed, ghosts })
         {
             panel.Back.Click += (_, _) => { panel.Page--; Rebuild(); };
@@ -58,12 +59,18 @@ public partial class MainWindow
         WorkspaceHost.Content = surface;
         _lastHomeRefresh = DateTimeOffset.Now;
         _refreshHome = Rebuild;
+        _refreshHomeTimes = () =>
+        {
+            foreach (var (label, lines, worked) in timedRows)
+                label.Text = DescribeWork(lines, worked).TrimStart(' ', '·');
+        };
         Rebuild();
         SetStatus(_workspaceLoadWarning ?? "История файлов");
         FormatText.Text = "";
 
         void Rebuild()
         {
+            timedRows.Clear();
             var term = search.Text?.Trim() ?? "";
             var recentFiles = _recent.Where(item => Matches(item.Path)).ToArray();
             var closedFiles = _closedTabs.Where(item => item.Path is { } path && (Matches(path) || Matches(ClosedTabDisplayName(item)))).ToArray();
@@ -74,7 +81,7 @@ public partial class MainWindow
             FillHistory(recent, recentFiles, item =>
             {
                 var name = Path.GetFileName(item.Path);
-                return HistoryRow(name, item.Path, DescribeWork(item.LineCount, item.LastWorkedMs), FileSize(item.Path),
+                return HistoryRow(name, item.Path, WorkDetails(item.LineCount, item.LastWorkedMs), FileSize(item.Path),
                     () => Run(() => OpenRecentAsync(item)), "Удалить из недавних", () => Run(() => ForgetRecentFileAsync(item.Path)));
             });
             FillHistory(closed, closedFiles, item => ClosedRow(item, ClosedTabDisplayName(item), FileSize(item.Path!)));
@@ -87,9 +94,20 @@ public partial class MainWindow
         }
 
         Control ClosedRow(SessionTab item, string name, Task<long?> size) => HistoryRow(name, item.Path,
-            DescribeWork(item.Path is not null || Settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs), size, () => Run(() => RestoreClosedAsync(item)),
+            WorkDetails(item.Path is not null || Settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs), size, () => Run(() => RestoreClosedAsync(item)),
             item.DraftRef is null ? "Удалить из истории" : "Удалить сохранённый черновик",
             () => Run(() => ForgetClosedTabAsync(item)));
+
+        TextBlock WorkDetails(long? lines, long? worked)
+        {
+            var label = new TextBlock
+            {
+                Text = DescribeWork(lines, worked).TrimStart(' ', '·'), Foreground = FocusTheme.Muted, FontSize = 12,
+                MaxWidth = 175, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center
+            };
+            if (worked.HasValue) timedRows.Add((label, lines, worked.Value));
+            return label;
+        }
 
         Task<long?> FileSize(string path) => CachedSize(fileSizes, path, () => path);
 
@@ -160,15 +178,10 @@ public partial class MainWindow
         panel.Next.IsEnabled = panel.Page + 1 < pages;
     }
 
-    private static Control HistoryRow(string name, string? path, string details, Task<long?> size,
+    private static Control HistoryRow(string name, string? path, TextBlock meta, Task<long?> size,
         Action open, string removeLabel, Action remove)
     {
         var nameLabel = new TextBlock { Text = name, TextTrimming = TextTrimming.CharacterEllipsis };
-        var meta = new TextBlock
-        {
-            Text = details.TrimStart(' ', '·'), Foreground = FocusTheme.Muted, FontSize = 12,
-            MaxWidth = 175, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center
-        };
         var fileSize = new TextBlock { Text = "—", Foreground = FocusTheme.Muted, FontSize = 12, TextAlignment = TextAlignment.Right };
         _ = DisplaySizeAsync();
         var columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,78"), ColumnSpacing = 10 };

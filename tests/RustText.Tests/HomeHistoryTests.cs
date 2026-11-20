@@ -13,6 +13,27 @@ namespace RustText.Tests;
 public sealed class HomeHistoryTests
 {
     [Fact]
+    public Task RefreshingRelativeTimeKeepsTheExistingHistoryRow() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "recent.txt");
+        var worked = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeMilliseconds();
+        await StorageService.OpenForTesting(profile).SaveSessionAsync(new SessionState([],
+            [new SessionTab(4, path, TextEncodingKind.Utf8, LineCount: 3, LastWorkedMs: worked)]));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => HasButton(window, "recent.txt"));
+            var row = FindButton(window, "recent.txt");
+            var details = row.GetVisualDescendants().OfType<TextBlock>().Single(label => label.Text == "3 строк · 5 мин назад");
+            details.Text = "";
+            ((Action)Field(window, "_refreshHomeTimes")!)();
+            Assert.Same(row, FindButton(window, "recent.txt"));
+            Assert.Equal("3 строк · 5 мин назад", details.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task ClosedUntitledDraftAppearsOnHomeAndRestoresAfterRestart() => HeadlessTests.RunAsync(async _ =>
     {
         const string caption = "Черновик";

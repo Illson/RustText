@@ -21,6 +21,7 @@ public partial class MainWindow
     private MenuItem? _closedFilesMenu;
     private MenuItem? _closedDraftsMenu;
     private Action? _refreshHome;
+    private Action? _refreshHomeTimes;
     private DateTimeOffset _lastHomeRefresh;
     private SessionState? _pendingSession;
     private bool _validatingStartupSession;

@@ -1372,7 +1372,7 @@ public partial class MainWindow
             return;
         }
 
-        if (LogLevels.IsLogPath(tab.Path) && !MightBeJsonLogLinesPrefix(editor.Document))
+        if (!ShouldCheckJson(editor.Document, tab.Path))
         {
             return;
         }
@@ -1425,6 +1425,21 @@ public partial class MainWindow
 
             source.Dispose();
         }
+    }
+
+    private static bool ShouldCheckJson(TextDocument document, string? path)
+    {
+        if (TextOperations.IsJsonPath(path)) return true;
+        if (LogLevels.IsLogPath(path)) return MightBeJsonLogLinesPrefix(document);
+
+        // A long whitespace prefix is inconclusive. Leave the full check on the worker.
+        var end = Math.Min(document.TextLength, 64);
+        for (var i = 0; i < end; i++)
+        {
+            var c = document.GetCharAt(i);
+            if (c != '\uFEFF' && !char.IsWhiteSpace(c)) return c is '{' or '[';
+        }
+        return document.TextLength > end;
     }
 
     private static bool MightBeJsonLogLinesPrefix(TextDocument document)

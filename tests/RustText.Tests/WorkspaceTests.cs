@@ -2423,6 +2423,28 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task PlainTypingSkipsJsonWorkAndEditingThePrefixStillEnablesValidation() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "  заметка");
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Insert(editor.Document.TextLength, "!");
+            Assert.Null(Property(tab, "JsonCancellation"));
+
+            editor.Document.Replace(0, editor.Document.TextLength, new string(' ', 90) + "{broken");
+            await HeadlessTests.WaitForAsync(() => Property(tab, "JsonError") is not null);
+            editor.Document.Insert(0, "текст");
+            Assert.Null(Property(tab, "JsonError"));
+            Assert.False(Read<Border>(tab, "JsonBanner").IsVisible);
+            Assert.Null(Property(tab, "JsonCancellation"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task AnonymousJsonKeepsHighlightingWithValidationSelectionAndSearch() => HeadlessTests.RunAsync(async _ =>
     {
         var window = await OpenWorkspaceAsync();
