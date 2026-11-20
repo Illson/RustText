@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Automation;
@@ -11,6 +12,8 @@ using Avalonia.Layout;
 using Avalonia.Input.Platform;
 using Avalonia.Input.Raw;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Rendering;
@@ -29,10 +32,12 @@ public sealed class WorkspaceTests
     [Theory]
     [InlineData(1, 700, 1)]
     [InlineData(20, 700, 20)]
-    [InlineData(300, 700, 64)]
-    [InlineData(300, 1800, 64)]
+    [InlineData(71, 700, 71)]
+    [InlineData(300, 700, 300)]
+    [InlineData(300, 1800, 300)]
+    [InlineData(10_000_000, 1800, 512)]
     [InlineData(0, 700, 0)]
-    [InlineData(4000, 120, 20)]
+    [InlineData(4000, 120, 57)]
     [InlineData(20, 1, 0)]
     public void TextMinimapUsesAtMostOneSamplePerDocumentLine(int lineCount, double height, int expected) =>
         Assert.Equal(expected, DocumentMinimap.GetRowCount(lineCount, height));
@@ -2583,6 +2588,253 @@ public sealed class WorkspaceTests
             Assert.InRange(scroll.Offset.X, 0, 1);
         }
         finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapRendersCompactJsonWithIndentationAndNavigatesWithinPreview() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "minimap.json");
+        var lines = new[] { "{", "  \"Defaults\": {", "    \"OrderId\": 123456", "  },", "  \"Overrides\": [" }
+            .Concat(Enumerable.Repeat("    { \"Channel\": \"Example\", \"RegionViews\": \"Mix\" },", 63))
+            .Concat(["    { \"Channel\": \"Last\", \"RegionViews\": \"Mix\" }", "  ]", "}"]);
+        await File.WriteAllTextAsync(path, string.Join('\n', lines));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            Assert.Equal(71, editor.Document.LineCount);
+            await HeadlessTests.WaitForAsync(() => minimap.Bounds.Height > 200 && scroll.Extent.Height > scroll.Viewport.Height);
+            var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+            using var bitmap = new RenderTargetBitmap(size);
+            using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+            using var frame = pixels.Lock();
+
+            Capture();
+            var topMarker = ReadPixel(70, 5);
+            var belowPreview = ReadPixel(70, 160);
+            Assert.NotEqual(belowPreview, topMarker);
+            Assert.Equal(topMarker, ReadPixel(3, 5)); // Indent on the second line.
+            Assert.NotEqual(topMarker, ReadPixel(5, 5));
+            Assert.Equal(topMarker, ReadPixel(17, 7)); // Space after the colon.
+            Assert.NotEqual(topMarker, ReadPixel(18, 7));
+            Assert.NotEqual(ReadPixel(4, 143), ReadPixel(3, 143)); // Closing brace on line 71.
+            Assert.Equal(FocusTheme.Editor.Color, ReadPixel(22, 160));
+
+            var maximum = scroll.Extent.Height - scroll.Viewport.Height;
+            var blank = minimap.TranslatePoint(new Point(20, 160), window)!.Value;
+            window.MouseDown(blank, MouseButton.Left);
+            window.MouseUp(blank, MouseButton.Left);
+            Assert.InRange(scroll.Offset.Y, 0, 1);
+
+            var bottom = minimap.TranslatePoint(new Point(20, 145), window)!.Value;
+            window.MouseDown(bottom, MouseButton.Left);
+            window.MouseUp(bottom, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y >= maximum - 1);
+            Capture();
+            Assert.Equal(belowPreview, ReadPixel(70, 5));
+            Assert.Equal(topMarker, ReadPixel(70, 143));
+
+            editor.Document.Replace(editor.Document.TextLength - 1, 1, " ");
+            Capture();
+            Assert.Equal(ReadPixel(4, 143), ReadPixel(3, 143));
+
+            void Capture()
+            {
+                bitmap.Render(minimap);
+                bitmap.CopyPixels(frame);
+            }
+
+            Color ReadPixel(int x, int y)
+            {
+                var address = frame.Address + y * frame.RowBytes + x * 4;
+                return Color.FromRgb(Marshal.ReadByte(address, 2), Marshal.ReadByte(address, 1), Marshal.ReadByte(address, 0));
+            }
+        }
+        finally
+        {
+            window.Close();
+            await HeadlessTests.WaitForAsync(() => !window.IsVisible);
+        }
+    });
+
+    [Fact]
+    public Task TextMinimapNavigatesWithinWrappedSingleLine() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "wrapped-line.txt");
+        var line = string.Concat(Enumerable.Repeat("word ", 2_000));
+        await File.WriteAllTextAsync(path, line);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => view.VisualLinesValid
+                && scroll.Extent.Height > scroll.Viewport.Height * 2);
+
+            var navigationHeight = minimap.Bounds.Height - 6;
+            Assert.True(navigationHeight > 100);
+            Assert.True(view.GetVisualPosition(new TextViewPosition(1, line.Length + 1), VisualYPosition.LineMiddle).Y
+                > view.GetVisualPosition(new TextViewPosition(1, 1), VisualYPosition.LineMiddle).Y);
+
+            JumpTo(.25);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .23 and <= .27);
+
+            JumpTo(.75);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .73 and <= .77);
+
+            void JumpTo(double fraction)
+            {
+                var point = minimap.TranslatePoint(new Point(12, 3 + navigationHeight * fraction), window)!.Value;
+                window.MouseDown(point, MouseButton.Left);
+                window.MouseUp(point, MouseButton.Left);
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapNavigationStaysStableWhenLaterLineWraps() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "wrapped-last-line.txt");
+        var longLine = string.Concat(Enumerable.Repeat("word ", 2_000));
+        var lines = Enumerable.Repeat("short line", 40).Append(longLine);
+        await File.WriteAllTextAsync(path, string.Join('\n', lines));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => view.VisualLinesValid
+                && scroll.Extent.Height > scroll.Viewport.Height * 2);
+
+            var navigationHeight = minimap.Bounds.Height - 6;
+            JumpTo(.75);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > 0);
+
+            scroll.Offset = new Vector(scroll.Offset.X, scroll.ScrollBarMaximum.Y);
+            await HeadlessTests.WaitForAsync(() => Math.Abs(scroll.Offset.Y - scroll.ScrollBarMaximum.Y) < 1);
+
+            scroll.Offset = default;
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y < 1);
+            JumpTo(.75);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .73 and <= .77);
+
+            JumpTo(.25);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .23 and <= .27);
+
+            void JumpTo(double fraction)
+            {
+                var point = minimap.TranslatePoint(new Point(12, 3 + navigationHeight * fraction), window)!.Value;
+                window.MouseDown(point, MouseButton.Left);
+                window.MouseUp(point, MouseButton.Left);
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapNavigatesWhenLastLineWrapsToTwoRows() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "two-row-wrap.txt");
+        await File.WriteAllTextAsync(path, string.Join('\n', Enumerable.Repeat("short line", 40).Append("x")));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => view.Bounds.Width > 100 && scroll.Extent.Height > scroll.Viewport.Height);
+
+            var lineLength = (int)(view.Bounds.Width / view.WideSpaceWidth * 1.2);
+            var lastLine = editor.Document.GetLineByNumber(editor.Document.LineCount);
+            editor.Document.Replace(lastLine.Offset, lastLine.Length, new string('W', lineLength));
+            await HeadlessTests.WaitForAsync(() =>
+            {
+                var firstY = view.GetVisualPosition(new TextViewPosition(lastLine.LineNumber, 1), VisualYPosition.LineMiddle).Y;
+                var lastY = view.GetVisualPosition(new TextViewPosition(lastLine.LineNumber, lineLength + 1), VisualYPosition.LineMiddle).Y;
+                return view.VisualLinesValid && lastY > firstY && lastY - firstY < 1.8 * view.DefaultLineHeight;
+            });
+
+            var maximum = scroll.Extent.Height - scroll.Viewport.Height;
+            Assert.True(maximum > 0);
+            var point = minimap.TranslatePoint(new Point(12, 3 + (minimap.Bounds.Height - 6) * .75), window)!.Value;
+            window.MouseDown(point, MouseButton.Left);
+            window.MouseUp(point, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .73 and <= .77);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ThinViewportScrollbarKeepsItsWiderDragAreaAndTrackPaging() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "scrollbar.txt");
+        await File.WriteAllLinesAsync(path, Enumerable.Range(1, 240).Select(row => $"Строка {row}"));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var bar = Assert.Single(window.GetVisualDescendants().OfType<ViewportScrollBar>());
+            await HeadlessTests.WaitForAsync(() => bar.Maximum > 0
+                && bar.GetVisualDescendants().OfType<Thumb>().Any(thumb => thumb.Bounds.Height > 0));
+            var track = Assert.Single(bar.GetVisualDescendants().OfType<Track>());
+            var thumb = Assert.IsType<Thumb>(track.Thumb);
+            var rail = bar.GetVisualDescendants().OfType<Border>().Single(border => border.Name == "Rail");
+            var grip = thumb.GetVisualDescendants().OfType<Border>().Single(border => border.Name == "Grip");
+
+            Assert.Equal(13, bar.Bounds.Width);
+            Assert.Equal(bar.Bounds.Width, thumb.Bounds.Width);
+            Assert.Equal(7, grip.Bounds.Width);
+            Assert.Equal(new CornerRadius(3.5), grip.CornerRadius);
+            Assert.Equal(3, grip.TranslatePoint(default, thumb)!.Value.X);
+            Assert.Equal(grip.Bounds.Width, rail.Bounds.Width);
+            Assert.Equal(new Thickness(0, 4), rail.Margin);
+            Assert.Equal(2, bar.GetVisualDescendants().OfType<RepeatButton>().Count());
+            Assert.NotNull(bar.ContextFlyout);
+
+            var point = thumb.TranslatePoint(new Point(1, thumb.Bounds.Height / 2), window)!.Value;
+            var normalOpacity = thumb.Opacity;
+            window.MouseMove(point);
+            Assert.True(thumb.Opacity > normalOpacity);
+            window.MouseDown(point, MouseButton.Left);
+            var target = point + new Vector(0, (track.Bounds.Height - thumb.Bounds.Height) / 3);
+            window.MouseMove(target, RawInputModifiers.LeftMouseButton);
+            window.MouseUp(target, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > 0);
+            Assert.InRange(scroll.Offset.Y, bar.Maximum * .31, bar.Maximum * .35);
+            Assert.InRange(bar.Value, scroll.Offset.Y - 1, scroll.Offset.Y + 1);
+
+            var beforePage = scroll.Offset.Y;
+            var pagePoint = track.TranslatePoint(new Point(1, track.Bounds.Height * .9), window)!.Value;
+            window.MouseMove(pagePoint);
+            Assert.InRange(scroll.Offset.Y, beforePage - 1, beforePage + 1);
+            var expected = Math.Min(bar.Maximum, beforePage + bar.LargeChange);
+            window.MouseDown(pagePoint, MouseButton.Left);
+            window.MouseUp(pagePoint, MouseButton.Left);
+            Assert.True(scroll.Offset.Y > beforePage);
+            Assert.InRange(scroll.Offset.Y, expected - 1, expected + 1);
+
+            var beforeWheel = scroll.Offset.Y;
+            window.MouseWheel(pagePoint, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > beforeWheel);
+        }
+        finally
+        {
+            await CloseAsync(window);
+        }
     });
 
     [Fact]
