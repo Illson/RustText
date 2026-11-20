@@ -378,7 +378,7 @@ internal sealed class LogDataReader
             ObjectDisposedException.ThrowIf(_disposed, this);
             maxPageBytes = Math.Min(pageLimit, maxPageBytes);
             var page = reader.ReadPage(offset, DefaultPageSize, Math.Min(DefaultFrameBytes, maxPageBytes), maxPageBytes,
-                cancellationToken, endOffset, _reuseWindow ? this : null);
+                cancellationToken, endOffset, this);
             _expectedOffset = page.NextOffset;
             _hasExpectedOffset = true;
             _expectedStartsWithinLine = page.Rows.Count > 0 && page.Rows[^1].IsTruncated;
