@@ -1540,7 +1540,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         var searchOffset = Math.Max(Math.Max(cursor.Offset, snapshot.HiddenOffset), reader.PreambleLength);
         var pageEnd = snapshot.Length;
         var readAheadEnd = searchOffset + Math.Min(maxScanBytes, Math.Max(0, pageEnd - searchOffset));
-        using var scan = reader.BeginSequentialScan(readAheadEnd);
+        using var scan = reader.BeginSequentialScan(readAheadEnd: readAheadEnd);
         var pendingLine = new StringBuilder(cursor.PendingText);
         var cursorLineStart = cursor.LineOffset >= 0 ? cursor.LineOffset : searchOffset;
         var pendingOffset = cursorLineStart;
@@ -1553,7 +1553,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             token.ThrowIfCancellationRequested();
             var maxPageBytes = (int)Math.Clamp(maxScanBytes - (nextOffset - searchOffset), 4, LogDataReader.DefaultPageBytes);
-            var page = scan.ReadPage(nextOffset, token, maxPageBytes, pageEnd);
+            var page = scan.ReadPage(nextOffset, token, endOffset: pageEnd, maxPageBytes: maxPageBytes);
             if (page.NextOffset <= nextOffset) break;
             foreach (var row in page.Rows)
             {
@@ -1718,6 +1718,11 @@ internal sealed partial class LogView : UserControl, IDisposable
             {
                 var dateSpan = date.ValueSpan;
                 var timeSpan = time.ValueSpan;
+                if (timeSpan.Length > 16)
+                {
+                    timestamp = default;
+                    return false;
+                }
                 dateSpan.CopyTo(value);
                 value[dateSpan.Length] = ' ';
                 timeSpan.CopyTo(value[(dateSpan.Length + 1)..]);
@@ -1727,6 +1732,11 @@ internal sealed partial class LogView : UserControl, IDisposable
             else
             {
                 var clockSpan = clock.ValueSpan;
+                if (clockSpan.Length > 16)
+                {
+                    timestamp = default;
+                    return false;
+                }
                 clockSpan.CopyTo(value);
                 length = clockSpan.Length;
                 formats = TimestampClockFormats;

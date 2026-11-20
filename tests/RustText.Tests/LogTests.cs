@@ -157,6 +157,44 @@ public sealed class LogTests
         Assert.Equal(file.Length, offset);
     }
 
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8, false)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, true)]
+    [InlineData(TextEncodingKind.Utf16BigEndian, true)]
+    public void PageStartsWithinLineIsCorrectForOrdinaryAndSequentialReads(TextEncodingKind encoding, bool bom)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "page-starts.log");
+        var shortLines = string.Concat(Enumerable.Range(0, 81).Select(index => $"row-{index}\n"));
+        var longLine = new string('x', 20 * 1024) + "\nafter-long-line\n";
+        File.WriteAllBytes(path, Encode(shortLines + longLine, encoding, bom));
+
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        using var scan = reader.BeginSequentialScan();
+
+        var firstPage = reader.ReadPage(0);
+        var ordinaryNext = reader.ReadPage(firstPage.NextOffset);
+        var scanFirstPage = scan.ReadPage(0);
+        var scanNext = scan.ReadPage(scanFirstPage.NextOffset);
+
+        Assert.Equal(80, firstPage.Rows.Count);
+        Assert.False(ordinaryNext.Rows[0].StartsWithinLine);
+        Assert.False(scanNext.Rows[0].StartsWithinLine);
+
+        var longLineOffset = Encode(shortLines, encoding, bom).Length;
+        var ordinaryLongPage = reader.ReadPage(longLineOffset, maxPageBytes: 16 * 1024);
+        var ordinaryContinuation = reader.ReadPage(ordinaryLongPage.NextOffset, maxPageBytes: 16 * 1024);
+        using var shortScan = reader.BeginSequentialScan(16 * 1024);
+        var scanLongPage = shortScan.ReadPage(longLineOffset);
+        var scanContinuation = shortScan.ReadPage(scanLongPage.NextOffset);
+
+        Assert.True(ordinaryLongPage.Rows[0].IsTruncated);
+        Assert.True(ordinaryContinuation.Rows[0].StartsWithinLine);
+        Assert.True(scanLongPage.Rows[0].IsTruncated);
+        Assert.True(scanContinuation.Rows[0].StartsWithinLine);
+    }
+
     [Fact]
     public void SequentialScanReusesCursorAfterCancellationAndRereadsTruncatedFile()
     {

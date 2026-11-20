@@ -74,6 +74,11 @@ internal static partial class NativePayloadBootstrap
         if (stream is null) return null;
 
         using var reader = new StreamReader(stream);
+        return ParsePayloadHashes(reader);
+    }
+
+    internal static Dictionary<string, byte[]> ParsePayloadHashes(TextReader reader)
+    {
         var expectedNames = new HashSet<string>(NativeFiles, StringComparer.OrdinalIgnoreCase);
         var result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         string? line;
@@ -202,7 +207,7 @@ internal static partial class NativePayloadBootstrap
         return true;
     }
 
-    private static bool HashMatches(string path, byte[] expected)
+    internal static bool HashMatches(string path, byte[] expected)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
             128 * 1024, FileOptions.SequentialScan);

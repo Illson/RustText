@@ -211,7 +211,12 @@ internal sealed class LogDataReader
         long endOffset = long.MaxValue) =>
         ReadPage(offset, pageSize, maxFrameBytes, maxPageBytes, cancellationToken, endOffset, null);
 
-    public SequentialScan BeginSequentialScan(long readAheadEnd = long.MaxValue) => new(this, readAheadEnd);
+    public SequentialScan BeginSequentialScan(int maxPageBytes = DefaultPageBytes, long readAheadEnd = long.MaxValue)
+    {
+        if (maxPageBytes < DefaultFrameBytes || maxPageBytes > DefaultPageBytes)
+            throw new ArgumentOutOfRangeException(nameof(maxPageBytes));
+        return new(this, maxPageBytes, readAheadEnd);
+    }
 
     private LogPage ReadPage(long offset, int pageSize, int maxFrameBytes, int maxPageBytes,
         CancellationToken cancellationToken, long endOffset, SequentialScan? scan)
@@ -255,7 +260,9 @@ internal sealed class LogDataReader
             var pageEnd = Math.Min(bytes.Length, maxPageBytes);
             var rows = new List<LogRow>(pageSize);
             var inputStartsWithinLine = alignedOffset > _bomLength
-                && !IsNewlineBefore(bytes, (int)(alignedOffset - readOffset));
+                && (scan?.TryGetExpectedStartsWithinLine(requestedOffset, out var expectedStartsWithinLine) == true
+                    ? expectedStartsWithinLine
+                    : !IsNewlineBefore(handle, alignedOffset));
 
             while (rows.Count < pageSize && position < pageEnd)
             {
@@ -351,7 +358,7 @@ internal sealed class LogDataReader
         }
     }
 
-    internal sealed class SequentialScan(LogDataReader reader, long readAheadEnd) : IDisposable
+    internal sealed class SequentialScan(LogDataReader reader, int pageLimit, long readAheadEnd) : IDisposable
     {
         // Keep the next page contiguous while retaining unread bytes from the current page.
         private const int Capacity = 2 * DefaultPageBytes;
@@ -363,16 +370,18 @@ internal sealed class LogDataReader
         private bool _disposed;
         private bool _hasExpectedOffset;
         private long _expectedOffset;
+        private bool _expectedStartsWithinLine;
 
         public LogPage ReadPage(long offset, CancellationToken cancellationToken = default,
-            int maxPageBytes = DefaultPageBytes, long endOffset = long.MaxValue)
+            long endOffset = long.MaxValue, int maxPageBytes = DefaultPageBytes)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            ArgumentOutOfRangeException.ThrowIfGreaterThan(maxPageBytes, DefaultPageBytes);
+            maxPageBytes = Math.Min(pageLimit, maxPageBytes);
             var page = reader.ReadPage(offset, DefaultPageSize, Math.Min(DefaultFrameBytes, maxPageBytes), maxPageBytes,
                 cancellationToken, endOffset, _reuseWindow ? this : null);
             _expectedOffset = page.NextOffset;
             _hasExpectedOffset = true;
+            _expectedStartsWithinLine = page.Rows.Count > 0 && page.Rows[^1].IsTruncated;
             // A page limited by bytes already used most of its window. Only retain
             // a window when the preceding page stopped at the row limit early.
             _reuseWindow = page.Rows.Count == DefaultPageSize
@@ -385,6 +394,12 @@ internal sealed class LogDataReader
         }
 
         internal bool IsExpectedOffset(long offset) => _hasExpectedOffset && offset == _expectedOffset;
+
+        internal bool TryGetExpectedStartsWithinLine(long offset, out bool startsWithinLine)
+        {
+            startsWithinLine = _expectedStartsWithinLine;
+            return IsExpectedOffset(offset);
+        }
 
         internal ReadOnlySpan<byte> ReadWindow(SafeFileHandle handle, long offset, int length, long observedLength,
             CancellationToken cancellationToken)
