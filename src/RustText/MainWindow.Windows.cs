@@ -1,6 +1,8 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Threading;
 using AvaloniaEdit.Document;
+using RustText.Demo.Platform;
 
 namespace RustText.Demo;
 
@@ -21,6 +23,12 @@ public partial class MainWindow
         public SemaphoreSlim WorkspaceSwitchGate { get; } = new(1, 1);
         public SemaphoreSlim CloseGate { get; } = new(1, 1);
         public SemaphoreSlim SettingsGate { get; } = new(1, 1);
+        public DispatcherTimer? AutomaticUpdateTimer;
+        public bool AutomaticUpdateStartupCheckAttempted;
+        public bool UpdateCheckInProgress;
+        public bool UpdateHandling;
+        public UpdateRelease? KnownUpdate;
+        public string? DismissedUpdateVersion;
         public UserSettings Settings { get; set; } = new();
         public bool SettingsReady { get; set; }
         public List<MainWindow> Windows { get; } = [];

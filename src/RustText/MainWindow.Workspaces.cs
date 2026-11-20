@@ -3,12 +3,95 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using AvaloniaEdit;
 
 namespace RustText.Demo;
 
 public partial class MainWindow
 {
+    private Size? _lastNormalWindowSize;
+    private bool _restoreNormalSizeOnNextRestore;
+
+    private void InitializeWindowSizeTracking()
+    {
+        _lastNormalWindowSize = ValidWindowSize(new Size(Width, Height))
+            ? new Size(Width, Height) : new Size(Math.Max(MinWidth, 1080), Math.Max(MinHeight, 700));
+        Resized += TrackNormalWindowSize;
+        PropertyChanged += RestoreTrackedWindowSize;
+    }
+
+    private void TrackNormalWindowSize(object? sender, WindowResizedEventArgs e)
+    {
+        if (WindowState != WindowState.Normal || _restoreNormalSizeOnNextRestore || !ValidWindowSize(e.ClientSize))
+            return;
+
+        var size = e.ClientSize;
+        if (e.Reason is WindowResizeReason.Application or WindowResizeReason.Layout)
+        {
+            if (ClientSize == size) _lastNormalWindowSize = size;
+            return;
+        }
+
+        // On Win32, WM_SIZE runs before WindowStateChanged. Defer user/native resizes
+        // until the public state settles, then reject stale maximized callbacks.
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_closed || _closing || WindowState != WindowState.Normal || _restoreNormalSizeOnNextRestore
+                || !ValidWindowSize(size) || ClientSize != size)
+                return;
+            _lastNormalWindowSize = size;
+        });
+    }
+
+    private void RestoreTrackedWindowSize(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property != WindowStateProperty || e.GetNewValue<WindowState>() != WindowState.Normal
+            || e.GetOldValue<WindowState>() == WindowState.Normal || !_restoreNormalSizeOnNextRestore
+            || _lastNormalWindowSize is not { } size)
+            return;
+
+        // Only a workspace restored as maximized may have stale HWND restore bounds from
+        // another workspace. Ordinary user restore/snap behavior stays native.
+        Width = size.Width;
+        Height = size.Height;
+        _restoreNormalSizeOnNextRestore = false;
+    }
+
+    private void RestoreWorkspaceWindowSize(double width, double height, bool maximized)
+    {
+        Width = Math.Clamp(width, MinWidth, 4000);
+        Height = Math.Clamp(height, MinHeight, 2400);
+        _lastNormalWindowSize = new Size(Width, Height);
+        _restoreNormalSizeOnNextRestore = maximized;
+        WindowState = maximized ? WindowState.Maximized : WindowState.Normal;
+    }
+
+    private Size PersistedWindowSize()
+    {
+        if (WindowState == WindowState.Normal)
+        {
+            var current = new Size(Width, Height);
+            if (ValidWindowSize(current))
+            {
+                _lastNormalWindowSize = current;
+                _restoreNormalSizeOnNextRestore = false;
+            }
+            return current;
+        }
+        return _lastNormalWindowSize ?? new Size(Width, Height);
+    }
+
+    private WorkspaceViewState CaptureWorkspaceViewForPersistence()
+    {
+        var view = CaptureWorkspaceView();
+        var size = PersistedWindowSize();
+        return view with { Width = size.Width, Height = size.Height };
+    }
+
+    private static bool ValidWindowSize(Size size) =>
+        double.IsFinite(size.Width) && size.Width > 0 && double.IsFinite(size.Height) && size.Height > 0;
+
     private async Task ShowWorkspacesAsync()
     {
         _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
@@ -17,12 +100,13 @@ public partial class MainWindow
         var dialog = Dialog("Рабочие пространства", DialogPanel(rows), 720);
         foreach (var workspace in catalog.Workspaces)
         {
-            var selected = workspace.Id == _workspaceId;
+            var selected = !_startEmpty && workspace.Id == _workspaceId;
             var name = new TextBlock
             {
                 Text = workspace.Name + (selected ? " · открыто" : ""),
                 VerticalAlignment = VerticalAlignment.Center,
-                FontWeight = selected ? FontWeight.SemiBold : FontWeight.Normal
+                FontWeight = selected ? FontWeight.SemiBold : FontWeight.Normal,
+                TextTrimming = TextTrimming.CharacterEllipsis
             };
             var buttons = new WrapPanel { ItemSpacing = 5, LineSpacing = 4 };
             buttons.Children.Add(FocusButton(Button("Переключить", () => Run(async () =>
@@ -46,7 +130,7 @@ public partial class MainWindow
                     var name = await PromptAsync("Переименовать пространство", "Новое имя", workspace.Name);
                     if (name is null) return;
                     await _workspace.CatalogStore.RenameAsync(workspace.Id, name, _lifetime.Token);
-                    _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+                    PublishWorkspaceCatalog(await _workspace.CatalogStore.LoadAsync(_lifetime.Token));
                     dialog.Close();
                     await ShowWorkspacesAsync();
                 }))));
@@ -57,7 +141,11 @@ public partial class MainWindow
             }
 
             var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 10 };
-            row.Children.Add(name);
+            var identity = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 8 };
+            identity.Children.Add(CreateWorkspaceBadge(workspace.Symbol ?? DefaultWorkspaceSymbol, workspace.Color));
+            Grid.SetColumn(name, 1);
+            identity.Children.Add(name);
+            row.Children.Add(identity);
             Grid.SetColumn(buttons, 1);
             row.Children.Add(buttons);
             rows.Children.Add(new Border
@@ -87,7 +175,7 @@ public partial class MainWindow
             {
                 var restore = FocusButton(Button($"Восстановить «{item.Workspace.Name}»", () => Run(async () =>
                 {
-                    _workspace.Catalog = await _workspace.CatalogStore.RestoreDeletedAsync(item.Workspace.Id, _lifetime.Token);
+                    PublishWorkspaceCatalog(await _workspace.CatalogStore.RestoreDeletedAsync(item.Workspace.Id, _lifetime.Token));
                     dialog.Close();
                     await ShowWorkspacesAsync();
                 })));
@@ -202,7 +290,7 @@ public partial class MainWindow
             await _workspace.CatalogStore.SetWindowWorkspaceAsync(targetWindowId, workspaceId, _lifetime.Token);
             _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         }
-        if (!_startEmpty || _tabs.Count > 0) _workspaceViews[sourceId] = CaptureWorkspaceView();
+        if (!_startEmpty || _tabs.Count > 0) _workspaceViews[sourceId] = CaptureWorkspaceViewForPersistence();
         CloseSearchPanel();
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids) grid.Children.Clear();
@@ -210,7 +298,9 @@ public partial class MainWindow
 
         _workspaceId = enteringEmpty ? WorkspaceCatalogStore.DefaultWorkspaceId : workspaceId;
         _startEmpty = enteringEmpty;
+        ApplyWorkspaceTheme();
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
+        _closedTabs.RemoveAll(tab => IsKnownEmptyUntitledDraft(tab, SessionStorage));
 
         if (cachedView is { } view)
         {
@@ -218,9 +308,7 @@ public partial class MainWindow
             _root = view.Root;
             _active = view.Active;
             _workspaceViews.Remove(workspaceId);
-            Width = Math.Clamp(view.Width, MinWidth, 4000);
-            Height = Math.Clamp(view.Height, MinHeight, 2400);
-            WindowState = view.Maximized ? WindowState.Maximized : WindowState.Normal;
+            RestoreWorkspaceWindowSize(view.Width, view.Height, view.Maximized);
             if (view.Home) await ShowHomeAsync();
             else ShowGroups();
             ApplyTextAppearance();
@@ -239,7 +327,8 @@ public partial class MainWindow
         else if (targetState is not null)
         {
             RestoreDetachedDraftTracking(SessionStorage, _workspaceId, targetState);
-            _closedTabs.AddRange((targetState.ClosedTabs ?? []).Take(100));
+            _closedTabs.AddRange((targetState.ClosedTabs ?? [])
+                .Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)).Take(100));
             MountSessionTabs(targetState, pending: false);
             ApplyTextAppearance();
             if (SelectedIn(_active) is { } selected)
@@ -303,7 +392,8 @@ public partial class MainWindow
         }
         if (state is null && sourceStorage.HasSessionCheckpoint)
             throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
-        var copy = await _workspace.CatalogStore.CreateAsync(name, _lifetime.Token);
+        var (copy, catalog) = await _workspace.CatalogStore.CreateWithCatalogAsync(name, GetWorkspaceThemeKey(source.Id), _lifetime.Token,
+            symbol: source.Symbol, color: source.Color);
         try
         {
             if (state is not null)
@@ -315,10 +405,10 @@ public partial class MainWindow
         }
         catch
         {
-            _workspace.Catalog = await _workspace.CatalogStore.DiscardIncompleteCopyAsync(copy.Id);
+            PublishWorkspaceCatalog(await _workspace.CatalogStore.DiscardIncompleteCopyAsync(copy.Id));
             throw;
         }
-        _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        PublishCreatedWorkspace(copy, catalog);
         dialog.Close();
         await SwitchWorkspaceAsync(copy.Id);
     }
@@ -326,7 +416,9 @@ public partial class MainWindow
     private async Task CreateWorkspaceFromCurrentAsync(string name)
     {
         await SaveWorkspaceSessionAsync(excludeWindow: null);
-        var created = await _workspace.CatalogStore.CreateAsync(name, _lifetime.Token);
+        var current = CurrentWorkspaceEntry();
+        var (created, catalog) = await _workspace.CatalogStore.CreateWithCatalogAsync(name, WorkspaceThemeKey, _lifetime.Token,
+            symbol: current?.Symbol, color: current?.Color);
         try
         {
             await CopyWorkspaceSessionAsync(SessionStorage, _workspace.GetStorage(created.Id, _windowId));
@@ -335,11 +427,27 @@ public partial class MainWindow
         }
         catch
         {
-            _workspace.Catalog = await _workspace.CatalogStore.DiscardIncompleteCopyAsync(created.Id);
+            PublishWorkspaceCatalog(await _workspace.CatalogStore.DiscardIncompleteCopyAsync(created.Id));
             throw;
         }
-        _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+        PublishCreatedWorkspace(created, catalog);
         await SwitchWorkspaceAsync(created.Id);
+    }
+
+    private void PublishCreatedWorkspace(WorkspaceEntry created, WorkspaceCatalog committedCatalog)
+    {
+        // Other windows can update the shared catalog while a workspace's files are copied.
+        var current = _workspace.Catalog ?? committedCatalog;
+        if (!current.Workspaces.Any(entry => entry.Id == created.Id))
+            current = current with { Workspaces = [.. current.Workspaces, created] };
+        PublishWorkspaceCatalog(current);
+    }
+
+    private void PublishWorkspaceCatalog(WorkspaceCatalog catalog)
+    {
+        _workspace.Catalog = catalog;
+        foreach (var window in _workspace.Windows)
+            window.RefreshWorkspaceButton();
     }
 
     private async Task CopyWorkspaceSessionAsync(StorageService source, StorageService destination)
@@ -386,7 +494,7 @@ public partial class MainWindow
                 var deletedCatalog = await _workspace.CatalogStore.DeleteAsync(workspace.Id,
                     Settings.WorkspaceHistoryLimit, _lifetime.Token);
                 ForgetCachedWorkspaceViews(workspace.Id);
-                _workspace.Catalog = deletedCatalog;
+                PublishWorkspaceCatalog(deletedCatalog);
             }
             finally { _workspace.SaveGate.Release(); }
         }

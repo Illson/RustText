@@ -2,6 +2,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:chrome="using:Avalonia.Controls.Chrome"
              xmlns:aeRendering="using:AvaloniaEdit.Rendering"
+             xmlns:aeEditing="using:AvaloniaEdit.Editing"
              xmlns:local="using:RustText.Demo"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
@@ -101,8 +102,19 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
         </Style>
         <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
+        <StyleInclude Source="avares://Avalonia.Controls.ColorPicker/Themes/Fluent/Fluent.xaml" />
         <Style Selector="aeRendering|TextView">
             <Setter Property="LinkTextForegroundBrush" Value="{x:Static local:FocusTheme.Link}" />
+        </Style>
+        <Style Selector="aeEditing|TextArea">
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.InactiveEditorSelection}" />
+            <Setter Property="SelectionBorder" Value="{x:Static local:FocusTheme.InactiveEditorSelectionOutline}" />
+            <Setter Property="SelectionForeground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="SelectionCornerRadius" Value="3" />
+        </Style>
+        <Style Selector="aeEditing|TextArea:focus-within">
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.EditorSelection}" />
+            <Setter Property="SelectionBorder" Value="{x:Static local:FocusTheme.EditorSelectionOutline}" />
         </Style>
         <Style Selector="TabItem.focus-tab">
             <Setter Property="Theme" Value="{StaticResource FocusDocumentTab}" />
@@ -131,6 +143,12 @@
         <Style Selector="TextBox.focus-log-editor">
             <Setter Property="CornerRadius" Value="0" />
             <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CaretBrush" Value="{x:Static local:FocusTheme.EditorCaret}" />
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.InactiveEditorSelection}" />
+            <Setter Property="SelectionForegroundBrush" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
+        <Style Selector="TextBox.focus-log-editor:focus-within">
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.EditorSelection}" />
         </Style>
         <Style Selector="TextBox.focus-log-editor:pointerover /template/ Border#PART_BorderElement,
                          TextBox.focus-log-editor:focus /template/ Border#PART_BorderElement">
@@ -157,6 +175,22 @@
             <Setter Property="MinHeight" Value="25" />
             <Setter Property="Padding" Value="3,0" />
             <Setter Property="HorizontalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="ToggleButton.workspace-swatch, Button.workspace-swatch">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Border}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="15" />
+            <Setter Property="Width" Value="30" />
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="ToggleButton.workspace-swatch:checked /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderThickness" Value="2" />
         </Style>
         <Style Selector="Button.search-command, Button.search-primary, ToggleButton.search-option">
             <Setter Property="MinHeight" Value="26" />

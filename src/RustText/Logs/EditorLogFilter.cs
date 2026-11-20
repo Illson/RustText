@@ -155,6 +155,7 @@ internal sealed class EditorLogFilter : IDisposable
         AutomationProperties.SetName(projection, "Строки лога с выбранными уровнями");
         AutomationProperties.SetAutomationId(projection, "LogLevelFilterResults");
         AutomationProperties.SetAutomationId(status, "LogLevelFilterStatus");
+        EditorCaret.Attach(projection.TextArea);
         var logLevels = new LogLevelColorizer { Enabled = true };
         projection.TextArea.TextView.LineTransformers.Add(logLevels);
         projection.TextArea.TextView.BackgroundRenderers.Add(logLevels);

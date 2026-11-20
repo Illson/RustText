@@ -57,11 +57,17 @@ internal static class FocusTheme
         public string LogMinimapInk { get; init; } = Muted;
         public string TitleMotif { get; init; } = "#00000000";
         public string TitleGlow { get; init; } = Chrome;
+        public string EditorCaret { get; init; } = Accent;
+        public string EditorSelection { get; init; } = Selection;
+        public string EditorSelectionOutline { get; init; } = Accent;
+        public string InactiveEditorSelection { get; init; } = Selection;
+        public string InactiveEditorSelectionOutline { get; init; } = Muted;
     }
 
     private sealed class ThemeState
     {
         public event Action? Changed;
+        public AppTheme? AppliedTheme { get; set; }
 
         public SolidColorBrush Chrome { get; } = Brush(Focus.Chrome);
         public SolidColorBrush Deep { get; } = Brush(Focus.Deep);
@@ -76,6 +82,11 @@ internal static class FocusTheme
         public SolidColorBrush AccentHover { get; } = Brush(Focus.AccentHover);
         public SolidColorBrush Hover { get; } = Brush(Focus.Hover);
         public SolidColorBrush Selection { get; } = Brush(Focus.Selection);
+        public SolidColorBrush EditorCaret { get; } = Brush(Focus.EditorCaret);
+        public SolidColorBrush EditorSelection { get; } = Brush(Focus.EditorSelection);
+        public Pen EditorSelectionOutline { get; } = new(Brush(Focus.EditorSelectionOutline), 1);
+        public SolidColorBrush InactiveEditorSelection { get; } = Brush(Focus.InactiveEditorSelection);
+        public Pen InactiveEditorSelectionOutline { get; } = new(Brush(Focus.InactiveEditorSelectionOutline), 1);
         public SolidColorBrush Match { get; } = Brush(Focus.Match);
         public SolidColorBrush CurrentMatch { get; } = Brush(Focus.CurrentMatch);
         public SolidColorBrush Warning { get; } = Brush(Focus.Warning);
@@ -85,7 +96,6 @@ internal static class FocusTheme
         public SolidColorBrush Link { get; } = Brush(Focus.Link);
         public SolidColorBrush UpdateSurface { get; } = Brush(Focus.UpdateSurface);
         public SolidColorBrush UpdateBorder { get; } = Brush(Focus.UpdateBorder);
-        public SolidColorBrush UpdateIconSurface { get; } = Brush(Focus.UpdateIconSurface);
         public SolidColorBrush UpdateText { get; } = Brush(Focus.UpdateText);
         public SolidColorBrush JsonKey { get; } = Brush(Focus.JsonKey);
         public SolidColorBrush JsonString { get; } = Brush(Focus.JsonString);
@@ -132,6 +142,11 @@ internal static class FocusTheme
             Set(AccentHover, palette.AccentHover);
             Set(Hover, palette.Hover);
             Set(Selection, palette.Selection);
+            Set(EditorCaret, palette.EditorCaret);
+            Set(EditorSelection, palette.EditorSelection);
+            EditorSelectionOutline.Brush = Brush(palette.EditorSelectionOutline);
+            Set(InactiveEditorSelection, palette.InactiveEditorSelection);
+            InactiveEditorSelectionOutline.Brush = Brush(palette.InactiveEditorSelectionOutline);
             Set(Match, palette.Match);
             Set(CurrentMatch, palette.CurrentMatch);
             Set(Warning, palette.Warning);
@@ -141,7 +156,6 @@ internal static class FocusTheme
             Set(Link, palette.Link);
             Set(UpdateSurface, palette.UpdateSurface);
             Set(UpdateBorder, palette.UpdateBorder);
-            Set(UpdateIconSurface, palette.UpdateIconSurface);
             Set(UpdateText, palette.UpdateText);
             Set(JsonKey, palette.JsonKey);
             Set(JsonString, palette.JsonString);
@@ -174,13 +188,27 @@ internal static class FocusTheme
             "#D8DEE9", "#A6B0BC", "#96A1AE", "#CCC6C6", "#DBD6D6", "#2C343C",
             "#444D58", "#69583A", "#7B6543", "#E5BD85", "#F0A09D", "#4A3033",
             "#B3CEB4", "#72C7E6", "#342E28", "#6B5742", "#47392C", "#F3E4D2",
-            "#AEC9E1", "#BDD3AA", "#E5BD85", "#CDB9E1"),
+            "#AEC9E1", "#BDD3AA", "#E5BD85", "#CDB9E1")
+        {
+            EditorCaret = "#F2F7FF",
+            EditorSelection = "#384857",
+            EditorSelectionOutline = "#93BFE0",
+            InactiveEditorSelection = "#35404B",
+            InactiveEditorSelectionOutline = "#758B9F"
+        },
         [AppTheme.Neon] = new(
             "#090B15", "#070912", "#101426", "#171B2D", "#0D1120", "#33405D",
             "#E9F6FF", "#A4B4D0", "#7888AA", "#22E6FF", "#75F2FF", "#202D49",
             "#284468", "#5A4A28", "#806127", "#FFD166", "#FF5C91", "#48233D",
             "#66F5C8", "#76CFFF", "#262047", "#5E4F91", "#37275D", "#F0E9FF",
-            "#8CDFFF", "#82F2D2", "#FFD166", "#FF7DB8"),
+            "#8CDFFF", "#82F2D2", "#FFD166", "#FF7DB8")
+        {
+            EditorCaret = "#71F2FF",
+            EditorSelection = "#192D46",
+            EditorSelectionOutline = "#6CDFF6",
+            InactiveEditorSelection = "#1A2438",
+            InactiveEditorSelectionOutline = "#6387A6"
+        },
         [AppTheme.ViceCity] = new(
             "#15121E", "#120F1A", "#191524", "#221B30", "#201A2D", "#4A3659",
             "#E8DEF3", "#B9AACA", "#9886AE", "#FF62AD", "#FF91C5", "#2D233D",
@@ -199,7 +227,12 @@ internal static class FocusTheme
             DocumentMinimapInk = "#927AA8",
             LogMinimapInk = "#927AA8",
             TitleMotif = "#191321",
-            TitleGlow = "#4F2349"
+            TitleGlow = "#4F2349",
+            EditorCaret = "#FF9BC8",
+            EditorSelection = "#36263E",
+            EditorSelectionOutline = "#EAA4CE",
+            InactiveEditorSelection = "#2C2236",
+            InactiveEditorSelectionOutline = "#AA7B9F"
         }
     };
 
@@ -229,6 +262,11 @@ internal static class FocusTheme
     public static SolidColorBrush AccentHover => State.AccentHover;
     public static SolidColorBrush Hover => State.Hover;
     public static SolidColorBrush Selection => State.Selection;
+    public static SolidColorBrush EditorCaret => State.EditorCaret;
+    public static SolidColorBrush EditorSelection => State.EditorSelection;
+    public static Pen EditorSelectionOutline => State.EditorSelectionOutline;
+    public static SolidColorBrush InactiveEditorSelection => State.InactiveEditorSelection;
+    public static Pen InactiveEditorSelectionOutline => State.InactiveEditorSelectionOutline;
     public static SolidColorBrush Match => State.Match;
     public static SolidColorBrush CurrentMatch => State.CurrentMatch;
     public static SolidColorBrush Warning => State.Warning;
@@ -238,7 +276,6 @@ internal static class FocusTheme
     public static SolidColorBrush Link => State.Link;
     public static SolidColorBrush UpdateSurface => State.UpdateSurface;
     public static SolidColorBrush UpdateBorder => State.UpdateBorder;
-    public static SolidColorBrush UpdateIconSurface => State.UpdateIconSurface;
     public static SolidColorBrush UpdateText => State.UpdateText;
     public static SolidColorBrush JsonKey => State.JsonKey;
     public static SolidColorBrush JsonString => State.JsonString;
@@ -269,10 +306,12 @@ internal static class FocusTheme
 
     public static void Apply(AppTheme theme)
     {
-        var palette = Palettes.GetValueOrDefault(theme, Focus);
         var state = State;
+        if (state.AppliedTheme == theme) return;
+        var palette = Palettes.GetValueOrDefault(theme, Focus);
         state.Apply(palette);
         RefreshFluentPalette(palette);
+        state.AppliedTheme = theme;
         state.RaiseChanged();
     }
 

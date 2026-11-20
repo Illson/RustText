@@ -26,6 +26,16 @@ namespace RustText.Tests;
 [Collection(HeadlessCollection.Name)]
 public sealed class WorkspaceTests
 {
+    [Theory]
+    [InlineData(1, 700, 1)]
+    [InlineData(20, 700, 20)]
+    [InlineData(300, 700, 160)]
+    [InlineData(300, 1800, 160)]
+    [InlineData(0, 700, 0)]
+    [InlineData(20, 1, 0)]
+    public void TextMinimapUsesAtMostOneSamplePerDocumentLine(int lineCount, double height, int expected) =>
+        Assert.Equal(expected, DocumentMinimap.GetRowCount(lineCount, height));
+
     [Fact]
     public Task ClosingDetachedWindowRestoresInputInRemainingWindow() => HeadlessTests.RunAsync(async profile =>
     {
@@ -674,6 +684,10 @@ public sealed class WorkspaceTests
             editor.TextArea.Focus();
             editor.CaretOffset = editor.Text.Length;
             var banner = window.FindControl<Border>("UpdateNotice")!;
+            var titleBar = window.FindControl<Border>("TitleBar")!;
+            var workspace = window.FindControl<ContentControl>("WorkspaceHost")!;
+            window.UpdateLayout();
+            var workspaceTop = workspace.Bounds.Y;
             Assert.False(banner.IsVisible);
             var release = new UpdateRelease("2.1.0", "v2.1.0",
                 new Uri("https://github.com/Illson/RustText/releases/tag/v2.1.0"),
@@ -681,8 +695,14 @@ public sealed class WorkspaceTests
                 new Uri("https://github.com/Illson/RustText/releases/download/v2.1.0/RustText.NET-win-x64.zip.sha256"),
                 123, null, "## Исправлено\n\n- Текст из GitHub.");
             Invoke(window, "PresentUpdate", release);
+            window.UpdateLayout();
             Assert.True(banner.IsVisible);
-            Assert.Equal("Доступна версия 2.1.0", window.FindControl<TextBlock>("UpdateNoticeText")!.Text);
+            Assert.Contains(banner, titleBar.GetVisualDescendants());
+            Assert.Equal(workspaceTop, workspace.Bounds.Y);
+            var caption = window.FindControl<Button>("CaptionMinimize")!;
+            var noticeLeft = banner.TranslatePoint(default, titleBar)!.Value.X;
+            Assert.True(noticeLeft + banner.Bounds.Width <= caption.TranslatePoint(default, titleBar)!.Value.X);
+            Assert.Equal("Обновление 2.1.0", window.FindControl<TextBlock>("UpdateNoticeText")!.Text);
             Assert.Empty(window.OwnedWindows);
             window.KeyTextInput("!");
             Assert.Equal("text!", editor.Text);

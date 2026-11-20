@@ -64,6 +64,11 @@ public partial class MainWindow : Window
         Closed += async (_, _) =>
         {
             _workspace.Windows.Remove(this);
+            if (_workspace.Windows.All(window => window._closed))
+            {
+                _workspace.AutomaticUpdateTimer?.Stop();
+                _workspace.AutomaticUpdateTimer = null;
+            }
             if (_windowId == WorkspaceCatalogStore.PrimaryWindowId || _restartingForUpdate && HasRestorableWindowAssignment()) return;
             try
             {
@@ -76,7 +81,12 @@ public partial class MainWindow : Window
         };
         _startupPaths = startupPaths;
         InitializeComponent();
+        InitializeWindowSizeTracking();
         PropertyChanged += CaptionStateChanged;
+        Activated += (_, _) =>
+        {
+            if (_restoreFinished) FocusTheme.Apply(SelectedTheme);
+        };
         ToolTip.SetTip(CaptionMinimize, "Свернуть");
         ToolTip.SetTip(CaptionMaximize, "Развернуть");
         ToolTip.SetTip(CaptionClose, "Закрыть окно");
@@ -116,7 +126,10 @@ public partial class MainWindow : Window
         if (!_restoreWorkspace)
         {
             _restoreFinished = true;
+            RefreshWorkspaceButton();
             _checkpoint.Start();
+            ShowKnownUpdate();
+            SynchronizeAutomaticUpdateTimer(runImmediately: true);
             return;
         }
 
@@ -140,12 +153,10 @@ public partial class MainWindow : Window
         });
         if (_closed || _closing) return;
         _restoreFinished = true;
+        RefreshWorkspaceButton();
         _checkpoint.Start();
-        if (_windowId == WorkspaceCatalogStore.PrimaryWindowId && Settings.AutoCheckUpdates
-            && Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR") is null)
-        {
-            Run(() => CheckUpdatesAsync(manual: false));
-        }
+        ShowKnownUpdate();
+        SynchronizeAutomaticUpdateTimer(runImmediately: true);
     }
 
     private Group MakeGroup(long? id = null)

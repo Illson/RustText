@@ -42,7 +42,6 @@ public partial class MainWindow
                 finally
                 {
                     _workspace.SettingsReady = true;
-                    ApplyWorkspaceTheme();
                 }
             }
             _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
@@ -69,6 +68,7 @@ public partial class MainWindow
         {
             _workspaceId = WorkspaceCatalogStore.DefaultWorkspaceId;
         }
+        ApplyWorkspaceTheme();
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
 
         var restore = _startEmpty
@@ -88,6 +88,7 @@ public partial class MainWindow
         if (_closed) return;
 
         var restoredState = state ?? _pendingSession;
+        _closedTabs.RemoveAll(tab => IsKnownEmptyUntitledDraft(tab, SessionStorage));
         if (state is not null && !_startEmpty) RestoreDetachedDraftTracking(SessionStorage, _workspaceId, state);
         if (Settings.WordWrap is null || Settings.FontSize is null)
         {
@@ -131,7 +132,8 @@ public partial class MainWindow
             return;
         }
 
-        if (state is not null) _closedTabs.AddRange((state.ClosedTabs ?? []).Take(100));
+        if (state is not null) _closedTabs.AddRange((state.ClosedTabs ?? [])
+            .Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)).Take(100));
         if (state is null || !ReferenceEquals(state, _pendingSession))
         {
             MountSessionTabs(state ?? new SessionState([]), pending: false);
@@ -154,21 +156,32 @@ public partial class MainWindow
 
     private void AddEmptyStartupHistory(SessionState state)
     {
-        _emptyStartupPreserveAllHistory |= state.Tabs.Count > 0 || (state.ClosedTabs?.Count ?? 0) > 100;
+        _closedTabs.RemoveAll(tab => IsKnownEmptyUntitledDraft(tab, SessionStorage));
+        var openHistory = state.Tabs.Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)).ToArray();
+        var closedHistory = (state.ClosedTabs ?? []).Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)).ToArray();
+        _emptyStartupPreserveAllHistory |= openHistory.Length > 0 || closedHistory.Length > 100;
         _workspace.NextId = Math.Max(_workspace.NextId,
             state.Tabs.Concat(state.ClosedTabs ?? []).Select(tab => tab.Id).DefaultIfEmpty().Max());
         var existingIds = _closedTabs.Select(tab => tab.Id).ToHashSet();
         var reopenedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        foreach (var tab in state.Tabs)
+        foreach (var tab in openHistory)
         {
             if (existingIds.Add(tab.Id))
                 _closedTabs.Insert(0, tab with { ClosedAtMs = tab.ClosedAtMs ?? reopenedAt });
         }
-        foreach (var tab in state.ClosedTabs ?? [])
+        foreach (var tab in closedHistory)
         {
             if (existingIds.Add(tab.Id)) _closedTabs.Add(tab);
         }
         if (!_emptyStartupPreserveAllHistory && _closedTabs.Count > 100) _closedTabs.RemoveRange(100, _closedTabs.Count - 100);
+    }
+
+    private static bool IsKnownEmptyUntitledDraft(SessionTab tab, StorageService storage)
+    {
+        if (tab.Path is not null) return false;
+        if (tab.DraftRef is null) return true;
+        try { return storage.GetDraftLength(tab) == 0; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
     }
 
     private bool PreserveEmptyHistory(StorageService storage) =>
@@ -195,9 +208,7 @@ public partial class MainWindow
             var liveTabs = TabsInVisualOrder().ToArray();
             foreach (var tab in liveTabs) tab.Group.Tabs.Items.Remove(tab.Item);
 
-            Width = Math.Clamp(state.WindowWidth, MinWidth, 4000);
-            Height = Math.Clamp(state.WindowHeight, MinHeight, 2400);
-            WindowState = state.Maximized ? WindowState.Maximized : WindowState.Normal;
+            RestoreWorkspaceWindowSize(state.WindowWidth, state.WindowHeight, state.Maximized);
 
             _wordWrap = Settings.WordWrap ?? state.Wrap;
             _fontSize = Settings.FontSize ?? Math.Clamp(state.FontSize, 8, 48);
@@ -359,11 +370,14 @@ public partial class MainWindow
                     .Where(tab => pending.Contains(tab.Id) && tab.DraftRef is not null)
                     .DistinctBy(tab => tab.Id).ToArray();
                 var savedIds = drafts.Select(tab => tab.Id).ToHashSet();
+                var recoverableDrafts = drafts.Where(tab => !IsKnownEmptyUntitledDraft(tab, source)).ToArray();
                 if (views.SelectMany(view => view.Tabs.Values).Any(tab => pending.Contains(tab.Id)
+                    && !(tab.Path is null && tab.Editor?.Document.TextLength == 0
+                        && tab.Recovery is null && tab.Deferred?.DraftRef is null)
                     && (tab.Dirty || tab.Recovery is not null || tab.Deferred?.DraftRef is not null || tab.Path is null && tab.Editor is not null)
                     && !savedIds.Contains(tab.Id)))
                     throw new IOException("Черновик вынесенной вкладки ещё не сохранён. Повторите закрытие окна.");
-                if (drafts.Length > 0) await MergeDetachedDraftsAsync(source, recovery, drafts, token);
+                if (recoverableDrafts.Length > 0) await MergeDetachedDraftsAsync(source, recovery, recoverableDrafts, token);
 
                 DraftArchiveEntry[] archived = [];
                 if (pending.Count != savedIds.Count)
@@ -376,8 +390,7 @@ public partial class MainWindow
 
                 // An installer launch can fail after the copy. Keep the mapping so a retry updates the same records.
                 if (restartStores is not null) continue;
-                foreach (var draft in drafts) recovery.DestinationIds.Remove(draft.Id);
-                foreach (var entry in archived) recovery.DestinationIds.Remove(entry.Tab.Id);
+                foreach (var id in pending) recovery.DestinationIds.Remove(id);
                 if (!otherViews || recovery.DestinationIds.Count == 0) _workspace.DetachedDrafts.Remove(source);
             }
         }
@@ -477,7 +490,7 @@ public partial class MainWindow
         foreach (var window in windows.OrderByDescending(window => window._windowId == WorkspaceCatalogStore.PrimaryWindowId))
         {
             if (ReferenceEquals(window.SessionStorage, storage))
-                yield return (window, window.CaptureWorkspaceView());
+                yield return (window, window.CaptureWorkspaceViewForPersistence());
         }
         foreach (var window in windows)
         {
@@ -877,7 +890,10 @@ public partial class MainWindow
         try
         {
             var saved = CaptureTab(tab) with { ClosedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
-            if (tab.Editor is { } editor && (tab.Path is null || (preserveUnsavedText && tab.Dirty)))
+            var isEmptyUntitled = tab.Path is null && (tab.Editor is { } liveEditor
+                ? liveEditor.Document.TextLength == 0
+                : IsKnownEmptyUntitledDraft(saved, SessionStorage));
+            if (!isEmptyUntitled && tab.Editor is { } editor && (tab.Path is null || (preserveUnsavedText && tab.Dirty)))
             {
                 if (FindSavedLiveDraft(tab) is { } existingDraft)
                 {
@@ -891,7 +907,7 @@ public partial class MainWindow
             }
 
             _closedTabs.RemoveAll(item => item.Id == saved.Id);
-            _closedTabs.Insert(0, saved);
+            if (!isEmptyUntitled) _closedTabs.Insert(0, saved);
             if (!deferHistoryLimit && !(_startEmpty && _emptyStartupPreserveAllHistory) && _closedTabs.Count > 100) _closedTabs.RemoveAt(_closedTabs.Count - 1);
         }
         finally { _workspace.SaveGate.Release(); }

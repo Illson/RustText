@@ -64,6 +64,59 @@ public sealed class ThemeMenuTests
         finally { await CloseAsync(reopened); }
     });
 
+    [Fact]
+    public Task NamedWorkspacesRememberDifferentThemesAcrossSwitchAndRestart() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenForTesting(profile);
+        await storage.SaveSettingsAsync(new UserSettings { Theme = "neon" });
+        var catalog = new WorkspaceCatalogStore(profile);
+        var first = await catalog.CreateAsync("Первое пространство");
+        var second = await catalog.CreateAsync("Второе пространство");
+
+        var window = await ShowWindowAsync();
+        Color firstColor;
+        try
+        {
+            await SwitchWorkspaceAsync(window, first.Id);
+            AssertSelected(window, "Неон");
+            var legacyColor = Background(window);
+            await SelectAsync(window, "Vice City");
+            firstColor = Background(window);
+            Assert.NotEqual(legacyColor, firstColor);
+
+            await SwitchWorkspaceAsync(window, second.Id);
+            AssertSelected(window, "Неон");
+            Assert.Equal(legacyColor, Background(window));
+            await SelectAsync(window, "Фокус");
+            Assert.NotEqual(firstColor, Background(window));
+
+            await SwitchWorkspaceAsync(window, first.Id);
+            AssertSelected(window, "Vice City");
+            Assert.Equal(firstColor, Background(window));
+
+            var saved = await catalog.LoadAsync();
+            Assert.Equal("vice_city", saved.Workspaces.Single(workspace => workspace.Id == first.Id).Theme);
+            Assert.Equal("focus", saved.Workspaces.Single(workspace => workspace.Id == second.Id).Theme);
+            Assert.Equal("neon", (await storage.LoadSettingsAsync()).Theme);
+        }
+        finally { await CloseAsync(window); }
+
+        var reopened = await ShowWindowAsync();
+        try
+        {
+            AssertSelected(reopened, "Vice City");
+            Assert.Equal(firstColor, Background(reopened));
+            await SwitchWorkspaceAsync(reopened, second.Id);
+            AssertSelected(reopened, "Фокус");
+            await SwitchWorkspaceAsync(reopened, WorkspaceCatalogStore.DefaultWorkspaceId);
+            AssertSelected(reopened, "Неон");
+        }
+        finally { await CloseAsync(reopened); }
+    });
+
+    private static Task SwitchWorkspaceAsync(MainWindow window, string id) =>
+        (Task)typeof(MainWindow).GetMethod("SwitchWorkspaceAsync", Private)!.Invoke(window, [id])!;
+
     private static async Task<MainWindow> ShowWindowAsync()
     {
         var window = new MainWindow([]);
@@ -80,9 +133,14 @@ public sealed class ThemeMenuTests
 
     private static async Task SelectAsync(MainWindow window, StorageService storage, string label, string key)
     {
+        await SelectAsync(window, label);
+        Assert.Equal(key, (await storage.LoadSettingsAsync()).Theme);
+    }
+
+    private static async Task SelectAsync(MainWindow window, string label)
+    {
         Options(window).Single(item => Equals(item.Header, label)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
         await HeadlessTests.WaitForAsync(() => Options(window).Any(item => item.IsChecked && Equals(item.Header, label)));
-        Assert.Equal(key, (await storage.LoadSettingsAsync()).Theme);
         AssertSelected(window, label);
     }
 

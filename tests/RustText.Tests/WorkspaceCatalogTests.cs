@@ -15,12 +15,16 @@ public sealed class WorkspaceCatalogTests
             var initial = await store.LoadAsync();
             Assert.Equal("По умолчанию", Assert.Single(initial.Workspaces).Name);
 
-            var created = await store.CreateAsync("  Разбор логов  ");
+            var created = await store.CreateAsync("  Разбор логов  ", "neon", CancellationToken.None, "📚", "#89aBcD");
+            Assert.Equal("📚", created.Symbol);
+            Assert.Equal("#89ABCD", created.Color);
             await store.RenameAsync(created.Id, "Сборка");
             await store.SetWindowWorkspaceAsync("window:123", created.Id);
 
             var reloaded = await store.LoadAsync();
             Assert.Equal("Сборка", reloaded.Workspaces.Single(item => item.Id == created.Id).Name);
+            Assert.Equal("📚", reloaded.Workspaces.Single(item => item.Id == created.Id).Symbol);
+            Assert.Equal("#89ABCD", reloaded.Workspaces.Single(item => item.Id == created.Id).Color);
             Assert.Equal(created.Id, reloaded.WindowAssignments["window:123"]);
             Assert.True(File.Exists(Path.Combine(store.DirectoryPath, "index.json")));
 
@@ -35,12 +39,83 @@ public sealed class WorkspaceCatalogTests
             var restored = await store.RestoreDeletedAsync(created.Id);
             Assert.Equal("saved", await File.ReadAllTextAsync(Path.Combine(workspaceDirectory, "session-data.txt")));
             Assert.Contains(restored.Workspaces, item => item.Id == created.Id);
+            Assert.Equal("📚", Assert.Single(restored.Workspaces, item => item.Id == created.Id).Symbol);
+            Assert.Equal("#89ABCD", Assert.Single(restored.Workspaces, item => item.Id == created.Id).Color);
         }
         finally
         {
             DeleteProfile(profile);
         }
     }
+
+    [Fact]
+    public async Task OlderCatalogWithoutAppearanceFieldsLoadsWithUnsetValues()
+    {
+        using var folder = new TempDirectory();
+        var store = new WorkspaceCatalogStore(folder.Path);
+        Directory.CreateDirectory(store.DirectoryPath);
+        await File.WriteAllTextAsync(Path.Combine(store.DirectoryPath, "index.json"),
+            """
+            {
+              "workspaces": [{ "id": "default", "name": "По умолчанию" }],
+              "window_assignments": { "primary": "default" }
+            }
+            """);
+
+        var loaded = await store.LoadAsync();
+        var workspace = Assert.Single(loaded.Workspaces);
+        Assert.Null(workspace.Symbol);
+        Assert.Null(workspace.Color);
+    }
+
+    [Fact]
+    public async Task CreateAsyncCopiesOptionalAppearanceFieldsAndKeepsThreeArgumentCallsCompatible()
+    {
+        using var folder = new TempDirectory();
+        var store = new WorkspaceCatalogStore(folder.Path);
+        var source = await store.CreateAsync("Source", "neon", CancellationToken.None, "🧭", "#4a8bC1");
+        var copy = await store.CreateAsync("Copy", source.Theme, CancellationToken.None, source.Symbol, source.Color);
+
+        Assert.Equal("🧭", copy.Symbol);
+        Assert.Equal("#4A8BC1", copy.Color);
+        Assert.Equal("#4A8BC1", Assert.Single((await store.LoadAsync()).Workspaces, item => item.Id == copy.Id).Color);
+    }
+
+    [Theory]
+    [InlineData("R")]
+    [InlineData("é")]
+    [InlineData("e\u0301")]
+    [InlineData("🧪")]
+    [InlineData("👩‍💻")]
+    [InlineData("🏳️‍🌈")]
+    public void SymbolValidatorAcceptsOneVisibleUnicodeGrapheme(string symbol) =>
+        Assert.Equal(symbol, WorkspaceCatalogStore.ValidateSymbol(symbol));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("  ")]
+    [InlineData("⭐⭐")]
+    [InlineData("\u0301")]
+    [InlineData("\u200B")]
+    [InlineData("\u200D")]
+    [InlineData("\uD800")]
+    public void SymbolValidatorRejectsBlankInvisibleMalformedOrMultipleGraphemes(string symbol) =>
+        Assert.Throws<ArgumentException>(() => WorkspaceCatalogStore.ValidateSymbol(symbol));
+
+    [Theory]
+    [InlineData("#123456", "#123456")]
+    [InlineData("#a1B2cD", "#A1B2CD")]
+    public void ColorValidatorReturnsCanonicalHex(string color, string canonical) =>
+        Assert.Equal(canonical, WorkspaceCatalogStore.ValidateColor(color));
+
+    [Theory]
+    [InlineData("123456")]
+    [InlineData("#123")]
+    [InlineData("#12345678")]
+    [InlineData("#12345G")]
+    [InlineData(" #123456")]
+    public void ColorValidatorRejectsAnythingOtherThanRgbHex(string color) =>
+        Assert.Throws<ArgumentException>(() => WorkspaceCatalogStore.ValidateColor(color));
 
     [Fact]
     public async Task RestoreDeletedWorkspaceWithNameCollisionUsesUniqueNameAndPreservesBothDirectories()

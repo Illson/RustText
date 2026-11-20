@@ -23,7 +23,7 @@ public sealed record UserSettings(int UntitledTabLimit = 10, int RecentFileLimit
 {
     public string Theme { get; init; } = "focus";
     public bool ShowDraftLineCount { get; init; } = true;
-    public bool AutoCheckUpdates { get; init; }
+    public bool AutoCheckUpdates { get; init; } = true;
     public bool? OpenLargeFilesAsLog { get; init; }
     public int ArchiveClosedDraftAfterMinutes { get; init; } = 300;
     public int ArchivedDraftRetentionDays { get; init; } = 30;

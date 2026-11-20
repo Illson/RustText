@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using RustText.Demo;
 using RustText.Demo.Platform;
 using Xunit;
 
@@ -9,6 +10,60 @@ namespace RustText.Tests;
 
 public sealed class UpdaterTests
 {
+    [Fact]
+    public async Task AutomaticUpdateChecksDefaultOnButHonorExplicitOptOutAndProfileOverride()
+    {
+        using var directory = new TempDirectory();
+        var storage = StorageService.OpenForTesting(directory.Path);
+
+        var newProfile = await storage.LoadSettingsAsync();
+        Assert.True(newProfile.AutoCheckUpdates);
+        Assert.True(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: true, profileOverride: null));
+        Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: false, profileOverride: null));
+        Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: true, profileOverride: "C:\\isolated"));
+
+        await File.WriteAllTextAsync(Path.Combine(storage.RootDirectory, "settings.json"), "{\"untitled_tab_limit\":19}");
+        var legacy = await storage.LoadSettingsAsync();
+        Assert.True(legacy.AutoCheckUpdates);
+        Assert.Equal(19, legacy.UntitledTabLimit);
+
+        await storage.SaveSettingsAsync(newProfile with { AutoCheckUpdates = false });
+        var optedOut = await storage.LoadSettingsAsync();
+        Assert.False(optedOut.AutoCheckUpdates);
+        Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(optedOut.AutoCheckUpdates, isWindows: true, profileOverride: null));
+
+        await storage.SaveSettingsAsync(optedOut with { AutoCheckUpdates = true });
+        var optedIn = await storage.LoadSettingsAsync();
+        Assert.True(optedIn.AutoCheckUpdates);
+        Assert.True(MainWindow.ShouldRunAutomaticUpdateCheck(optedIn.AutoCheckUpdates, isWindows: true, profileOverride: null));
+    }
+
+    [Fact]
+    public void AutomaticUpdateCheckCadenceIsOneHour() =>
+        Assert.Equal(TimeSpan.FromHours(1), MainWindow.AutomaticUpdateCheckInterval);
+
+    [Fact]
+    public void DismissedBackgroundReleaseStaysHiddenButNewerReleaseIsPresented()
+    {
+        var dismissed = Release("2.1.0");
+        Assert.False(MainWindow.ShouldPresentBackgroundUpdate(dismissed, "2.1.0"));
+        Assert.True(MainWindow.ShouldPresentBackgroundUpdate(dismissed, null));
+
+        var newer = Release("2.2.0");
+        Assert.True(MainWindow.ShouldPresentBackgroundUpdate(newer, "2.1.0"));
+        Assert.False(MainWindow.ShouldPresentBackgroundUpdate(null, "2.1.0"));
+    }
+
+    private static UpdateRelease Release(string version) => new(
+        version,
+        $"v{version}",
+        new Uri($"https://github.com/Illson/RustText/releases/tag/v{version}"),
+        new Uri($"https://github.com/Illson/RustText/releases/download/v{version}/RustText.NET-win-x64.zip"),
+        new Uri($"https://github.com/Illson/RustText/releases/download/v{version}/RustText.NET-win-x64.zip.sha256"),
+        1,
+        null,
+        null);
+
     private const string ArchiveUrl = "https://github.com/Illson/RustText/releases/download/v1.2.3/RustText.NET-win-x64.zip";
     private const string ChecksumUrl = ArchiveUrl + ".sha256";
     private static readonly string[] LegacyFiles =
