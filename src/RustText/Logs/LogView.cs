@@ -1639,6 +1639,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                 Children = { new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, Foreground = FocusTheme.Text }, buttons }
             }
         };
+        DialogWindowChrome.Apply(dialog);
         await dialog.ShowDialog(window);
         return result;
     }

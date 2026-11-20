@@ -31,6 +31,10 @@ public sealed class WorkspaceMenuTests
         try
         {
             Assert.DoesNotContain(window.GetVisualDescendants().OfType<TextBlock>(), label => label.Text == "Рабочие пространства");
+            var fileMenu = window.FindControl<Menu>("TopMenu")!.Items.OfType<MenuItem>()
+                .Single(item => Header(item) == "_Файл");
+            Assert.DoesNotContain(fileMenu.Items.OfType<MenuItem>(), item => Header(item) == "Рабочие пространства…");
+
             var menu = await OpenMenuAsync(window);
             Assert.Contains(menu.Items.OfType<MenuItem>(), item => Header(item).StartsWith("По умолчанию", StringComparison.Ordinal));
             Assert.Contains(menu.Items.OfType<MenuItem>(), item => Header(item) == "Существующее пространство");
