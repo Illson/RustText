@@ -291,7 +291,7 @@ internal static class TextOperations
         return Encoding.UTF8.GetString(memory.GetBuffer().AsSpan(0, (int)memory.Length));
     }
 
-    private static bool IsJsonLinesPath(string? path)
+    internal static bool IsJsonLinesPath(string? path)
     {
         var extension = Path.GetExtension(path.AsSpan());
         return extension.Equals(".jsonl", StringComparison.OrdinalIgnoreCase)
