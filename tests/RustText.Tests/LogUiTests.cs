@@ -815,6 +815,105 @@ public sealed class LogUiTests
     }
 
     [Fact]
+    public Task SearchEnumeratesRepeatedMatchesOnOneLineAcrossBatchesAndF3MovesBack() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "same-line-search.log");
+        await File.WriteAllTextAsync(path, string.Join(' ', Enumerable.Repeat("needle", 70)));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            var results = (System.Collections.ICollection)Field(log, "_searchResults");
+            Assert.Equal(32, results.Count);
+            Assert.True((bool)Field(log, "_searchHasMore"));
+
+            for (var index = 0; index < 33; index++)
+                await log.NavigateMatchAsync(backward: false);
+
+            Assert.Equal(64, results.Count);
+            var text = (TextBox)Field(log, "_logText");
+            Assert.Equal("needle", SelectedText(text));
+            var thirtyThirdStart = SelectionStart(text);
+            Assert.Equal(32 * 7, thirtyThirdStart);
+
+            await log.NavigateMatchAsync(backward: true);
+            Assert.Equal("needle", SelectedText(text));
+            Assert.Equal(thirtyThirdStart - 7, SelectionStart(text));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchContinuesZeroLengthRegexMatchesAcrossBatches() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "zero-width-search.log");
+        await File.WriteAllTextAsync(path, new string('a', 40));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "(?=a)";
+            ((ToggleButton)Field(log, "_regexBox")).IsChecked = true;
+            await InvokeTask(log, "SearchAsync", false);
+            var results = (System.Collections.IList)Field(log, "_searchResults");
+            Assert.Equal(32, results.Count);
+            Assert.Equal(Enumerable.Range(0, 32), results.Cast<object>().Select(hit => (int)hit.GetType().GetProperty("MatchIndex")!.GetValue(hit)!));
+
+            for (var index = 0; index < 33; index++)
+                await log.NavigateMatchAsync(backward: false);
+
+            Assert.Equal(40, results.Count);
+            Assert.False((bool)Field(log, "_searchHasMore"));
+            var text = (TextBox)Field(log, "_logText");
+            Assert.Equal(32, text.CaretIndex);
+            Assert.Empty(SelectedText(text));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchSkipsOverLimitLinesAndFindsTheNextLine() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "oversized-search.log");
+        await File.WriteAllTextAsync(path, "needle" + new string('x', 1024 * 1024) + "\nneedle after limit\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            var hit = Assert.Single(((System.Collections.IList)Field(log, "_searchResults")).Cast<object>());
+            Assert.True((long)hit.GetType().GetProperty("Offset")!.GetValue(hit)! > 1024 * 1024);
+            Assert.Contains("Пропущена строка", log.StatusText);
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Equal("needle", SelectedText((TextBox)Field(log, "_logText")));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchNavigationRejectsHitsAfterTheSourceFileChanges() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "stale-search.log");
+        await File.WriteAllTextAsync(path, "needle first\nneedle second\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            Assert.NotEmpty((System.Collections.ICollection)Field(log, "_searchResults"));
+            var originalOffset = log.CurrentOffset;
+
+            await File.WriteAllTextAsync(path, "replacement content\n");
+            await log.NavigateMatchAsync(backward: false);
+
+            Assert.Empty((System.Collections.ICollection)Field(log, "_searchResults"));
+            Assert.Equal(originalOffset, log.CurrentOffset);
+            Assert.Contains("Файл изменился", log.StatusText);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public async Task SearchFindsCompletedAppendedUtf8AndNullBytesRemainReadable()
     {
         await HeadlessTests.RunAsync(async _ =>

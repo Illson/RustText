@@ -8,6 +8,7 @@ using Avalonia.Layout;
 using Avalonia.Threading;
 using AvaloniaEdit.Rendering;
 using RustText.Demo.Editor;
+using RustText.Demo.Logs;
 
 namespace RustText.Demo;
 
@@ -110,14 +111,29 @@ public partial class MainWindow
         {
             if (_searchResults.SelectedItem is not ListBoxItem { Tag: SearchResult result }
                 || !_tabs.ContainsKey(result.Tab.Id)) return;
-            if (result.Tab.Revision != result.Revision)
+            if (result is LogSearchResult fromLog)
+            {
+                Run(async () =>
+                {
+                    if (fromLog.Tab.Log is { } log && log.IsSearchSnapshotCurrent(fromLog.Snapshot))
+                    {
+                        Select(fromLog.Tab);
+                        if (await log.NavigateToSearchHitAsync(fromLog.Snapshot, fromLog.Hit)) return;
+                    }
+                    _searchStatus.Text = "Лог изменился или недоступен. Повторите поиск.";
+                });
+                return;
+            }
+
+            var fromEditor = (EditorSearchResult)result;
+            if (fromEditor.Tab.Revision != fromEditor.Revision)
             {
                 _searchStatus.Text = "Текст изменился. Повторите поиск.";
                 return;
             }
 
-            _searchFocus = (result.Tab, result.Hit);
-            SelectText(result.Tab, result.Hit.Offset, result.Hit.Length);
+            _searchFocus = (fromEditor.Tab, fromEditor.Hit);
+            SelectText(fromEditor.Tab, fromEditor.Hit.Offset, fromEditor.Hit.Length);
             RefreshSearchHighlights();
         };
 
@@ -237,7 +253,7 @@ public partial class MainWindow
     }
 
     private static bool IsAutomaticSearchSize(WorkTab tab) =>
-        (tab.Stamp?.Length ?? (long)(tab.Editor?.Document.TextLength ?? 0) * sizeof(char))
+        (tab.Log?.FileLength ?? tab.Stamp?.Length ?? (long)(tab.Editor?.Document.TextLength ?? 0) * sizeof(char))
         < TextOperations.AutomaticSearchMaxBytes;
 
     private Task FindAsync() => FindMatchesAsync();
@@ -280,9 +296,9 @@ public partial class MainWindow
             foreach (var tab in candidates)
             {
                 source.Token.ThrowIfCancellationRequested();
-                if (automatic && (tab.Editor is null || !IsAutomaticSearchSize(tab)))
+                if (automatic && (tab.Deferred is not null || tab.Loading || !IsAutomaticSearchSize(tab)))
                 {
-                    incomplete |= tab.Deferred is not null || tab.Loading;
+                    incomplete = true;
                     continue;
                 }
                 if (tab.Deferred is { DraftRef: not null, DraftLogMode: not false } draft
@@ -291,13 +307,42 @@ public partial class MainWindow
                     incomplete = true;
                     continue;
                 }
-                if (tab.Deferred is not null && !tab.IsLog)
+                if (tab.Deferred is not null)
                 {
                     try { await ActivateDeferredAsync(tab); }
                     catch (Exception ex) when (IsUserError(ex) || ex is OperationCanceledException)
                     {
                         incomplete = true;
                     }
+                }
+                if (allTabs && !selectAll && tab.Log is { } log)
+                {
+                    var remaining = 100 - results.Count;
+                    if (remaining == 0 || log.HasPendingEdit)
+                    {
+                        incomplete = true;
+                        continue;
+                    }
+                    try
+                    {
+                        var snapshot = log.CaptureSearchSnapshot();
+                        var page = automatic
+                            ? await log.SearchSnapshotAsync(snapshot, options, null, remaining, source.Token)
+                            : await log.SearchSnapshotAsync(snapshot, options, null, remaining, source.Token, long.MaxValue);
+                        if (!ReferenceEquals(tab.Log, log) || !log.IsSearchSnapshotCurrent(snapshot))
+                        {
+                            incomplete = true;
+                            continue;
+                        }
+                        total += page.Hits.Count;
+                        incomplete |= page.HasMore || page.Message is not null;
+                        foreach (var hit in page.Hits) results.Add(new LogSearchResult(tab, snapshot, hit));
+                    }
+                    catch (Exception error) when (IsUserError(error) && !source.IsCancellationRequested)
+                    {
+                        incomplete = true;
+                    }
+                    continue;
                 }
                 if (tab.Editor is not { } editor)
                 {
@@ -318,7 +363,7 @@ public partial class MainWindow
                 }
                 total += result.Count;
                 incomplete |= result.TimedOut;
-                foreach (var hit in result.Hits) results.Add(new SearchResult(tab, hit, revision));
+                foreach (var hit in result.Hits) results.Add(new EditorSearchResult(tab, hit, revision));
                 if (selectAll)
                 {
                     selection = result;
@@ -334,7 +379,7 @@ public partial class MainWindow
                 {
                     _searchResults.Items.Add(new ListBoxItem
                     {
-                        Content = $"{result.Tab.Label.Text} · {result.Hit.Line}: {result.Hit.Preview}",
+                        Content = $"{result.Tab.Label.Text} · {result.Description}",
                         Tag = result,
                     });
                 }
@@ -392,10 +437,14 @@ public partial class MainWindow
         var query = TextOperations.BuildRegex(options);
         _highlightPattern = query;
         var selection = MultiCaretEditing.Primary(editor.TextArea);
-        var same = _searchFocus is { } focused && ReferenceEquals(focused.Tab, tab) && focused.Hit.Offset == selection.Start;
-        var offset = backward ? selection.Start
-            : same ? Math.Min(editor.Document.TextLength, selection.Start + Math.Max(1, selection.Length))
-            : editor.CaretOffset;
+        var same = _searchFocus is { } focused && ReferenceEquals(focused.Tab, tab)
+            && focused.Hit.Offset == selection.Start && focused.Hit.Length == selection.Length;
+        var offset = backward ? selection.Start : editor.CaretOffset;
+        if (!backward && same)
+        {
+            offset = selection.Length > 0 ? selection.End
+                : selection.Start < editor.Document.TextLength ? selection.Start + 1 : 0;
+        }
         var text = editor.Text;
         var revision = tab.Revision;
         var match = await Task.Run(() => TextOperations.FindNext(text, query, offset, backward), _lifetime.Token);
@@ -434,8 +483,10 @@ public partial class MainWindow
             var match = query.Match(editor.Text, offset);
             if (match.Success && match.Index == offset && match.Length == selection.Length)
             {
-                editor.Document.Replace(offset, selection.Length, options.IsRegex ? match.Result(replacement) : replacement);
-                editor.CaretOffset = Math.Min(editor.Document.TextLength, offset + replacement.Length);
+                var inserted = options.IsRegex ? match.Result(replacement) : replacement;
+                editor.Document.Replace(offset, selection.Length, inserted);
+                editor.Select(offset + inserted.Length, 0);
+                editor.CaretOffset = offset + inserted.Length;
             }
 
             await NavigateSearchAsync(false);
@@ -444,7 +495,9 @@ public partial class MainWindow
 
         var source = editor.Text;
         var revision = tab.Revision;
-        var result = await Task.Run(() => TextOperations.ReplaceAll(source, query, replacement, options.IsRegex), _lifetime.Token);
+        var format = tab.Format;
+        var result = await Task.Run(() => TextOperations.ReplaceAll(source, query, replacement, options.IsRegex,
+            _lifetime.Token, format.MixedEndings), _lifetime.Token);
         if (tab.Revision != revision || !_tabs.ContainsKey(tab.Id))
         {
             throw new InvalidOperationException("Текст изменился во время замены.");
@@ -454,7 +507,15 @@ public partial class MainWindow
         if (result.Count > 0)
         {
             MultiCaretEditing.CollapseToPrimary(editor.TextArea);
-            editor.Document.Replace(0, editor.Document.TextLength, result.Text);
+            if (result.MixedEndings is { } mixedEndings)
+            {
+                var updatedFormat = format with { MixedEndings = mixedEndings };
+                DocumentFormatHistory.For(editor.Document, format).Restore(result.Text, updatedFormat);
+            }
+            else
+            {
+                editor.Document.Replace(0, editor.Document.TextLength, result.Text);
+            }
         }
 
         _searchStatus.Text = $"Заменено {result.Count:N0}";
@@ -478,5 +539,9 @@ public partial class MainWindow
         }
     }
 
-    private sealed record SearchResult(WorkTab Tab, SearchHit Hit, long Revision);
+    private abstract record SearchResult(WorkTab Tab, string Description);
+    private sealed record EditorSearchResult(WorkTab Tab, SearchHit Hit, long Revision)
+        : SearchResult(Tab, $"{Hit.Line}: {Hit.Preview}");
+    private sealed record LogSearchResult(WorkTab Tab, LogView.LogSearchSnapshot Snapshot, LogSearchHit Hit)
+        : SearchResult(Tab, Hit.LineNumber is { } line ? $"{LineNumbers.Format(line)}: {Hit.Preview}" : Hit.Preview);
 }

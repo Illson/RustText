@@ -6,7 +6,7 @@ internal sealed partial class LogView
 
     internal bool TryBeginModeSwitch()
     {
-        if (_closed || _busy || _pageWrite is not null) return false;
+        if (_closed || _windowCloseInputBlocked || _busy || _pageWrite is not null) return false;
 
         _busy = true;
         if (_pageEdit is not null && _pageEditor is not null)
@@ -24,7 +24,15 @@ internal sealed partial class LogView
         _busy = false;
         if (_pageEdit is not null && _pageEditor is not null)
         {
-            _pageEditor.IsEnabled = true;
+            if (_windowCloseInputBlocked)
+            {
+                _pageEditorEnabledBeforeWindowClose = true;
+                _pageEditor.IsEnabled = false;
+            }
+            else
+            {
+                _pageEditor.IsEnabled = true;
+            }
         }
         RefreshButtons();
     }

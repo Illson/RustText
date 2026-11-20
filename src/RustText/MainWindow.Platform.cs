@@ -8,6 +8,7 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using RustText.Demo.Editor;
 using RustText.Demo.Platform;
 
 namespace RustText.Demo;
@@ -131,15 +132,12 @@ public partial class MainWindow
 
     private VersionHistory VersionStore() => VersionHistory.OpenDefault(Settings.VersionFileLimitBytes, Settings.VersionTotalLimitBytes);
 
-    private async Task<string?> CaptureVersionAsync(string path, TextEncodingKind encoding, FileStamp? expectedStamp = null)
+    private async Task<string?> CaptureVersionAsync(string path, TextEncodingKind? encoding, FileStamp expectedStamp)
     {
         try
         {
             var store = VersionStore();
-            if (expectedStamp is null)
-                await store.CaptureAsync(path, encoding, _lifetime.Token);
-            else
-                await store.CaptureExpectedAsync(path, encoding, expectedStamp, _lifetime.Token);
+            await store.CaptureExpectedAsync(path, encoding, expectedStamp, _lifetime.Token);
             return null;
         }
         catch (Exception error) when (IsUserError(error))
@@ -234,18 +232,16 @@ public partial class MainWindow
                     throw new IOException("Исходный файл изменился на диске. Откройте его заново.");
                 }
 
-                await versions.CaptureExpectedAsync(path, active.Encoding, expected, _lifetime.Token);
+                await versions.CaptureExpectedAsync(path, active.DiskEncoding ?? active.Encoding, expected, _lifetime.Token);
                 var snapshot = DocumentFiles.DecodeSnapshot(bytes, encoding);
                 if (await DocumentFiles.GetStampAsync(path, _lifetime.Token) != expected || active.Revision != revision)
                 {
                     throw new IOException("Файл или текст изменились во время восстановления.");
                 }
 
-                active.Encoding = snapshot.Encoding;
-                active.Ending = snapshot.Ending;
-                active.OriginalEndings = snapshot.Endings;
-                active.RestoredDirty = true;
-                editor.Document.Replace(0, editor.Document.TextLength, snapshot.Text);
+                if (!ReferenceEquals(active.Editor, editor)) return;
+                DocumentFormatHistory.For(editor.Document, active.Format).Restore(snapshot.Text,
+                    EditorFileFormat.From(snapshot.Encoding, snapshot.Ending, snapshot.Endings));
                 dialog.Close();
                 SetStatus("Версия восстановлена в редакторе. Ctrl+S сохранит её на диск.");
             }

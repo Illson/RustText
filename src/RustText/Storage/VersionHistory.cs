@@ -35,10 +35,10 @@ public sealed class VersionHistory
     public Task<VersionSnapshot?> CaptureAsync(string path, TextEncodingKind encoding, CancellationToken cancellationToken = default) =>
         CaptureCoreAsync(path, encoding, expectedStamp: null, cancellationToken);
 
-    internal Task<VersionSnapshot?> CaptureExpectedAsync(string path, TextEncodingKind encoding, FileStamp expectedStamp, CancellationToken cancellationToken = default) =>
+    internal Task<VersionSnapshot?> CaptureExpectedAsync(string path, TextEncodingKind? encoding, FileStamp expectedStamp, CancellationToken cancellationToken = default) =>
         CaptureCoreAsync(path, encoding, expectedStamp, cancellationToken);
 
-    private async Task<VersionSnapshot?> CaptureCoreAsync(string path, TextEncodingKind encoding, FileStamp? expectedStamp, CancellationToken cancellationToken)
+    private async Task<VersionSnapshot?> CaptureCoreAsync(string path, TextEncodingKind? encoding, FileStamp? expectedStamp, CancellationToken cancellationToken)
     {
         using var gate = AcquireLock();
         var fullPath = Path.GetFullPath(path);
@@ -57,7 +57,13 @@ public sealed class VersionHistory
         var digest = stamp.Sha256;
         var entries = (await ReadManifestAsync(cancellationToken).ConfigureAwait(false)).ToList();
         var same = entries.FirstOrDefault(e => string.Equals(e.Path, fullPath, StringComparison.OrdinalIgnoreCase));
-        if (same is not null && same.Sha256 == digest && same.Encoding == encoding) return same;
+        if (same is not null && same.Sha256 == digest && (encoding is null || same.Encoding == encoding)) return same;
+        if (encoding is null)
+        {
+            // Save As can target a file the editor has never opened.
+            try { encoding = DocumentFiles.DetectEncoding(bytes); }
+            catch (System.Text.DecoderFallbackException) { /* Keep unknown encodings marked as such. */ }
+        }
         var snapshot = new VersionSnapshot(DateTime.UtcNow.Ticks.ToString("x16") + Guid.NewGuid().ToString("N")[..8], fullPath,
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), bytes.LongLength, digest, encoding);
         entries.Insert(0, snapshot);

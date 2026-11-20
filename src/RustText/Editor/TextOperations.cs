@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -11,6 +12,7 @@ internal sealed record SearchHit(int Offset, int Length, int Line, string Previe
 internal sealed record SearchSummary(IReadOnlyList<SearchHit> Hits, int Count, bool TimedOut, IReadOnlyList<CaretRange>? Carets);
 internal sealed record JsonProblem(int Offset, int Line, int Column, string Message);
 internal sealed record ListComparison(string Common, string LeftOnly, string RightOnly);
+internal sealed record ReplaceAllResult(string Text, int Count, ImmutableList<LineEndingKind>? MixedEndings = null);
 
 internal static class TextOperations
 {
@@ -117,28 +119,82 @@ internal static class TextOperations
         return previous ?? last;
     }
 
-    public static (string Text, int Count) ReplaceAll(string text, Regex regex, string replacement, bool expandGroups)
+    public static ReplaceAllResult ReplaceAll(string text, Regex regex, string replacement, bool expandGroups,
+        CancellationToken cancellationToken = default, ImmutableList<LineEndingKind>? originalEndings = null)
     {
         var started = Stopwatch.GetTimestamp();
         var builder = new StringBuilder(text.Length);
+        var endings = originalEndings is null ? null : ImmutableList.CreateBuilder<LineEndingKind>();
+        var endingIndex = 0;
         var count = 0;
         var previousEnd = 0;
         for (var match = regex.Match(text); match.Success; match = match.NextMatch())
         {
+            cancellationToken.ThrowIfCancellationRequested();
             CheckBudget(started);
-            builder.Append(text.AsSpan(previousEnd, match.Index - previousEnd));
-            builder.Append(expandGroups ? match.Result(replacement) : replacement);
+            var unchanged = text.AsSpan(previousEnd, match.Index - previousEnd);
+            CopySegmentEndings(unchanged);
+            builder.Append(unchanged);
+            var inserted = expandGroups ? match.Result(replacement) : replacement;
+            if (endings is not null)
+            {
+                var matched = text.AsSpan(match.Index, match.Length);
+                var removedBreaks = CountLineBreaks(matched, started, cancellationToken);
+                var insertedBreaks = CountLineBreaks(inserted.AsSpan(), started, cancellationToken);
+                var retainedBreaks = Math.Min(removedBreaks, insertedBreaks);
+                CopySourceEndings(retainedBreaks);
+                for (var index = retainedBreaks; index < insertedBreaks; index++) endings.Add(LineEndingKind.Lf);
+                endingIndex += removedBreaks - retainedBreaks;
+            }
+            builder.Append(inserted);
             previousEnd = match.Index + match.Length;
             count++;
         }
 
         if (count == 0)
         {
-            return (text, 0);
+            return new ReplaceAllResult(text, 0, originalEndings);
         }
 
-        builder.Append(text.AsSpan(previousEnd));
-        return (builder.ToString(), count);
+        var tail = text.AsSpan(previousEnd);
+        CopySegmentEndings(tail);
+        builder.Append(tail);
+        return new ReplaceAllResult(builder.ToString(), count, endings?.ToImmutable());
+
+        void CopySegmentEndings(ReadOnlySpan<char> segment)
+        {
+            if (endings is null) return;
+            CopySourceEndings(CountLineBreaks(segment, started, cancellationToken));
+        }
+
+        void CopySourceEndings(int breaks)
+        {
+            if (endings is null) return;
+            var available = Math.Min(breaks, Math.Max(0, originalEndings!.Count - endingIndex));
+            if (available > 0) endings.AddRange(originalEndings.GetRange(endingIndex, available));
+            for (var index = available; index < breaks; index++) endings.Add(LineEndingKind.Lf);
+            endingIndex += breaks;
+        }
+    }
+
+    private static int CountLineBreaks(ReadOnlySpan<char> text, long started, CancellationToken cancellationToken)
+    {
+        var count = 0;
+        for (var index = 0; index < text.Length; index++)
+        {
+            if ((index & 0x3FFF) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                CheckBudget(started);
+            }
+            if (text[index] == '\r')
+            {
+                if (index + 1 < text.Length && text[index + 1] == '\n') index++;
+                count++;
+            }
+            else if (text[index] == '\n') count++;
+        }
+        return count;
     }
 
     private static void CheckBudget(long started)

@@ -662,6 +662,8 @@ public partial class MainWindow : Window
         }
 
         _closing = true;
+        foreach (var tab in _tabs.Values)
+            tab.Log?.SetWindowCloseInputBlocked(true);
         CancelTabDrag();
         _checkpoint.Stop();
         var closeGateHeld = false;
@@ -676,6 +678,8 @@ public partial class MainWindow : Window
             {
                 if (!await ResolvePendingPageAsync(tab))
                 {
+                    foreach (var openTab in _tabs.Values)
+                        openTab.Log?.SetWindowCloseInputBlocked(false);
                     _closing = false;
                     _checkpoint.Start();
                     return;
@@ -742,6 +746,8 @@ public partial class MainWindow : Window
             }
 
             SetStatus($"Не удалось записать сессию. {error.Message}");
+            foreach (var tab in _tabs.Values)
+                tab.Log?.SetWindowCloseInputBlocked(false);
             _closing = false;
             _checkpoint.Start();
         }

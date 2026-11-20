@@ -36,9 +36,8 @@ public partial class MainWindow
             status = "Открыт общий документ. Отличающаяся сохранённая версия восстановлена в отдельном черновике.";
         }
 
-        tab.Encoding = encoding;
-        tab.Ending = other.Ending;
-        tab.OriginalEndings = other.OriginalEndings;
+        tab.Format = other.Format;
+        tab.DiskEncoding = other.DiskEncoding;
         tab.Stamp = other.Stamp;
         tab.Dirty = other.Dirty;
         tab.RestoredDirty = other.RestoredDirty;

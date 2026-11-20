@@ -30,11 +30,36 @@ internal sealed partial class LogView
     private readonly Button _cancelPageButton = new() { Content = "Отменить" };
     private PageEdit? _pageEdit;
     private CancellationTokenSource? _pageWrite;
+    private bool? _pageEditorEnabledBeforeWindowClose;
+    private bool _windowCloseInputBlocked;
 
     internal Func<string, string, long, int, bool, CancellationToken, Task>? CommitDraftPage { get; set; }
     internal Action<string>? PreserveExternalPageEdit { get; init; }
     public bool HasPendingEdit => IsWritingPage || _editedPageChanged;
     internal bool IsWritingPage => _pageWrite is not null;
+
+    internal void SetWindowCloseInputBlocked(bool blocked)
+    {
+        if (blocked)
+        {
+            if (_windowCloseInputBlocked) return;
+            _windowCloseInputBlocked = true;
+            if (_pageEditor is { } editor)
+            {
+                _pageEditorEnabledBeforeWindowClose = editor.IsEnabled;
+                editor.IsEnabled = false;
+            }
+            return;
+        }
+
+        if (!_windowCloseInputBlocked) return;
+        _windowCloseInputBlocked = false;
+        if (_pageEditor is not { } pageEditor) return;
+        var wasEnabled = _pageEditorEnabledBeforeWindowClose ?? (!_busy && _pageEdit is not null && _pageWrite is null);
+        _pageEditorEnabledBeforeWindowClose = null;
+        pageEditor.IsEnabled = wasEnabled;
+    }
+
     internal long? DisplayLineCount => KnownLineCount is { } total
         ? Math.Max(0, total + (_pageEdit is null ? 0 : EditedRowCount() - _originalPageLines))
         : null;
@@ -81,7 +106,7 @@ internal sealed partial class LogView
 
     private async Task TogglePageEditAsync()
     {
-        if (_closed || _busy || IsConsole || EditsPagesByDefault || _page is not { } page) return;
+        if (_closed || _windowCloseInputBlocked || _busy || IsConsole || EditsPagesByDefault || _page is not { } page) return;
         if (_pageEdit is not null)
         {
             if (HasPendingEdit) SetStatus("Сохраните или отмените правки страницы.");
@@ -97,7 +122,7 @@ internal sealed partial class LogView
             var stamp = _fileStamp;
             var token = _closing.Token;
             var edit = await Task.Run(() => ReadPageEdit(page, reader, stamp, token), token);
-            if (_closed) return;
+            if (_closed || _windowCloseInputBlocked) return;
             _searchPanel.IsVisible = false;
             BeginPageEdit(edit);
             await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
@@ -141,6 +166,15 @@ internal sealed partial class LogView
     {
         StopFollowingEnd();
         _pageEditor ??= CreatePageEditor();
+        if (_windowCloseInputBlocked)
+        {
+            _pageEditorEnabledBeforeWindowClose ??= true;
+            _pageEditor.IsEnabled = false;
+        }
+        else
+        {
+            _pageEditor.IsEnabled = true;
+        }
         _pageEdit = edit;
         _pageLineNumbers!.FirstLineNumber = _displaySourceLineNumbers.FirstOrDefault();
         _lineGutterScrollViewer.IsVisible = false;
