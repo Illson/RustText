@@ -202,7 +202,7 @@ internal sealed class LogDataReader
         long endOffset = long.MaxValue) =>
         ReadPage(offset, pageSize, maxFrameBytes, maxPageBytes, cancellationToken, endOffset, null);
 
-    public SequentialScan BeginSequentialScan() => new(this);
+    public SequentialScan BeginSequentialScan(int maxPageBytes = DefaultPageBytes) => new(this, maxPageBytes);
 
     private LogPage ReadPage(long offset, int pageSize, int maxFrameBytes, int maxPageBytes,
         CancellationToken cancellationToken, long endOffset, SequentialScan? scan)
@@ -242,9 +242,9 @@ internal sealed class LogDataReader
             var position = firstPosition;
 
             var pageEnd = Math.Min(bytes.Length, maxPageBytes);
-            var rows = new List<LogRow>(Math.Min(pageSize, maxPageBytes / maxFrameBytes));
+            var rows = new List<LogRow>(pageSize);
             var inputStartsWithinLine = alignedOffset > _bomLength
-                && !IsNewlineBefore(handle, alignedOffset);
+                && !IsNewlineBefore(bytes, (int)(alignedOffset - readOffset));
 
             while (rows.Count < pageSize && position < pageEnd)
             {
@@ -340,7 +340,7 @@ internal sealed class LogDataReader
         }
     }
 
-    internal sealed class SequentialScan(LogDataReader reader) : IDisposable
+    internal sealed class SequentialScan : IDisposable
     {
         // Keep the next page contiguous while retaining unread bytes from the current page.
         private const int Capacity = 2 * DefaultPageBytes;
@@ -350,12 +350,22 @@ internal sealed class LogDataReader
         private int _length;
         private bool _reuseWindow;
         private bool _disposed;
+        private readonly LogDataReader reader;
+        private readonly int maxPageBytes;
 
-        public LogPage ReadPage(long offset, CancellationToken cancellationToken = default)
+        public SequentialScan(LogDataReader reader, int maxPageBytes)
+        {
+            if (maxPageBytes < DefaultFrameBytes || maxPageBytes > DefaultPageBytes)
+                throw new ArgumentOutOfRangeException(nameof(maxPageBytes));
+            this.reader = reader;
+            this.maxPageBytes = maxPageBytes;
+        }
+
+        public LogPage ReadPage(long offset, CancellationToken cancellationToken = default, long endOffset = long.MaxValue)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            var page = reader.ReadPage(offset, DefaultPageSize, DefaultFrameBytes, DefaultPageBytes,
-                cancellationToken, long.MaxValue, _reuseWindow ? this : null);
+            var page = reader.ReadPage(offset, DefaultPageSize, DefaultFrameBytes, maxPageBytes,
+                cancellationToken, endOffset, _reuseWindow ? this : null);
             // A page limited by bytes already used most of its window. Only retain
             // a window when the preceding page stopped at the row limit early.
             _reuseWindow = page.Rows.Count == DefaultPageSize
@@ -375,7 +385,8 @@ internal sealed class LogDataReader
             {
                 _offset = offset;
                 _length = 0;
-                _length = ReadWindowInto(handle, offset, buffer.AsSpan(0, length), cancellationToken);
+                var initialLength = (int)Math.Min(Capacity, observedLength - offset);
+                _length = ReadWindowInto(handle, offset, buffer.AsSpan(0, initialLength), cancellationToken);
             }
             else if (offset + length > _offset + _length)
             {
