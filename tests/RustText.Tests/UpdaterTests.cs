@@ -18,7 +18,7 @@ public sealed class UpdaterTests
 
         var newProfile = await storage.LoadSettingsAsync();
         Assert.True(newProfile.AutoCheckUpdates);
-        Assert.False(MainWindow.ShouldAskForAutomaticUpdateChoice(newProfile, isWindows: true));
+        Assert.False(newProfile.AutoCheckUpdatesChoiceMade);
         Assert.True(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: true, profileOverride: null));
         Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: false, profileOverride: null));
         Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(newProfile.AutoCheckUpdates, isWindows: true, profileOverride: "C:\\isolated"));
@@ -33,22 +33,18 @@ public sealed class UpdaterTests
         var ambiguousLegacyOptOut = await storage.LoadSettingsAsync();
         Assert.False(ambiguousLegacyOptOut.AutoCheckUpdates);
         Assert.False(ambiguousLegacyOptOut.AutoCheckUpdatesChoiceMade);
-        Assert.True(MainWindow.ShouldAskForAutomaticUpdateChoice(ambiguousLegacyOptOut, isWindows: true));
         Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(ambiguousLegacyOptOut.AutoCheckUpdates, isWindows: true, profileOverride: null));
 
         await storage.SaveSettingsAsync(ambiguousLegacyOptOut with { AutoCheckUpdatesChoiceMade = true });
         var optedOut = await storage.LoadSettingsAsync();
         Assert.False(optedOut.AutoCheckUpdates);
         Assert.True(optedOut.AutoCheckUpdatesChoiceMade);
-        Assert.False(MainWindow.ShouldAskForAutomaticUpdateChoice(optedOut, isWindows: true));
-        Assert.False(MainWindow.ShouldAskForAutomaticUpdateChoice(optedOut, isWindows: false));
         Assert.False(MainWindow.ShouldRunAutomaticUpdateCheck(optedOut.AutoCheckUpdates, isWindows: true, profileOverride: null));
 
         await storage.SaveSettingsAsync(optedOut with { AutoCheckUpdates = true });
         var optedIn = await storage.LoadSettingsAsync();
         Assert.True(optedIn.AutoCheckUpdates);
         Assert.True(optedIn.AutoCheckUpdatesChoiceMade);
-        Assert.False(MainWindow.ShouldAskForAutomaticUpdateChoice(optedIn, isWindows: true));
         Assert.True(MainWindow.ShouldRunAutomaticUpdateCheck(optedIn.AutoCheckUpdates, isWindows: true, profileOverride: null));
     }
 

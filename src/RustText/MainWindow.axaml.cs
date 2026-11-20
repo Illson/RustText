@@ -156,7 +156,6 @@ public partial class MainWindow : Window
         RefreshWorkspaceButton();
         _checkpoint.Start();
         ShowKnownUpdate();
-        await AskForAutomaticUpdateChoiceIfNeededAsync();
         SynchronizeAutomaticUpdateTimer(runImmediately: true);
     }
 

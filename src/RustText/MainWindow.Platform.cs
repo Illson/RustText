@@ -23,9 +23,6 @@ public partial class MainWindow
     internal static bool ShouldRunAutomaticUpdateCheck(bool enabled, bool isWindows, string? profileOverride) =>
         enabled && isWindows && string.IsNullOrWhiteSpace(profileOverride);
 
-    internal static bool ShouldAskForAutomaticUpdateChoice(UserSettings settings, bool isWindows) =>
-        isWindows && !settings.AutoCheckUpdates && !settings.AutoCheckUpdatesChoiceMade;
-
     internal static bool ShouldPresentBackgroundUpdate(UpdateRelease? release, string? dismissedVersion) =>
         release is not null && release.Version != dismissedVersion;
 
@@ -74,39 +71,6 @@ public partial class MainWindow
     {
         var release = _workspace.KnownUpdate;
         UpdateNoticePresent(ShouldPresentBackgroundUpdate(release, _workspace.DismissedUpdateVersion) ? release : null);
-    }
-
-    private async Task AskForAutomaticUpdateChoiceIfNeededAsync()
-    {
-        if (_windowId != WorkspaceCatalogStore.PrimaryWindowId)
-        {
-            return;
-        }
-
-        if (_workspace.AutomaticUpdateChoicePrompted
-            || !ShouldAskForAutomaticUpdateChoice(Settings, OperatingSystem.IsWindows()))
-        {
-            return;
-        }
-
-        _workspace.AutomaticUpdateChoicePrompted = true;
-        var body = DialogPanel(new TextBlock
-        {
-            Text = "В сохранённых настройках автоматическая проверка обновлений выключена. Включить проверку при запуске и каждый час?",
-            TextWrapping = TextWrapping.Wrap
-        });
-        var dialog = Dialog("Проверка обновлений", body);
-        var keepDisabled = FocusButton(Button("Оставить выключенной", () => dialog.Close((bool?)false)));
-        keepDisabled.IsCancel = true;
-        body.Children.Add(Row(keepDisabled, FocusButton(Button("Включить", () => dialog.Close((bool?)true)), primary: true)));
-        var enabled = await dialog.ShowDialog<bool?>(this);
-        if (enabled is null) return;
-
-        await SaveWorkspaceSettingsAsync(settings => settings with
-        {
-            AutoCheckUpdates = enabled.Value,
-            AutoCheckUpdatesChoiceMade = true
-        });
     }
 
     private Task RegisterAssociationsAsync()

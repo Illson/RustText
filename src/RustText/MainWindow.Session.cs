@@ -44,6 +44,14 @@ public partial class MainWindow
                 {
                     _workspace.SettingsReady = true;
                 }
+                if (OperatingSystem.IsWindows())
+                {
+                    // Older profiles could save the disabled default without recording a choice.
+                    await SaveWorkspaceSettingsAsync(static settings =>
+                        settings is { AutoCheckUpdates: false, AutoCheckUpdatesChoiceMade: false }
+                            ? settings with { AutoCheckUpdates = true, AutoCheckUpdatesChoiceMade = true }
+                            : settings);
+                }
             }
             _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
         }
