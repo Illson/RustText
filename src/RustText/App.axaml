@@ -180,7 +180,7 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
             <Setter Property="Padding" Value="9,5" />
         </Style>
-        <Style Selector="Button.focus-quiet, Button.focus-icon">
+        <Style Selector="Button.focus-quiet, Button.focus-icon, ToggleButton.focus-icon">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
@@ -188,7 +188,7 @@
             <Setter Property="CornerRadius" Value="4" />
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
         </Style>
-        <Style Selector="Button.focus-icon">
+        <Style Selector="Button.focus-icon, ToggleButton.focus-icon">
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Toolbar}" />
             <Setter Property="MinWidth" Value="26" />
             <Setter Property="MinHeight" Value="25" />
@@ -217,7 +217,8 @@
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="Transparent" />
         </Style>
-        <Style Selector="ToggleButton.search-option:checked /template/ ContentPresenter#PART_ContentPresenter">
+        <Style Selector="ToggleButton.focus-icon:checked /template/ ContentPresenter#PART_ContentPresenter,
+                         ToggleButton.search-option:checked /template/ ContentPresenter#PART_ContentPresenter">
             <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
             <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Accent}" />
         </Style>

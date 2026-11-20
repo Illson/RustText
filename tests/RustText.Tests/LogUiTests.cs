@@ -81,6 +81,84 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Theory]
+    [InlineData(44, false)]
+    [InlineData(245, false)]
+    [InlineData(245, true)]
+    public Task EndPinsTheViewportAcrossAppendsUntilManualScrolling(int rows, bool dragThumb) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "tail.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(1, rows).Select(row => $"row-{row}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true));
+        try
+        {
+            var end = (ToggleButton)Field(log, "_endButton");
+            var text = (TextBox)Field(log, "_logText");
+            await HeadlessTests.WaitForAsync(() => Field(log, "_logScrollViewer") is ScrollViewer viewer
+                && viewer.ScrollBarMaximum.Y > 0 && end.IsEnabled && end.Bounds.Width > 0);
+            var scroll = (ScrollViewer)Field(log, "_logScrollViewer");
+            bool AtBottom() => scroll.ScrollBarMaximum.Y > 0 && Math.Abs(scroll.Offset.Y - scroll.ScrollBarMaximum.Y) <= 1;
+            async Task ClickEndAsync()
+            {
+                Point Center() => end.TranslatePoint(new Point(end.Bounds.Width / 2, end.Bounds.Height / 2), window)!.Value;
+                await HeadlessTests.WaitForAsync(() =>
+                {
+                    window.UpdateLayout();
+                    window.MouseMove(Center());
+                    return end.IsPointerOver;
+                });
+                var point = Center();
+                window.MouseDown(point, MouseButton.Left);
+                window.MouseUp(point, MouseButton.Left);
+            }
+
+            await ClickEndAsync();
+            await HeadlessTests.WaitForAsync(() => log.CaptureState().FollowEnd && text.Text!.EndsWith($"row-{rows}") && AtBottom());
+            await File.AppendAllTextAsync(path, "first append\n");
+            await HeadlessTests.WaitForAsync(() => text.Text!.EndsWith("first append") && AtBottom());
+            Assert.True(end.IsChecked);
+            await File.AppendAllTextAsync(path, "second append\n");
+            await HeadlessTests.WaitForAsync(() => text.Text!.EndsWith("second append") && AtBottom());
+
+            if (dragThumb)
+            {
+                var thumb = text.GetVisualDescendants().OfType<ScrollBar>().Single(bar => bar.Orientation == Orientation.Vertical)
+                    .GetVisualDescendants().OfType<Thumb>().Single();
+                Point Center() => thumb.TranslatePoint(new Point(thumb.Bounds.Width / 2, thumb.Bounds.Height / 2), window)!.Value;
+                await HeadlessTests.WaitForAsync(() => { window.MouseMove(Center()); return thumb.IsPointerOver; });
+                var start = Center();
+                var up = start - new Vector(0, 45);
+                window.MouseDown(start, MouseButton.Left);
+                window.MouseMove(up, RawInputModifiers.LeftMouseButton);
+                window.MouseUp(up, MouseButton.Left);
+            }
+            else
+            {
+                var pointer = text.TranslatePoint(new Point(90, 70), window)!.Value;
+                window.MouseWheel(pointer, new Vector(0, 2));
+            }
+            await HeadlessTests.WaitForAsync(() => end.IsChecked == false && !AtBottom());
+            var offset = log.CurrentOffset;
+            var y = scroll.Offset.Y;
+            await File.AppendAllTextAsync(path, "third append\n");
+            var length = new FileInfo(path).Length;
+            await HeadlessTests.WaitForAsync(() => log.FileLength == length && !(bool)Field(log, "_busy"));
+            await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() => window.UpdateLayout(), Avalonia.Threading.DispatcherPriority.Background);
+            Assert.Equal(offset, log.CurrentOffset);
+            Assert.InRange(Math.Abs(scroll.Offset.Y - y), 0, 1);
+            Assert.False(log.CaptureState().FollowEnd);
+
+            text.Focus();
+            window.KeyPress(Key.End, RawInputModifiers.Control, PhysicalKey.End, "");
+            window.KeyRelease(Key.End, RawInputModifiers.Control, PhysicalKey.End, "");
+            await HeadlessTests.WaitForAsync(() => end.IsChecked == true && text.Text!.EndsWith("third append") && AtBottom() && end.IsEnabled);
+            await ClickEndAsync();
+            await HeadlessTests.WaitForAsync(() => end.IsChecked == false);
+            Assert.True(AtBottom());
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Fact]
     public Task PageEditPreservesTheBomAndSurroundingPagesAndRejectsExternalChanges() => HeadlessTests.RunAsync(async profile =>
     {
@@ -225,19 +303,19 @@ public sealed class LogUiTests
         var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, FollowEnd: followEnd));
         try
         {
-            var follow = (Button)Field(log, "_followButton");
-            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+            var follow = (ToggleButton)Field(log, "_endButton");
+            Assert.Equal(followEnd, follow.IsChecked);
 
             await InvokeTask(log, "ShowLevelFilterAsync");
             var panel = (LogLevelFilterPanel)Field(log, "_levelFilter")!;
             panel.SetLevels(LogLevel.Error);
             await HeadlessTests.WaitForAsync(() => !follow.IsEnabled
                 && ((TextBox)Field(log, "_filteredLogText")).Text == "Error second");
-            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+            Assert.Equal(followEnd, follow.IsChecked);
 
             panel.SetLevels(LogLevel.All);
             await HeadlessTests.WaitForAsync(() => follow.IsEnabled);
-            Assert.Equal(followEnd, (bool)typeof(LogView).GetField("_followEnd", Private)!.GetValue(log)!);
+            Assert.Equal(followEnd, follow.IsChecked);
         }
         finally { await CloseLogAsync(window, log); }
     });

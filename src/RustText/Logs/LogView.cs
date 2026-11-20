@@ -96,7 +96,6 @@ internal sealed partial class LogView : UserControl, IDisposable
     private readonly ToggleButton _caseBox = SearchBar.Option("Aa", "Учитывать регистр");
     private readonly ToggleButton _wholeWordBox = SearchBar.Option("«»", "Целое слово");
     private readonly Button _pauseButton = new();
-    private readonly Button _followButton = new();
     private readonly Button _indexButton = new();
     private readonly Button _searchButton = new() { Content = "Найти" };
     private readonly Button _moreButton = new() { Content = "Ещё" };
@@ -111,7 +110,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private readonly Button _timeButton = new() { Content = "Ко времени" };
     private readonly Button _previousButton = new() { Content = "Назад" };
     private readonly Button _nextButton = new() { Content = "Дальше" };
-    private readonly Button _endButton = new() { Content = "Конец" };
+    private readonly ToggleButton _endButton = new() { Content = "Конец" };
     private readonly Button _middleButton = new() { Content = "50%" };
     private readonly Button _startButton = new() { Content = "Начало" };
     private readonly Button _openSearchButton = new() { Content = "Поиск в логе" };
@@ -170,7 +169,8 @@ internal sealed partial class LogView : UserControl, IDisposable
     private long? _totalLineCount;
     private long _trimGeneration;
     private bool _wordWrap;
-    private bool _followEnd;
+    private bool FollowEnd => _endButton.IsChecked == true;
+    private enum PagePosition { Start, End, Preserve, FollowEnd }
     private bool _autoRefresh;
     private bool _indexPaused;
     private bool _indexOptIn;
@@ -210,7 +210,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             ? savedHiddenOffset
             : _reader.AlignToNextLine(savedHiddenOffset);
         _wordWrap = state?.WordWrap ?? false;
-        _followEnd = !EditsPagesByDefault && restoreState?.FollowEnd == true;
+        _endButton.IsChecked = !EditsPagesByDefault && restoreState?.FollowEnd == true;
         _autoRefresh = !_isDraft && restoreState?.AutoRefresh != false;
         _indexOptIn = restoreState?.IndexOptIn == true;
         _indexPaused = restoreState?.IndexPaused == true
@@ -234,7 +234,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         RefreshButtons();
 
         InitialPageLoad = LoadPageAsync(Math.Max(_hiddenOffset, restoreState?.Offset ?? _hiddenOffset), saveHistory: false,
-            allowFollowEnd: bookmarkRestorable);
+            position: FollowEnd ? PagePosition.FollowEnd : PagePosition.Start);
         LoadMinimapSamples();
         StartIndexIfNeeded();
         if (_autoRefresh)
@@ -275,7 +275,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             _page?.StartOffset ?? _hiddenOffset,
             _hiddenOffset,
             _wordWrap,
-            _followEnd,
+            FollowEnd,
             _autoRefresh,
             _indexPaused,
             _searchPanel.IsVisible,
@@ -422,16 +422,17 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task OpenSearchHitAsync(SearchResult hit)
     {
+        StopFollowingEnd();
         _activeSearchResult = _searchResults.IndexOf(hit);
         var end = hit.MatchIndex + hit.MatchLength;
         if (_page?.Rows.FirstOrDefault()?.StartOffset != hit.Offset)
         {
-            await LoadPageAsync(hit.Offset, saveHistory: true, allowFollowEnd: false);
+            await LoadPageAsync(hit.Offset, saveHistory: true);
         }
 
         if (!EditsPagesByDefault && _page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && end > FirstDisplayedLineLength())
         {
-            await LoadPageAsync(hit.Offset, saveHistory: false, allowFollowEnd: false,
+            await LoadPageAsync(hit.Offset, saveHistory: false,
                 maxPageBytes: MaximumSearchLineBytes);
         }
 
@@ -569,7 +570,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         titleGroup.Children.Add(modeControls);
 
         SetButtonStyle(_pauseButton, "focus-quiet");
-        SetButtonStyle(_followButton, "focus-quiet");
         var contextActions = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -577,7 +577,6 @@ internal sealed partial class LogView : UserControl, IDisposable
             Spacing = 5,
         };
         contextActions.Children.Add(_pauseButton);
-        contextActions.Children.Add(_followButton);
         contextActions.Children.Add(_liveLabel);
 
         var contextGrid = new Grid
@@ -668,7 +667,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         SetNavigationIcon(_startButton, "В начало лога");
         SetNavigationIcon(_previousButton, "Предыдущая страница");
         SetNavigationIcon(_nextButton, "Следующая страница");
-        SetNavigationIcon(_endButton, "В конец лога");
+        SetNavigationIcon(_endButton, EditsPagesByDefault ? "В конец файла" : "Конец — следить за новыми строками");
         SetButtonStyle(_middleButton, "focus-quiet");
         SetButtonStyle(_timeButton, "focus-quiet");
         var percentButton = new Button { Content = "Перейти, %" };
@@ -789,18 +788,12 @@ internal sealed partial class LogView : UserControl, IDisposable
             if (_levelFilterViewport?.IsVisible == true) await NavigateFilteredAsync(forward: true);
             else await NavigateAsync(_page?.NextOffset ?? _hiddenOffset, true);
         };
-        _endButton.Click += async (_, _) => await NavigateToPageAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true, scrollToEnd: true);
+        _endButton.Click += async (_, _) =>
+        {
+            if (FollowEnd) await GoToEndAsync();
+        };
         _middleButton.Click += async (_, _) => await NavigateAsync(Math.Max(_hiddenOffset, _reader.GetMidpointOffset(_closing.Token)), true);
         _pauseButton.Click += (_, _) => SetAutoRefresh(!_autoRefresh);
-        _followButton.Click += async (_, _) =>
-        {
-            _followEnd = !_followEnd;
-            if (_followEnd && _autoRefresh)
-            {
-                await NavigateAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true);
-            }
-            RefreshButtons();
-        };
         _indexButton.Click += (_, _) => ToggleIndexing();
         _cancelIndexButton.Click += (_, _) => _indexCancellation?.Cancel();
         _openSearchButton.Click += (_, _) => FocusSearch();
@@ -851,6 +844,10 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
         };
         AddHandler(PointerWheelChangedEvent, OnLogPointerWheel, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(ScrollGestureEvent, (_, e) =>
+        {
+            if (e.Delta.Y != 0 && IsLogTextSource(e.Source as Visual)) StopFollowingEnd();
+        }, RoutingStrategies.Bubble, handledEventsToo: true);
         _minimap.PointerPressed += OnMinimapPointerPressed;
         _minimap.PointerMoved += OnMinimapPointerMoved;
         _minimap.PointerReleased += OnMinimapPointerReleased;
@@ -871,6 +868,10 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         if (_closed || PageNavigationBlocked) return;
 
+        if (e.Key is Key.Up or Key.Down or Key.PageUp or Key.PageDown or Key.Home
+            || e.Key == Key.End && !e.KeyModifiers.HasFlag(KeyModifiers.Control))
+            StopFollowingEnd();
+
         if (e.Key == Key.Home && e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
             e.Handled = true;
@@ -879,7 +880,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         else if (e.Key == Key.End && e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
             e.Handled = true;
-            await NavigateToPageAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true, scrollToEnd: true);
+            await GoToEndAsync();
         }
         else if (e.Key == Key.PageDown)
         {
@@ -949,8 +950,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         e.Handled = true;
     }
 
-    private async Task LoadPageAsync(long offset, bool saveHistory = true, bool allowFollowEnd = true,
-        int maxPageBytes = LogDataReader.DefaultPageBytes, bool scrollToEnd = false)
+    private async Task LoadPageAsync(long offset, bool saveHistory = true, PagePosition position = PagePosition.Start,
+        int maxPageBytes = LogDataReader.DefaultPageBytes)
     {
         if (_closed || _busy || PageNavigationBlocked)
         {
@@ -958,23 +959,23 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
 
         _busy = true;
-        var loadFollowEnd = false;
         RefreshButtons();
         try
         {
-            var requested = Math.Clamp(offset, _hiddenOffset, _file.Length);
+            var firstOffset = _hiddenOffset;
             var reader = _reader;
             var token = _closing.Token;
             var stamp = _fileStamp;
             var (page, firstLine, edit) = await Task.Run(() =>
             {
                 var pageBytes = EditsPagesByDefault ? LogDataReader.DefaultPageBytes : maxPageBytes;
+                var requested = Math.Max(firstOffset, position == PagePosition.FollowEnd ? reader.GetEndOffset(token) : offset);
                 var result = reader.ReadPage(requested, maxPageBytes: pageBytes, cancellationToken: token);
                 var first = result.Rows.Count > 0 ? FindLineNumber(reader, result.Rows[0].StartOffset, token) : null;
                 var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token) : null;
                 return (result, first, pageEdit);
             }, token);
-            if (_closed)
+            if (_closed || (position == PagePosition.FollowEnd && !FollowEnd && _page is not null))
             {
                 return;
             }
@@ -994,6 +995,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                 _previousOffsets.Add(current.StartOffset);
             }
 
+            var previousY = _logScrollViewer?.Offset.Y ?? 0;
             _page = page;
             UpdateMinimapViewport();
             if (edit is not null)
@@ -1018,8 +1020,14 @@ internal sealed partial class LogView : UserControl, IDisposable
             Dispatcher.UIThread.Post(() =>
             {
                 if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
-                scroll.Offset = new Vector(scroll.Offset.X,
-                    scrollToEnd ? Math.Max(0, scroll.Extent.Height - scroll.Viewport.Height) : 0);
+                if (position == PagePosition.FollowEnd && !FollowEnd) return;
+                var y = position switch
+                {
+                    PagePosition.End or PagePosition.FollowEnd => scroll.ScrollBarMaximum.Y,
+                    PagePosition.Preserve => previousY,
+                    _ => 0
+                };
+                scroll.Offset = new Vector(scroll.Offset.X, y);
             }, DispatcherPriority.Loaded);
             var rows = page.Rows.Count == 0 ? 0 : 1 + page.Rows.Skip(1).Count(row => !row.StartsWithinLine);
             _countLabel.Text = $"Строк на странице · {LineNumbers.Format(rows)}";
@@ -1033,10 +1041,6 @@ internal sealed partial class LogView : UserControl, IDisposable
             SetStatus(page.WasTruncated
                 ? "Файл изменился во время чтения. Позиция пересчитана по открытому файлу."
                 : EditsPagesByDefault ? PageEditHint : string.Empty);
-            if (allowFollowEnd && _followEnd && page.HasMore)
-            {
-                loadFollowEnd = true;
-            }
             if (!_firstFrameReported && page.Rows.Count > 0)
             {
                 _firstFrameReported = true;
@@ -1058,9 +1062,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             _busy = false;
             RefreshButtons();
-            if (loadFollowEnd && !_closed)
+            if (!_closed && FollowEnd && position != PagePosition.FollowEnd)
             {
-                _ = NavigateAsync(_reader.GetEndOffset(_closing.Token), saveHistory: false);
+                _ = LoadPageAsync(_hiddenOffset, saveHistory: false, position: PagePosition.FollowEnd);
             }
             else if (_pendingMinimapRatio is { } ratio && !_closed)
             {
@@ -1073,6 +1077,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private async Task NavigateMinimapToRatioAsync(double ratio)
     {
         if (_closed || PageNavigationBlocked) return;
+        StopFollowingEnd();
         var request = ++_minimapRequest;
         ratio = Math.Clamp(ratio, 0, 1);
         if (_busy)
@@ -1097,7 +1102,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                 _pendingMinimapRatio = ratio;
                 return;
             }
-            await LoadPageAsync(Math.Max(_hiddenOffset, aligned), saveHistory: true, allowFollowEnd: false);
+            await LoadPageAsync(Math.Max(_hiddenOffset, aligned), saveHistory: true);
         }
         catch (OperationCanceledException) when (_closing.IsCancellationRequested)
         {
@@ -1115,10 +1120,29 @@ internal sealed partial class LogView : UserControl, IDisposable
         return height <= 0 ? 0 : Math.Clamp(y / height, 0, 1);
     }
 
+    private void StopFollowingEnd()
+    {
+        if (FollowEnd) _endButton.IsChecked = false;
+    }
+
+    private Task GoToEndAsync()
+    {
+        if (EditsPagesByDefault)
+        {
+            StopFollowingEnd();
+            return NavigateToPageAsync(Math.Max(_hiddenOffset, _reader.GetEndOffset(_closing.Token)), true, scrollToEnd: true);
+        }
+        _endButton.IsChecked = true;
+        _pendingMinimapRatio = null;
+        _minimapRequest++;
+        return LoadPageAsync(_hiddenOffset, position: PagePosition.FollowEnd);
+    }
+
     private Task NavigateAsync(long offset, bool saveHistory) => NavigateToPageAsync(offset, saveHistory, scrollToEnd: false);
 
     private async Task NavigateToPageAsync(long offset, bool saveHistory, bool scrollToEnd)
     {
+        StopFollowingEnd();
         if (_page is { } current && offset == current.StartOffset)
         {
             if (_logScrollViewer is { } scroll)
@@ -1128,7 +1152,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
             return;
         }
-        await LoadPageAsync(offset, saveHistory, allowFollowEnd: false, scrollToEnd: scrollToEnd);
+        await LoadPageAsync(offset, saveHistory, position: scrollToEnd ? PagePosition.End : PagePosition.Start);
     }
 
     private async Task NavigatePreviousAsync(bool scrollToEnd = false, bool adjacent = false)
@@ -1137,6 +1161,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             return;
         }
+        StopFollowingEnd();
         long offset;
         if (!adjacent && _previousOffsets.Count > 0)
         {
@@ -1149,7 +1174,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             offset = _reader.GetPreviousPageOffset(page.StartOffset, _closing.Token);
         }
         offset = Math.Max(_hiddenOffset, offset);
-        await LoadPageAsync(offset, saveHistory: false, allowFollowEnd: false, scrollToEnd: scrollToEnd);
+        await LoadPageAsync(offset, saveHistory: false, position: scrollToEnd ? PagePosition.End : PagePosition.Start);
     }
 
     private async Task JumpByPercentageAsync()
@@ -1774,13 +1799,16 @@ internal sealed partial class LogView : UserControl, IDisposable
                 _fileStamp = now;
                 _totalLineCount = null;
                 RefreshBookmarkProof();
-                var offset = _followEnd ? _reader.GetEndOffset(_closing.Token) : _page?.StartOffset ?? _hiddenOffset;
-                await LoadPageAsync(offset, saveHistory: false);
+                if (FollowEnd || _page?.HasMore != true || EditsPagesByDefault || preservedDraft)
+                {
+                    await LoadPageAsync(_page?.StartOffset ?? _hiddenOffset, saveHistory: false,
+                        position: FollowEnd ? PagePosition.FollowEnd : PagePosition.Preserve);
+                }
             }
             else
             {
                 SetStatus("Файл был заменён, очищен или перезаписан. Позиция и индекс сброшены.");
-                await LoadPageAsync(0, saveHistory: false);
+                await LoadPageAsync(0, saveHistory: false, position: FollowEnd ? PagePosition.FollowEnd : PagePosition.Start);
             }
             ApplyLargeLogIndexOptInPolicy();
             StartIndexIfNeeded();
@@ -2029,6 +2057,8 @@ internal sealed partial class LogView : UserControl, IDisposable
     {
         if (!ReferenceEquals(sender, _pageEdit is null ? (Control)_logText : _pageEditor)) return;
         AttachLogScrollViewer();
+        if (FollowEnd && _page is { HasMore: false } && _logScrollViewer is { } scroll && scroll.Offset.Y < scroll.ScrollBarMaximum.Y)
+            scroll.Offset = new Vector(scroll.Offset.X, scroll.ScrollBarMaximum.Y);
         if (_pageEdit is null)
         {
             UpdateLineGutterText();
@@ -2171,11 +2201,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         _levelBands.IsVisible = _levelFilterButton.IsVisible && _pageEdit is null;
         _levelFilterButton.IsEnabled = CanFilterLevels || _levelFilterOpen;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
-        _followButton.Content = _followEnd ? "К концу" : "Следовать";
         _liveLabel.Text = _isDraft ? "" : _autoRefresh ? "● Обновляется" : "● На паузе";
         _liveLabel.Foreground = _autoRefresh ? FocusTheme.Success : FocusTheme.Muted;
-        _followButton.Background = _followEnd ? FocusTheme.Hover : Brushes.Transparent;
-        _followButton.Foreground = _followEnd ? FocusTheme.Accent : FocusTheme.Text;
         _indexButton.Background = _indexPaused ? FocusTheme.Hover : Brushes.Transparent;
         _indexButton.Foreground = _indexPaused ? FocusTheme.Accent : FocusTheme.Text;
         var largeIndexOptInRequired = _file.Length >= LargeLogIndexOptInBytes && !_indexOptIn;
@@ -2191,13 +2218,11 @@ internal sealed partial class LogView : UserControl, IDisposable
         _previousButton.IsEnabled = enabled && (_previousOffsets.Count > 0 || _page?.StartOffset > _hiddenOffset);
         _nextButton.IsEnabled = enabled && _page?.HasMore == true;
         _startButton.IsEnabled = enabled && _page is not null;
-        _endButton.IsEnabled = enabled && _page is not null;
+        _endButton.IsEnabled = _page is not null && !PageNavigationBlocked && (!_busy || FollowEnd);
         _middleButton.IsEnabled = enabled && _file.Length > 0;
         _pauseButton.IsVisible = !_isDraft;
-        _followButton.IsVisible = !EditsPagesByDefault && _pageEdit is null;
         _liveLabel.IsVisible = !_isDraft && (_pageEdit is null || EditsPagesByDefault);
         _pauseButton.IsEnabled = !_closed;
-        _followButton.IsEnabled = !_closed;
         _indexButton.IsEnabled = !_closed && (!_indexBuilding || _indexCancellation is not null);
         _cancelIndexButton.IsVisible = _indexBuilding;
         _cancelTrimButton.IsVisible = _trimCancellation is not null;
@@ -2216,7 +2241,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             _previousButton.IsEnabled = !_busy && _filterReading is null && _filterHistory.Count > 0;
             _nextButton.IsEnabled = !_busy && _filterReading is null && _filterNext.HasValue;
-            _followButton.IsEnabled = false;
             _startButton.IsEnabled = _endButton.IsEnabled = _middleButton.IsEnabled = false;
             _openSearchButton.IsEnabled = _timeButton.IsEnabled = false;
             _searchButton.IsEnabled = _moreButton.IsEnabled = false;

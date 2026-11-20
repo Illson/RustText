@@ -15,6 +15,7 @@ internal sealed partial class LogView
         if (e.Delta.Y == 0 || e.KeyModifiers != KeyModifiers.None || Math.Abs(e.Delta.Y) < Math.Abs(e.Delta.X)
             || !IsLogTextSource(e.Source as Avalonia.Visual)) return;
 
+        StopFollowingEnd();
         var forward = e.Delta.Y < 0;
         if (PageAtScrollBoundary(forward) is { } page)
         {
@@ -34,6 +35,7 @@ internal sealed partial class LogView
 
     private void OnLogScrollbarScrolled(object? sender, ScrollEventArgs e)
     {
+        if (e.ScrollEventType != ScrollEventType.EndScroll) StopFollowingEnd();
         if (_closed || _busy || PageNavigationBlocked || _page is not { } page) return;
         if (e.ScrollEventType == ScrollEventType.ThumbTrack)
         {

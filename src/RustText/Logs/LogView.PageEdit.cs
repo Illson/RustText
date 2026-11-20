@@ -138,6 +138,7 @@ internal sealed partial class LogView
 
     private void BeginPageEdit(PageEdit edit)
     {
+        StopFollowingEnd();
         _pageEditor ??= CreatePageEditor();
         _pageEdit = edit;
         _pageLineNumbers!.FirstLineNumber = _displaySourceLineNumbers.FirstOrDefault();
@@ -335,7 +336,7 @@ internal sealed partial class LogView
     {
         if (_closed || _pageEdit is not { } edit) return;
         ClearPageEdit();
-        await LoadPageAsync(edit.From, saveHistory: false, allowFollowEnd: false);
+        await LoadPageAsync(edit.From, saveHistory: false);
         RefreshButtons();
     }
 
