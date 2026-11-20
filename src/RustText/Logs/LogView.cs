@@ -611,6 +611,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         var content = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"),
+            RowDefinitions = new RowDefinitions("*,Auto"),
             ColumnSpacing = 0,
             Background = FocusTheme.Editor,
         };
@@ -641,6 +642,10 @@ internal sealed partial class LogView : UserControl, IDisposable
         _contentViewport.Children.Add(content);
         _levelFilterViewport = BuildLevelFilterViewport();
         _levelFilterViewport.IsVisible = false;
+        Grid.SetColumn(_levelFilterViewport, 1);
+        Grid.SetRow(_filterStatus, 1);
+        Grid.SetColumnSpan(_filterStatus, 4);
+        content.Children.Add(_filterStatus);
         _levelFilter!.IsVisible = false;
         var logViewport = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
         logViewport.Children.Add(_levelFilter!);
@@ -980,6 +985,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             var firstOffset = _hiddenOffset;
             var reader = _reader;
+            var generation = _dataGeneration;
             var token = _closing.Token;
             var stamp = _fileStamp;
             var (page, firstLine, edit) = await Task.Run(() =>
@@ -991,7 +997,8 @@ internal sealed partial class LogView : UserControl, IDisposable
                 var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token) : null;
                 return (result, first, pageEdit);
             }, token);
-            if (_closed || (position == PagePosition.FollowEnd && !FollowEnd && _page is not null))
+            if (_closed || generation != _dataGeneration || !ReferenceEquals(reader, _reader)
+                || (position == PagePosition.FollowEnd && !FollowEnd && _page is not null))
             {
                 return;
             }
@@ -1054,6 +1061,18 @@ internal sealed partial class LogView : UserControl, IDisposable
                 StartIndexIfNeeded();
             }
             UpdatePageLineNumbers(page, firstLine);
+            if (firstLine is null && page.Rows.Count > 0)
+            {
+                bool indexCoversPage;
+                lock (_lineIndexGate)
+                {
+                    indexCoversPage = page.Rows[0].StartOffset <= _indexedTo;
+                }
+                if (indexCoversPage)
+                {
+                    _ = RefreshCurrentPageNumbersAsync(reader, page, generation);
+                }
+            }
             SetStatus(page.WasTruncated
                 ? "Файл изменился во время чтения. Позиция пересчитана по открытому файлу."
                 : EditsPagesByDefault ? PageEditHint : string.Empty);
@@ -1092,10 +1111,16 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task NavigateMinimapToRatioAsync(double ratio)
     {
-        if (_closed || PageNavigationBlocked) return;
-        StopFollowingEnd();
+        if (_closed) return;
         var request = ++_minimapRequest;
         ratio = Math.Clamp(ratio, 0, 1);
+        if (_levelFilterViewport?.IsVisible == true)
+        {
+            await NavigateFilteredMinimapAsync(ratio, _reader, request, _closing.Token);
+            return;
+        }
+        if (PageNavigationBlocked) return;
+        StopFollowingEnd();
         if (_busy)
         {
             _pendingMinimapRatio = ratio;
@@ -1953,6 +1978,11 @@ internal sealed partial class LogView : UserControl, IDisposable
                 {
                     _ = RefreshCurrentPageNumbersAsync(reader, page, generation);
                 }
+                if (_levelFilterViewport?.IsVisible == true && _filteredPage is { Rows.Count: > 0 } filteredPage
+                    && filteredPage.Rows[0].SourceLine is null && filteredPage.Rows[0].StartOffset <= _indexedTo)
+                {
+                    _ = RefreshFilteredLineNumbersAsync(reader, filteredPage, _filterGeneration);
+                }
                 if (_indexedTo > start.Offset && _indexedTo < _file.Length && !_indexPaused)
                 {
                     StartIndexIfNeeded();
@@ -1974,21 +2004,30 @@ internal sealed partial class LogView : UserControl, IDisposable
         LogLineCheckpoint closest;
         lock (_lineIndexGate)
         {
-            if (offset - reader.PreambleLength > 128 * 1024 && offset > _indexedTo)
+            if (offset > _indexedTo)
             {
-                return null;
-            }
+                if (offset - _indexedTo > 128 * 1024)
+                {
+                    return null;
+                }
 
-            closest = new(reader.PreambleLength, 0);
-            var low = 0;
-            var high = _lineIndex.Count;
-            while (low < high)
-            {
-                var middle = low + (high - low) / 2;
-                if (_lineIndex[middle].Offset <= offset) low = middle + 1;
-                else high = middle;
+                closest = _indexedTo >= reader.PreambleLength
+                    ? new LogLineCheckpoint(_indexedTo, _indexedLineCount)
+                    : new LogLineCheckpoint(reader.PreambleLength, 0);
             }
-            if (low > 0) closest = _lineIndex[low - 1];
+            else
+            {
+                closest = new(reader.PreambleLength, 0);
+                var low = 0;
+                var high = _lineIndex.Count;
+                while (low < high)
+                {
+                    var middle = low + (high - low) / 2;
+                    if (_lineIndex[middle].Offset <= offset) low = middle + 1;
+                    else high = middle;
+                }
+                if (low > 0) closest = _lineIndex[low - 1];
+            }
         }
 
         var result = reader.ScanLineBreaks(closest, offset, null, token);
@@ -2081,6 +2120,8 @@ internal sealed partial class LogView : UserControl, IDisposable
             : "";
         var last = _displaySourceLineNumbers.LastOrDefault(value => value.HasValue);
         var max = Math.Max(KnownLineCount ?? 0, last ?? 0);
+        if (_levelFilterViewport?.IsVisible == true)
+            max = Math.Max(max, _filteredSourceLineNumbers.LastOrDefault(value => value.HasValue) ?? 0);
         var text = new FormattedText(LineNumbers.Format(max), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
             new Typeface(_lineGutterText.FontFamily), _lineGutterText.FontSize, _lineGutterText.Foreground);
         _lineGutterScrollViewer.Width = Math.Max(32, Math.Ceiling(text.Width) + 16);
@@ -2095,7 +2136,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_pageEdit is null)
         {
             UpdateLineGutterText();
-            _levelBands.InvalidateVisual();
+            if (_levelFilterViewport?.IsVisible != true) _levelBands.InvalidateVisual();
         }
     }
 
@@ -2125,6 +2166,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void OnLogScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
+        if (_levelFilterViewport?.IsVisible == true) return;
         if (_logScrollViewer is { } scrollViewer)
         {
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
@@ -2135,39 +2177,44 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void UpdateLineGutterText()
     {
-        if (_displaySourceLineNumbers.Length == 0)
+        var isFiltered = _levelFilterViewport?.IsVisible == true;
+        var textBox = isFiltered ? _filteredLogText : _logText;
+        IReadOnlyList<int> rowStarts = isFiltered ? _filteredRowStarts : _displayRowStarts;
+        IReadOnlyList<long?> sourceLineNumbers = isFiltered ? _filteredSourceLineNumbers : _displaySourceLineNumbers;
+        var scrollViewer = isFiltered ? _filteredLogScrollViewer : _logScrollViewer;
+        if (sourceLineNumbers.Count == 0)
         {
             _lineGutterText.Text = string.Empty;
             return;
         }
 
         var values = new List<string>();
-        var layout = _logText.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault()?.TextLayout;
+        var layout = textBox.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault()?.TextLayout;
         if (layout is not null && layout.TextLines.Count > 0)
         {
-            var text = _logText.Text ?? string.Empty;
+            var text = textBox.Text ?? string.Empty;
             var rowIndex = 0;
             foreach (var visualLine in layout.TextLines)
             {
                 var start = Math.Clamp(visualLine.FirstTextSourceIndex, 0, text.Length);
-                while (rowIndex + 1 < _displayRowStarts.Length && _displayRowStarts[rowIndex + 1] <= start)
+                while (rowIndex + 1 < rowStarts.Count && rowStarts[rowIndex + 1] <= start)
                 {
                     rowIndex++;
                 }
 
-                var startsLogicalRow = start == _displayRowStarts[rowIndex];
+                var startsLogicalRow = start == rowStarts[rowIndex];
                 values.Add(startsLogicalRow
-                    ? _displaySourceLineNumbers[rowIndex] is { } line ? LineNumbers.Format(line) : "?"
+                    ? sourceLineNumbers[rowIndex] is { } line ? LineNumbers.Format(line) : "?"
                     : string.Empty);
             }
         }
         else
         {
-            values.AddRange(_displaySourceLineNumbers.Select(value => value is { } line ? LineNumbers.Format(line) : "?"));
+            values.AddRange(sourceLineNumbers.Select(value => value is { } line ? LineNumbers.Format(line) : "?"));
         }
 
         _lineGutterText.Text = string.Join(Environment.NewLine, values);
-        if (_logScrollViewer is { } scrollViewer)
+        if (scrollViewer is not null)
         {
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
         }
@@ -2228,7 +2275,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         var enabled = !_busy && !PageNavigationBlocked;
         UpdatePageModeControls();
         _levelFilterButton.IsVisible = !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path));
-        _levelBands.IsVisible = _levelFilterButton.IsVisible && _pageEdit is null;
+        _levelBands.IsVisible = _levelFilterButton.IsVisible && _pageEdit is null && _levelFilterViewport?.IsVisible != true;
         _levelFilterButton.IsEnabled = CanFilterLevels || _levelFilterOpen;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
         _liveLabel.Text = _isDraft ? "" : _consoleDisconnectMessage is not null ? "● Источник отключён"

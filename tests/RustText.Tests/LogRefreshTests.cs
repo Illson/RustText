@@ -50,6 +50,29 @@ public sealed class LogRefreshTests
         });
 
     [Fact]
+    public Task FollowingLogKeepsAbsoluteLineNumbersWhenAppendingBeyondPausedIndex() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "indexed.txt");
+            await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat("x\n", 200_000)));
+            var initialLength = new FileInfo(path).Length;
+            await WithLogAsync(path, followEnd: true, async log =>
+            {
+                await HeadlessTests.WaitForAsync(() => Field<long>(log, "_indexedTo") == initialLength);
+                Invoke(log, "ToggleIndexing");
+                Assert.True(Field<bool>(log, "_indexPaused"));
+                await File.AppendAllTextAsync(path, string.Concat(Enumerable.Repeat("y\n", 10_000)));
+                Refresh(log);
+
+                await HeadlessTests.WaitForAsync(() => Text(log).StartsWith("y", StringComparison.Ordinal));
+                var gutter = Field<TextBlock>(log, "_lineGutterText");
+                Assert.StartsWith("209.921" + Environment.NewLine, gutter.Text);
+                Assert.EndsWith(Environment.NewLine + "210.000", gutter.Text);
+                Assert.Equal(initialLength, Field<long>(log, "_indexedTo"));
+            }, indexPaused: false);
+        });
+
+    [Fact]
     public Task SameSizeRotationRereadsTheFirstPage() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "rotate.log");
@@ -91,9 +114,9 @@ public sealed class LogRefreshTests
             });
         });
 
-    private static async Task WithLogAsync(string path, bool followEnd, Func<LogView, Task> scenario)
+    private static async Task WithLogAsync(string path, bool followEnd, Func<LogView, Task> scenario, bool indexPaused = true)
     {
-        var log = new LogView(path, state: new LogTabState(FollowEnd: followEnd, IndexPaused: true));
+        var log = new LogView(path, state: new LogTabState(FollowEnd: followEnd, IndexPaused: indexPaused));
         var window = new Window { Width = 950, Height = 650, Content = log };
         window.Show();
         try

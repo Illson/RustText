@@ -267,11 +267,11 @@ public sealed class LogUiTests
             await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Fatal fatal-row-000", StringComparison.Ordinal) == true);
             Assert.False(scrollbar.IsEffectivelyVisible);
             Assert.DoesNotContain("Info info-row-", filtered.Text);
-            Assert.False(((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            Assert.False(source.IsEffectivelyVisible);
             Assert.Equal(originalPage, source.Text);
 
             ((Button)Field(log, "_levelFilterButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await HeadlessTests.WaitForAsync(() => !filterPanel.IsVisible && ((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            await HeadlessTests.WaitForAsync(() => !filterPanel.IsVisible && source.IsEffectivelyVisible);
             Assert.True(scrollbar.IsEffectivelyVisible);
             Assert.Equal(pageOffset, Page(log)!.StartOffset);
             Assert.Equal(originalPage, source.Text);
@@ -280,6 +280,87 @@ public sealed class LogUiTests
             Assert.False(filterPanel.IsVisible);
             Assert.Equal(originalPage, source.Text);
             Assert.False(log.IsReadOnly);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task PausedTxtLogKeepsSourceLineNumbersAndNavigatesWithFilteredMinimap() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "inline-levels-live.txt");
+        var original = string.Concat(Enumerable.Range(1, 160).Select(row =>
+            $"[{(row % 2 == 0 ? "ERR" : "INF")}] row-{row:D4}\n"));
+        await File.WriteAllTextAsync(path, original, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true));
+        try
+        {
+            var source = (TextBox)Field(log, "_logText");
+            source.SelectAll();
+            var sourceSelection = SelectedText(source);
+            var sourcePage = Page(log);
+            var pause = (Button)Field(log, "_pauseButton");
+            pause.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal("Продолжить", pause.Content);
+            await WriteAppend(path, Encoding.UTF8.GetBytes("[ERR] appended while paused\n"));
+
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            var panel = (LogLevelFilterPanel)Field(log, "_levelFilter");
+            panel.SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            var gutter = (TextBlock)Field(log, "_lineGutterText");
+            var gutterScroll = (ScrollViewer)Field(log, "_lineGutterScrollViewer");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("row-0160", StringComparison.Ordinal) == true
+                && minimap.Bounds.Height > 100);
+            Assert.True(gutter.IsEffectivelyVisible);
+            Assert.True(minimap.IsEffectivelyVisible);
+            Assert.DoesNotContain("[INF]", filtered.Text);
+            Assert.DoesNotContain("appended while paused", filtered.Text);
+            Assert.Equal(new[] { "2", "4", "6" }, gutter.Text!.Split(Environment.NewLine).Take(3));
+
+            var scroll = Assert.Single(filtered.GetVisualDescendants().OfType<ScrollViewer>());
+            await HeadlessTests.WaitForAsync(() => scroll.ScrollBarMaximum.Y > 96);
+            window.UpdateLayout();
+            scroll.Offset = new Vector(0, scroll.ScrollBarMaximum.Y);
+            window.UpdateLayout();
+            try
+            {
+                await HeadlessTests.WaitForAsync(() => Math.Abs(gutterScroll.Offset.Y - scroll.Offset.Y) < 1);
+            }
+            catch (OperationCanceledException)
+            {
+                Assert.Fail($"Text scroll {scroll.Offset.Y}/{scroll.ScrollBarMaximum.Y}, gutter scroll {gutterScroll.Offset.Y}/{gutterScroll.ScrollBarMaximum.Y}.");
+            }
+            scroll.Offset = default;
+            window.UpdateLayout();
+
+            var firstMarker = minimap.ViewportMarker;
+            Point MinimapPoint() => minimap.TranslatePoint(
+                new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height * .75), window)!.Value;
+            await HeadlessTests.WaitForAsync(() => ReferenceEquals(window.InputHitTest(MinimapPoint()), minimap));
+            var target = MinimapPoint();
+            window.MouseMove(target);
+            window.MouseDown(target, MouseButton.Left);
+            Assert.True((bool)Field(log, "_minimapDragging"));
+            window.MouseUp(target, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => FirstRowNumber(filtered.Text) > 2);
+            var firstRow = FirstRowNumber(filtered.Text);
+            Assert.InRange(firstRow, 112, 128);
+            Assert.Equal(firstRow.ToString(), gutter.Text!.Split(Environment.NewLine)[0]);
+            Assert.True(minimap.ViewportMarker.Y > firstMarker.Y);
+            Assert.DoesNotContain("appended while paused", filtered.Text);
+            Assert.Same(sourcePage, Page(log));
+
+            pause.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("appended while paused", StringComparison.Ordinal) == true);
+            Assert.EndsWith(Environment.NewLine + "161", gutter.Text);
+
+            panel.SetLevels(LogLevel.All);
+            await HeadlessTests.WaitForAsync(() => source.IsEffectivelyVisible);
+            Assert.Equal(sourceSelection, SelectedText(source));
+            Assert.True(gutter.IsEffectivelyVisible);
+            Assert.True(minimap.IsEffectivelyVisible);
+            Assert.StartsWith("1" + Environment.NewLine, gutter.Text);
         }
         finally { await CloseLogAsync(window, log); }
     });

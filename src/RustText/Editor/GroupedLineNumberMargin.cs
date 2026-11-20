@@ -15,6 +15,7 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
     private Typeface _labelTypeface;
     private double _labelSize;
     private IBrush? _labelBrush;
+    private double _defaultMinWidth;
 
     internal void SetSourceLineNumbers(IReadOnlyList<int> lineNumbers)
     {
@@ -28,8 +29,8 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
         get;
         set
         {
-            if (field == value) return;
             field = value;
+            UpdateMinimumWidth();
             InvalidateMeasure();
             InvalidateVisual();
         }
@@ -51,7 +52,9 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
         {
             Margin = existing.Margin,
             MinWidthInDigits = existing.MinWidthInDigits,
+            MinWidth = existing.MinWidth,
         };
+        replacement._defaultMinWidth = existing.MinWidth;
         replacement.SetValue(TextBlock.FontFamilyProperty, editor.FontFamily);
         replacement.SetValue(TextBlock.FontSizeProperty, editor.FontSize);
         replacement.SetValue(TextBlock.ForegroundProperty, editor.LineNumbersForeground);
@@ -93,6 +96,34 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
         if (_labelTypeface == Typeface && _labelSize == EmSize && ReferenceEquals(_labelBrush, brush)) return;
         ClearLabels();
         (_labelTypeface, _labelSize, _labelBrush) = (Typeface, EmSize, brush);
+    }
+
+    private void UpdateMinimumWidth()
+    {
+        if (TextView is null || EmSize <= 0) return;
+        var minimumWidth = _defaultMinWidth;
+        if (FirstLineNumber is > 1)
+        {
+            UpdateLabelStyle();
+            var lastNumber = FirstLineNumber.Value + (Document?.LineCount ?? 1) - 1;
+            minimumWidth = Math.Max(minimumWidth, GetLabel(lastNumber).Width);
+        }
+        if (MinWidth == minimumWidth) return;
+        MinWidth = minimumWidth;
+    }
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        UpdateMinimumWidth();
+    }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == TextBlock.FontFamilyProperty || change.Property == TextBlock.FontSizeProperty
+            || change.Property == TextBlock.ForegroundProperty)
+            UpdateMinimumWidth();
     }
 
     private TextLayout GetLabel(long number)
