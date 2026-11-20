@@ -267,9 +267,11 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
         </Style>
         <Style Selector="Button.focus-primary">
-            <Setter Property="Background" Value="{x:Static local:FocusTheme.Accent}" />
-            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Deep}" />
-            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ActionBorder}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
             <Setter Property="FontWeight" Value="SemiBold" />
         </Style>
         <Style Selector="Button.focus-outline">
@@ -286,8 +288,45 @@
             <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ActionBorder}" />
         </Style>
         <Style Selector="Button.focus-primary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-            <Setter Property="Background" Value="{x:Static local:FocusTheme.AccentHover}" />
-            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Deep}" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ControlOutline}" />
+        </Style>
+        <Style Selector="Button.focus-primary:pressed /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ControlOutline}" />
+        </Style>
+        <Style Selector="CheckBox:not(:checked):not(:indeterminate) /template/ Border#NormalRectangle">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Field}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Muted}" />
+        </Style>
+        <Style Selector="CheckBox:checked /template/ Border#NormalRectangle,
+                         CheckBox:indeterminate /template/ Border#NormalRectangle">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Selection}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Muted}" />
+        </Style>
+        <Style Selector="CheckBox:checked /template/ Path#CheckGlyph,
+                         CheckBox:indeterminate /template/ Path#CheckGlyph">
+            <Setter Property="Fill" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
+        <Style Selector="CheckBox:not(:checked):not(:indeterminate):pointerover /template/ Border#NormalRectangle,
+                         CheckBox:pressed /template/ Border#NormalRectangle">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+        </Style>
+        <Style Selector="CheckBox:pointerover /template/ Border#NormalRectangle,
+                         CheckBox:pressed /template/ Border#NormalRectangle">
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ControlOutline}" />
+        </Style>
+        <Style Selector="CheckBox:disabled /template/ Border#NormalRectangle">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Field}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Border}" />
+        </Style>
+        <Style Selector="CheckBox:disabled /template/ Path#CheckGlyph">
+            <Setter Property="Fill" Value="{x:Static local:FocusTheme.Muted}" />
+        </Style>
+        <Style Selector="Window.focus-dialog TextBox:focus /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.ControlOutline}" />
         </Style>
         <Style Selector="Button.focus-danger">
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Danger}" />

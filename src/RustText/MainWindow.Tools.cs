@@ -489,7 +489,7 @@ public partial class MainWindow
             },
             CanResize = true
         };
-        dialog.Classes.Add("focus-dialog");
+        DialogWindowChrome.Apply(dialog);
         return dialog;
     }
 }

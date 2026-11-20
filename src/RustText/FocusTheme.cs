@@ -82,6 +82,7 @@ internal static class FocusTheme
         public SolidColorBrush AccentHover { get; } = Brush(Focus.AccentHover);
         public SolidColorBrush Hover { get; } = Brush(Focus.Hover);
         public SolidColorBrush Selection { get; } = Brush(Focus.Selection);
+        public SolidColorBrush ControlOutline { get; } = Brush(Focus.EditorSelectionOutline);
         public SolidColorBrush EditorCaret { get; } = Brush(Focus.EditorCaret);
         public SolidColorBrush EditorSelection { get; } = Brush(Focus.EditorSelection);
         public Pen EditorSelectionOutline { get; } = new(Brush(Focus.EditorSelectionOutline), 1);
@@ -142,6 +143,7 @@ internal static class FocusTheme
             Set(AccentHover, palette.AccentHover);
             Set(Hover, palette.Hover);
             Set(Selection, palette.Selection);
+            Set(ControlOutline, palette.EditorSelectionOutline);
             Set(EditorCaret, palette.EditorCaret);
             Set(EditorSelection, palette.EditorSelection);
             EditorSelectionOutline.Brush = Brush(palette.EditorSelectionOutline);
@@ -262,6 +264,7 @@ internal static class FocusTheme
     public static SolidColorBrush AccentHover => State.AccentHover;
     public static SolidColorBrush Hover => State.Hover;
     public static SolidColorBrush Selection => State.Selection;
+    public static SolidColorBrush ControlOutline => State.ControlOutline;
     public static SolidColorBrush EditorCaret => State.EditorCaret;
     public static SolidColorBrush EditorSelection => State.EditorSelection;
     public static Pen EditorSelectionOutline => State.EditorSelectionOutline;

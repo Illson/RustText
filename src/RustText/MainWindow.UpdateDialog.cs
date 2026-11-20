@@ -49,8 +49,6 @@ public partial class MainWindow
             Foreground = FocusTheme.Text,
             CanResize = true
         };
-        dialog.Classes.Add("focus-dialog");
-
         var latestButton = new Button { Content = "Что нового", IsVisible = release is not null };
         var historyButton = new Button { Content = "История версий", IsVisible = release is not null };
         var tabs = new StackPanel
@@ -103,6 +101,7 @@ public partial class MainWindow
         Grid.SetRow(footer, 3);
         layout.Children.Add(footer);
         dialog.Content = new Border { Background = FocusTheme.Panel, Child = layout };
+        DialogWindowChrome.Apply(dialog);
 
         var historyLoaded = false;
         var historyLoading = false;
