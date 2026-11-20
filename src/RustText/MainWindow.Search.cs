@@ -285,7 +285,8 @@ public partial class MainWindow
                     incomplete |= tab.Deferred is not null || tab.Loading;
                     continue;
                 }
-                if (tab.Deferred is { DraftRef: not null } draft && SessionStorage.GetDraftLength(draft) > LineGeneratorThreshold)
+                if (tab.Deferred is { DraftRef: not null, DraftLogMode: not false } draft
+                    && SessionStorage.GetDraftLength(draft) > LineGeneratorThreshold)
                 {
                     incomplete = true;
                     continue;

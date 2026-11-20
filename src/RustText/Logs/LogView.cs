@@ -18,6 +18,7 @@ using Avalonia.VisualTree;
 using Microsoft.Win32.SafeHandles;
 using RustText.Demo;
 using RustText.Demo.Editor;
+using RustText.Demo.Platform;
 
 namespace RustText.Demo.Logs;
 
@@ -190,11 +191,15 @@ internal sealed partial class LogView : UserControl, IDisposable
     private int[] _displayRowStarts = [];
     private long?[] _displaySourceLineNumbers = [];
 
+    private readonly ConsoleCapture? _console;
+    internal bool IsConsole => _console is not null;
+
     public LogView(string path, TextEncodingKind? encoding = null, LogTabState? state = null,
-        string? draftName = null, long? draftLineCount = null)
+        string? draftName = null, long? draftLineCount = null, ConsoleCapture? console = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         _path = System.IO.Path.GetFullPath(path);
+        _console = console;
         _isDraft = draftName is not null;
         EditsPagesByDefault = state?.EditPages ?? _isDraft;
         _savedLineCount = draftLineCount;
@@ -227,8 +232,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         _levelBands = new LogLevelBands(_logText) { IsHitTestVisible = false, ClipToBounds = true };
         Content = BuildLayout();
         ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Hidden);
-        _fileLabel.Text = draftName ?? System.IO.Path.GetFileName(_path);
-        if (!_isDraft) ToolTip.SetTip(_fileLabel, _path);
+        _fileLabel.Text = console?.Title ?? draftName ?? System.IO.Path.GetFileName(_path);
+        if (!_isDraft && !IsConsole) ToolTip.SetTip(_fileLabel, _path);
         ConfigureInteractions();
         _logText.LayoutUpdated += OnLogTextLayoutUpdated;
         RefreshButtons();
@@ -433,7 +438,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             await LoadPageAsync(hit.Offset, saveHistory: true);
         }
 
-        if (!EditsPagesByDefault && _page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && end > FirstDisplayedLineLength())
+        if (_page?.Rows.FirstOrDefault()?.StartOffset == hit.Offset && end > FirstDisplayedLineLength())
         {
             await LoadPageAsync(hit.Offset, saveHistory: false,
                 maxPageBytes: MaximumSearchLineBytes);
@@ -515,6 +520,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _verticalLogScrollbar.SetOwner(null);
         _draggedPage = null;
         _file.Dispose();
+        _console?.Dispose();
         _logText.Text = string.Empty;
         _lineGutterText.Text = string.Empty;
         _fileLabel.Text = string.Empty;
@@ -977,7 +983,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             var stamp = _fileStamp;
             var (page, firstLine, edit) = await Task.Run(() =>
             {
-                var pageBytes = EditsPagesByDefault ? LogDataReader.DefaultPageBytes : maxPageBytes;
+                var pageBytes = maxPageBytes;
                 var requested = Math.Max(firstOffset, position == PagePosition.FollowEnd ? reader.GetEndOffset(token) : offset);
                 var result = reader.ReadPage(requested, maxPageBytes: pageBytes, cancellationToken: token);
                 var first = result.Rows.Count > 0 ? FindLineNumber(reader, result.Rows[0].StartOffset, token) : null;
@@ -1538,7 +1544,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task TrimBeginningAsync()
     {
-        if (_hiddenOffset <= 0 || _busy)
+        if (IsConsole || _hiddenOffset <= 0 || _busy)
         {
             return;
         }
@@ -2234,7 +2240,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _cancelTrimButton.IsVisible = _trimCancellation is not null;
         _hideButton.IsVisible = !_isDraft && !EditsPagesByDefault;
         _revealButton.IsVisible = !_isDraft && !EditsPagesByDefault;
-        _trimButton.IsVisible = !_isDraft && !EditsPagesByDefault;
+        _trimButton.IsVisible = !_isDraft && !EditsPagesByDefault && !IsConsole;
         _hideButton.IsEnabled = enabled && _page?.Rows.Count > 0;
         _revealButton.IsEnabled = enabled && _hiddenOffset > 0;
         _trimButton.IsEnabled = enabled && _hiddenOffset > 0;

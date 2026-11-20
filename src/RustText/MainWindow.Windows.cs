@@ -23,6 +23,7 @@ public partial class MainWindow
         public SemaphoreSlim WorkspaceSwitchGate { get; } = new(1, 1);
         public SemaphoreSlim CloseGate { get; } = new(1, 1);
         public SemaphoreSlim SettingsGate { get; } = new(1, 1);
+        public bool AutomaticUpdateChoicePrompted;
         public DispatcherTimer? AutomaticUpdateTimer;
         public bool AutomaticUpdateStartupCheckAttempted;
         public bool UpdateCheckInProgress;

@@ -738,6 +738,26 @@ public sealed class LogUiTests
     });
 
     [Fact]
+    public Task SearchNavigationSelectsMatchesBeyondTheDefaultPageInPageEditor() => HeadlessTests.RunAsync(async _ =>
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "long-line.txt");
+        await File.WriteAllTextAsync(path, new string('x', 180 * 1024) + "needle\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, EditPages: true));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "NavigateMatchAsync", false);
+
+            var pageEditor = PageEditor(log);
+            Assert.Equal("needle", pageEditor.SelectedText);
+            Assert.True(pageEditor.SelectionStart > 128 * 1024);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public async Task SearchNavigatesAndHighlightsLongLineHitsWithF3InBothDirections()
     {
         await HeadlessTests.RunAsync(async _ =>

@@ -156,6 +156,7 @@ public partial class MainWindow : Window
         RefreshWorkspaceButton();
         _checkpoint.Start();
         ShowKnownUpdate();
+        await AskForAutomaticUpdateChoiceIfNeededAsync();
         SynchronizeAutomaticUpdateTimer(runImmediately: true);
     }
 
@@ -310,23 +311,28 @@ public partial class MainWindow : Window
         autoRefresh.ToggleType = MenuItemToggleType.CheckBox;
         var logMode = Command("Режим лога", () => Run(() => ToggleLogModeAsync(tab)));
         logMode.ToggleType = MenuItemToggleType.CheckBox;
+        var reveal = Command("Показать в Проводнике", () => RevealTab(tab));
+        var copyPath = Command("Скопировать путь", () => Run(() => CopyTextAsync(tab.Path)));
+        var moveWindow = Command("Переместить в новое окно", () => OpenTabWindow(tab));
         var context = new ContextMenu
         {
             Items =
             {
                 Command("Переименовать вкладку…", () => Run(() => RenameTabAsync(tab))),
-                Command("Показать в Проводнике", () => RevealTab(tab)),
-                Command("Скопировать путь", () => Run(() => CopyTextAsync(tab.Path))),
+                reveal,
+                copyPath,
                 filter,
                 saveCopy,
                 logMode,
                 autoRefresh,
-                Command("Переместить в новое окно", () => OpenTabWindow(tab)),
+                moveWindow,
                 Command("Закрыть", () => Run(() => CloseTabAsync(tab)))
             }
         };
         context.Opening += (_, _) =>
         {
+            var console = tab.Log?.IsConsole == true;
+            reveal.IsVisible = copyPath.IsVisible = moveWindow.IsVisible = logMode.IsVisible = !console;
             logMode.IsChecked = tab.OpensAsLog || tab.Deferred?.DraftLogMode == true
                 || tab.Recovery is not null && tab.Log?.FileLength <= DocumentFiles.MaximumDocumentBytes;
             logMode.IsEnabled = !tab.Loading && !tab.Closing && !tab.Saving && !tab.CheckingSession;
