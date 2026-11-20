@@ -53,7 +53,7 @@ internal static class FocusTheme
         public string ActionBorder { get; init; } = Border;
         public string MinimapBackground { get; init; } = Hover;
         public string MinimapViewport { get; init; } = Selection;
-        public string DocumentMinimapInk { get; init; } = Border;
+        public string DocumentMinimapInk { get; init; } = Muted;
         public string LogMinimapInk { get; init; } = Muted;
         public string TitleMotif { get; init; } = "#00000000";
         public string TitleGlow { get; init; } = Chrome;

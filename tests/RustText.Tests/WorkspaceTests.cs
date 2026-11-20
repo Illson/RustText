@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Automation;
@@ -11,6 +12,8 @@ using Avalonia.Layout;
 using Avalonia.Input.Platform;
 using Avalonia.Input.Raw;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Rendering;
@@ -29,10 +32,12 @@ public sealed class WorkspaceTests
     [Theory]
     [InlineData(1, 700, 1)]
     [InlineData(20, 700, 20)]
-    [InlineData(300, 700, 64)]
-    [InlineData(300, 1800, 64)]
+    [InlineData(71, 700, 71)]
+    [InlineData(300, 700, 300)]
+    [InlineData(300, 1800, 300)]
+    [InlineData(10_000_000, 1800, 512)]
     [InlineData(0, 700, 0)]
-    [InlineData(4000, 120, 20)]
+    [InlineData(4000, 120, 57)]
     [InlineData(20, 1, 0)]
     public void TextMinimapUsesAtMostOneSamplePerDocumentLine(int lineCount, double height, int expected) =>
         Assert.Equal(expected, DocumentMinimap.GetRowCount(lineCount, height));
@@ -2468,6 +2473,75 @@ public sealed class WorkspaceTests
             Assert.InRange(scroll.Offset.X, 0, 1);
         }
         finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapRendersCompactJsonWithIndentationAndNavigatesWithinPreview() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "minimap.json");
+        var lines = new[] { "{", "  \"Defaults\": {", "    \"OrderId\": 123456", "  },", "  \"Overrides\": [" }
+            .Concat(Enumerable.Repeat("    { \"Channel\": \"Example\", \"RegionViews\": \"Mix\" },", 63))
+            .Concat(["    { \"Channel\": \"Last\", \"RegionViews\": \"Mix\" }", "  ]", "}"]);
+        await File.WriteAllTextAsync(path, string.Join('\n', lines));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            Assert.Equal(71, editor.Document.LineCount);
+            await HeadlessTests.WaitForAsync(() => minimap.Bounds.Height > 200 && scroll.Extent.Height > scroll.Viewport.Height);
+            var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+            using var bitmap = new RenderTargetBitmap(size);
+            using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+            using var frame = pixels.Lock();
+
+            Capture();
+            var topMarker = ReadPixel(70, 5);
+            var belowPreview = ReadPixel(70, 160);
+            Assert.NotEqual(belowPreview, topMarker);
+            Assert.Equal(topMarker, ReadPixel(3, 5)); // Indent on the second line.
+            Assert.NotEqual(topMarker, ReadPixel(5, 5));
+            Assert.Equal(topMarker, ReadPixel(17, 7)); // Space after the colon.
+            Assert.NotEqual(topMarker, ReadPixel(18, 7));
+            Assert.NotEqual(ReadPixel(4, 143), ReadPixel(3, 143)); // Closing brace on line 71.
+            Assert.Equal(FocusTheme.Editor.Color, ReadPixel(22, 160));
+
+            var maximum = scroll.Extent.Height - scroll.Viewport.Height;
+            var blank = minimap.TranslatePoint(new Point(20, 160), window)!.Value;
+            window.MouseDown(blank, MouseButton.Left);
+            window.MouseUp(blank, MouseButton.Left);
+            Assert.InRange(scroll.Offset.Y, 0, 1);
+
+            var bottom = minimap.TranslatePoint(new Point(20, 145), window)!.Value;
+            window.MouseDown(bottom, MouseButton.Left);
+            window.MouseUp(bottom, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y >= maximum - 1);
+            Capture();
+            Assert.Equal(belowPreview, ReadPixel(70, 5));
+            Assert.Equal(topMarker, ReadPixel(70, 143));
+
+            editor.Document.Replace(editor.Document.TextLength - 1, 1, " ");
+            Capture();
+            Assert.Equal(ReadPixel(4, 143), ReadPixel(3, 143));
+
+            void Capture()
+            {
+                bitmap.Render(minimap);
+                bitmap.CopyPixels(frame);
+            }
+
+            Color ReadPixel(int x, int y)
+            {
+                var address = frame.Address + y * frame.RowBytes + x * 4;
+                return Color.FromRgb(Marshal.ReadByte(address, 2), Marshal.ReadByte(address, 1), Marshal.ReadByte(address, 0));
+            }
+        }
+        finally
+        {
+            window.Close();
+            await HeadlessTests.WaitForAsync(() => !window.IsVisible);
+        }
     });
 
     [Fact]
