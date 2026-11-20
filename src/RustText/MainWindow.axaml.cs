@@ -262,12 +262,14 @@ public partial class MainWindow : Window
             Text = "Без имени", TextTrimming = TextTrimming.CharacterEllipsis,
             MaxWidth = 200, VerticalAlignment = VerticalAlignment.Center
         };
-        var dirtyMark = new TextBlock
+        var dirtyMark = new Avalonia.Controls.Shapes.Ellipse
         {
-            Text = "●", FontSize = 9, Foreground = FocusTheme.Accent, Opacity = 0,
-            VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false
+            Width = 5, Height = 5, Fill = FocusTheme.Success, Opacity = 0,
+            VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center,
+            IsHitTestVisible = false
         };
         var close = Button("", () => Run(() => CloseTabAsync(tab)));
+        close.VerticalContentAlignment = VerticalAlignment.Center;
         close.Content = new Avalonia.Controls.Shapes.Path
         {
             Width = 12, Height = 12, Data = Geometry.Parse("M 2,2 L 10,10 M 10,2 L 2,10"),
@@ -285,7 +287,6 @@ public partial class MainWindow : Window
             IsHitTestVisible = false
         };
         var marks = new Grid { Width = 13, Background = Brushes.Transparent };
-        dirtyMark.HorizontalAlignment = HorizontalAlignment.Center;
         marks.Children.Add(dirtyMark);
         marks.Children.Add(loadMark);
         Grid.SetColumn(tab.LineCountLabel, 1);

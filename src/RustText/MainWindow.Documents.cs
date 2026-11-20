@@ -1006,6 +1006,14 @@ public partial class MainWindow
 
             await RememberClosedAsync(tab);
             await RecordRecentAsync(tab);
+
+            var tabs = tab.Group.Tabs;
+            if (ReferenceEquals(tabs.SelectedItem, tab.Item) && tabs.Items.Count > 1)
+            {
+                var index = tabs.SelectedIndex;
+                tabs.SelectedIndex = index > 0 ? index - 1 : 1;
+            }
+
             RemoveTab(tab);
             if (_tabs.Count == 0)
             {
@@ -1308,7 +1316,7 @@ public partial class MainWindow
             FontSize = 11, Foreground = FocusTheme.Muted, VerticalAlignment = VerticalAlignment.Center, IsVisible = false
         };
         public TextBlock Label { get; set; } = null!;
-        public TextBlock DirtyMark { get; set; } = null!;
+        public Control DirtyMark { get; set; } = null!;
         public TextBlock LoadMark { get; set; } = null!;
         public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }

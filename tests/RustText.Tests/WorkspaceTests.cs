@@ -1921,9 +1921,12 @@ public sealed class WorkspaceTests
 
             var selectedSurface = TabSurface(selected);
             var inactiveSurface = TabSurface(inactive);
+            var titleBar = window.FindControl<Border>("TitleBar")!;
             var selectedBackground = SolidColor(selectedSurface.Background);
-            var selectedAccent = SolidColor(selectedSurface.BorderBrush);
             var inactiveBackground = SolidColor(inactiveSurface.Background);
+            Assert.Equal(default(Thickness), titleBar.BorderThickness);
+            Assert.Equal(default(Thickness), selectedSurface.BorderThickness);
+            Assert.NotEqual(selectedBackground, inactiveBackground);
             var hoverPoint = inactiveSurface.TranslatePoint(
                 new Point(inactiveSurface.Bounds.Width / 2, inactiveSurface.Bounds.Height / 2), window)
                 ?? throw new InvalidOperationException("Inactive tab surface is not attached.");
@@ -1933,7 +1936,6 @@ public sealed class WorkspaceTests
 
             Assert.NotEqual(inactiveBackground, SolidColor(inactiveSurface.Background));
             Assert.Equal(selectedBackground, SolidColor(selectedSurface.Background));
-            Assert.Equal(selectedAccent, SolidColor(selectedSurface.BorderBrush));
             Assert.Same(selected, tabs.SelectedItem);
         }
         finally
@@ -1941,6 +1943,47 @@ public sealed class WorkspaceTests
             await CloseAsync(window);
         }
     });
+    [Fact]
+    public Task UnsavedTabShowsGreenMarkAlignedWithHeaderAndCloseIcon() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "");
+            var tab = ActiveTab(window);
+            var label = Read<TextBlock>(tab, "Label");
+            var count = Read<TextBlock>(tab, "LineCountLabel");
+            var mark = Read<Avalonia.Controls.Shapes.Ellipse>(tab, "DirtyMark");
+            var header = Assert.IsType<Grid>(Read<TabItem>(tab, "Item").Header);
+            var close = Assert.Single(header.Children.OfType<Button>());
+            var icon = Assert.IsType<Avalonia.Controls.Shapes.Path>(close.Content);
+
+            Assert.Equal(0, mark.Opacity);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Insert(0, "first line\nsecond line");
+            window.UpdateLayout();
+
+            Assert.True(count.IsVisible);
+            Assert.Equal("2 стр.", count.Text);
+            Assert.Equal(1, mark.Opacity);
+            var green = SolidColor(mark.Fill);
+            Assert.True(green.G > green.R && green.G > green.B);
+            Assert.True(icon.Bounds.Height > 0);
+            var iconCenter = CenterY(icon);
+            Assert.All(new Control[] { label, count, mark }, control =>
+                Assert.InRange(Math.Abs(CenterY(control) - iconCenter), 0, 1));
+
+            editor.Document.UndoStack.Undo();
+            Assert.Equal(0, mark.Opacity);
+
+            double CenterY(Control control) => control.TranslatePoint(new Point(0, control.Bounds.Height / 2), window)!.Value.Y;
+        }
+        finally
+        {
+            await CloseAsync(window);
+        }
+    });
+
     [Fact]
     public Task ReloadCompletionDoesNotReopenClosedTab() => HeadlessTests.RunAsync(async profile =>
     {
@@ -2159,6 +2202,37 @@ public sealed class WorkspaceTests
             await CloseAsync(window);
         }
     });
+
+    [Theory]
+    [InlineData(2, 1)]
+    [InlineData(3, 2)]
+    [InlineData(0, 1)]
+    public Task CtrlWClosesActiveTabAndSelectsNeighbor(int closedIndex, int nextIndex) =>
+        HeadlessTests.RunAsync(async _ =>
+        {
+            var window = await OpenWorkspaceAsync();
+            try
+            {
+                for (var index = 0; index < 4; index++)
+                    Invoke(window, "NewTab", "");
+
+                var tabs = Read<WorkspaceTabs>(Field(window, "_active"), "Tabs");
+                var original = tabs.Items.OfType<TabItem>().ToArray();
+                var closed = original[closedIndex];
+                tabs.SelectedItem = closed;
+                Read<TextEditor>(ActiveTab(window), "Editor").TextArea.Focus();
+
+                Press(window, Key.W, RawInputModifiers.Control, PhysicalKey.W, "w");
+
+                await HeadlessTests.WaitForAsync(() => !tabs.Items.Contains(closed));
+                Assert.Equal(3, tabs.Items.Count);
+                Assert.Same(original[nextIndex], tabs.SelectedItem);
+            }
+            finally
+            {
+                await CloseAsync(window);
+            }
+        });
 
     [Fact]
     public Task ClosedHistoryAndDeferredDraftSurviveFourChangedSessions() => HeadlessTests.RunAsync(async _ =>
