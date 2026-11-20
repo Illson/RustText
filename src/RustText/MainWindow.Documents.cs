@@ -299,12 +299,15 @@ public partial class MainWindow
         GroupedLineNumberMargin.ReplaceExisting(editor);
         EditorCaret.Attach(editor.TextArea);
         editor.Options.ShowBoxForControlCharacters = true;
-        editor.TextArea.TextView.LineTransformers.Add(new JsonColorizer());
+        var jsonColorizer = new JsonColorizer();
+        editor.TextArea.TextView.LineTransformers.Add(jsonColorizer);
         var logLevels = new LogLevelColorizer();
         editor.TextArea.TextView.LineTransformers.Add(logLevels);
         editor.TextArea.TextView.BackgroundRenderers.Add(logLevels);
         tab.Editor = editor;
         SetSyntax(editor, tab.Path);
+        var jsonFolding = new JsonFolding(editor, jsonColorizer);
+        tab.JsonFolding = jsonFolding;
         if (resetDirtyState)
         {
             tab.RestoredDirty = false;
@@ -316,6 +319,8 @@ public partial class MainWindow
         tab.Format = formatHistory.Current;
         void FormatChanged(EditorFileFormat format) => tab.Format = format;
         formatHistory.Changed += FormatChanged;
+        tab.JsonErrorMarker = new JsonErrorMarker(editor.TextArea.TextView);
+        editor.TextArea.TextView.BackgroundRenderers.Add(tab.JsonErrorMarker);
         var undoStack = document.UndoStack;
         var multiCaret = new MultiCaretEditing(editor.TextArea,
             edits => edits.Sum(edit => (long)edit.Text.Length - edit.Range.Length) <= MaxEditorCharacters, SetStatus);
@@ -398,6 +403,7 @@ public partial class MainWindow
             }
             UpdateTab(tab);
             ScheduleJsonValidation(tab);
+            jsonFolding.Schedule(tab.Path);
             if (PanelHost.IsVisible && (ReferenceEquals(tab, ActiveTab) || _allTabs.IsChecked == true))
             {
                 ScheduleSearch();
@@ -463,6 +469,7 @@ public partial class MainWindow
         WatchEditorFile(tab);
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
+        jsonFolding.Schedule(tab.Path);
         if (PanelHost.IsVisible && ReferenceEquals(tab, ActiveTab) && _searchCancellation is null) ScheduleSearch();
     }
 
@@ -592,6 +599,8 @@ public partial class MainWindow
 
         tab.JsonCancellation?.Cancel();
         tab.JsonCancellation = null;
+        tab.JsonFolding?.Dispose();
+        tab.JsonFolding = null;
         foreach (var unsubscribe in tab.EditorSubscriptions)
         {
             unsubscribe();
@@ -602,6 +611,11 @@ public partial class MainWindow
             editor.TextArea.TextView.BackgroundRenderers.Remove(highlights);
         }
         tab.Highlights = null;
+        if (tab.JsonErrorMarker is { } errorMarker)
+        {
+            editor.TextArea.TextView.BackgroundRenderers.Remove(errorMarker);
+            tab.JsonErrorMarker = null;
+        }
         tab.Minimap?.Dispose();
         tab.Minimap = null;
         tab.MinimapDock = null;
@@ -824,6 +838,11 @@ public partial class MainWindow
         }
         tab.Path = path;
         SetSyntax(editor, path);
+        if (changedPath)
+        {
+            tab.JsonFolding?.Schedule(path);
+            ScheduleJsonValidation(tab);
+        }
         tab.Stamp = stamp;
         WatchEditorFile(tab);
         if (iconPosition is not null)
@@ -1093,6 +1112,7 @@ public partial class MainWindow
 
         offset = Math.Clamp(offset, 0, editor.Document.TextLength);
         count = Math.Clamp(count, 0, editor.Document.TextLength - offset);
+        tab.JsonFolding?.Reveal(offset);
         editor.Select(offset, count);
         editor.CaretOffset = offset + count;
         editor.ScrollToLine(editor.Document.GetLineByOffset(offset).LineNumber);
@@ -1236,6 +1256,7 @@ public partial class MainWindow
     {
         tab.JsonCancellation?.Cancel();
         tab.JsonError = null;
+        tab.JsonErrorMarker?.SetOffset(null);
         if (tab.JsonBanner is not { } banner || tab.Editor is not { } editor)
         {
             return;
@@ -1280,6 +1301,7 @@ public partial class MainWindow
             if (!source.IsCancellationRequested && ReferenceEquals(tab.Editor, editor) && problem is not null)
             {
                 tab.JsonError = problem;
+                tab.JsonErrorMarker?.SetOffset(problem.Offset);
                 tab.JsonMessage!.Text = $"Ошибка JSON · строка {problem.Line}, столбец {problem.Column}";
                 ToolTip.SetTip(tab.JsonMessage, problem.Message);
                 tab.JsonBanner!.IsVisible = true;
@@ -1374,6 +1396,8 @@ public partial class MainWindow
         public bool AutoRefresh { get; set; } = true;
         public EditorFileWatch? FileWatch { get; set; }
         public bool JsonDisabled { get; set; }
+        public JsonFolding? JsonFolding { get; set; }
+        public JsonErrorMarker? JsonErrorMarker { get; set; }
         public long Revision { get; set; }
         public DateTimeOffset LastWorked { get; set; } = DateTimeOffset.Now;
         public SearchHighlights? Highlights { get; set; }

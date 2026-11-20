@@ -3,6 +3,7 @@
              xmlns:chrome="using:Avalonia.Controls.Chrome"
              xmlns:aeRendering="using:AvaloniaEdit.Rendering"
              xmlns:aeEditing="using:AvaloniaEdit.Editing"
+             xmlns:aeFolding="using:AvaloniaEdit.Folding"
              xmlns:editor="using:RustText.Demo.Editor"
              xmlns:local="using:RustText.Demo"
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
@@ -174,6 +175,12 @@
         <StyleInclude Source="avares://Avalonia.Controls.ColorPicker/Themes/Fluent/Fluent.xaml" />
         <Style Selector="aeRendering|TextView">
             <Setter Property="LinkTextForegroundBrush" Value="{x:Static local:FocusTheme.Link}" />
+        </Style>
+        <Style Selector="aeFolding|FoldingMargin">
+            <Setter Property="FoldingMarkerBrush" Value="{x:Static local:FocusTheme.Muted}" />
+            <Setter Property="FoldingMarkerBackgroundBrush" Value="{x:Static local:FocusTheme.Editor}" />
+            <Setter Property="SelectedFoldingMarkerBrush" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="SelectedFoldingMarkerBackgroundBrush" Value="{x:Static local:FocusTheme.Hover}" />
         </Style>
         <Style Selector="aeEditing|TextArea">
             <!-- The default AvaloniaEdit watermark binds Document.Text, which flattens the
