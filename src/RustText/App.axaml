@@ -160,6 +160,21 @@
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
             <Setter Property="FontSize" Value="13" />
         </Style>
+        <Style Selector="ListBoxItem.settings-section">
+            <Setter Property="Margin" Value="0,0,0,3" />
+            <Setter Property="Padding" Value="10,8" />
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            <Setter Property="BorderThickness" Value="2,0,0,0" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="CornerRadius" Value="4" />
+        </Style>
+        <Style Selector="ListBoxItem.settings-section:selected /template/ ContentPresenter#PART_ContentPresenter,
+                         ListBoxItem.settings-section:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.Hover}" />
+            <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Accent}" />
+            <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+        </Style>
         <Style Selector="TextBox.focus-log-editor">
             <Setter Property="CornerRadius" Value="0" />
             <Setter Property="BorderThickness" Value="0" />

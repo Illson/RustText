@@ -104,106 +104,6 @@ public partial class MainWindow
         }
     }
 
-    private async Task ShowDraftArchiveSettingsAsync()
-    {
-        var archivePresets = new[] { "1 час", "5 часов", "1 день", "7 дней", "Никогда", "Вручную" };
-        var archivePreset = new ComboBox { ItemsSource = archivePresets, SelectedIndex = 5 };
-        var archiveCount = new TextBox { Text = "5", Width = 78 };
-        var archiveUnit = new ComboBox { ItemsSource = new[] { "минут", "часов", "дней" }, SelectedIndex = 1, Width = 100 };
-
-        var retentionPresets = new[] { "1 день", "7 дней", "30 дней", "1 год", "Безлимит", "Вручную" };
-        var retentionPreset = new ComboBox { ItemsSource = retentionPresets, SelectedIndex = 5 };
-        var retentionCount = new TextBox { Text = "30", Width = 78 };
-        var retentionUnit = new ComboBox { ItemsSource = new[] { "дней", "недель", "месяцев", "лет" }, SelectedIndex = 0, Width = 100 };
-
-        ApplyArchivePreset(Settings.ArchiveClosedDraftAfterMinutes);
-        ApplyRetentionPreset(Settings.ArchivedDraftRetentionDays);
-        archivePreset.SelectionChanged += (_, _) =>
-        {
-            switch (archivePreset.SelectedIndex)
-            {
-                case 0: archiveCount.Text = "1"; archiveUnit.SelectedIndex = 1; break;
-                case 1: archiveCount.Text = "5"; archiveUnit.SelectedIndex = 1; break;
-                case 2: archiveCount.Text = "1"; archiveUnit.SelectedIndex = 2; break;
-                case 3: archiveCount.Text = "7"; archiveUnit.SelectedIndex = 2; break;
-                case 4: archiveCount.Text = "0"; archiveUnit.SelectedIndex = 1; break;
-            }
-        };
-        retentionPreset.SelectionChanged += (_, _) =>
-        {
-            switch (retentionPreset.SelectedIndex)
-            {
-                case 0: retentionCount.Text = "1"; retentionUnit.SelectedIndex = 0; break;
-                case 1: retentionCount.Text = "7"; retentionUnit.SelectedIndex = 0; break;
-                case 2: retentionCount.Text = "30"; retentionUnit.SelectedIndex = 0; break;
-                case 3: retentionCount.Text = "1"; retentionUnit.SelectedIndex = 3; break;
-                case 4: retentionCount.Text = "0"; retentionUnit.SelectedIndex = 0; break;
-            }
-        };
-
-        var body = DialogPanel(
-            new TextBlock { Text = "Архивировать закрытые черновики после" }, archivePreset,
-            Row(archiveCount, archiveUnit),
-            new TextBlock { Text = "Хранить архивные черновики" }, retentionPreset,
-            Row(retentionCount, retentionUnit),
-            new TextBlock { Text = "Открытые вкладки не архивируются. Для старых записей срок начинается после первого сохранения новой версии.",
-                TextWrapping = TextWrapping.Wrap, Foreground = FocusTheme.Muted });
-        var dialog = Dialog("Черновики и архив", body);
-        var warning = new TextBlock { Foreground = FocusTheme.Danger };
-        body.Children.Add(warning);
-        body.Children.Add(FocusButton(Button("Сохранить", () =>
-        {
-            if (!TryParseArchiveMinutes(archiveCount.Text, archiveUnit.SelectedIndex, out var archiveMinutes)
-                || !TryParseRetentionDays(retentionCount.Text, retentionUnit.SelectedIndex, out var retentionDays))
-            {
-                warning.Text = "Введите целое значение в допустимом диапазоне.";
-                return;
-            }
-            dialog.Close((archiveMinutes, retentionDays));
-        }), primary: true));
-
-        if (await dialog.ShowDialog<(int ArchiveMinutes, int RetentionDays)?>(this) is { } limits)
-        {
-            await SaveWorkspaceSettingsAsync(settings => settings with
-            {
-                ArchiveClosedDraftAfterMinutes = limits.ArchiveMinutes,
-                ArchivedDraftRetentionDays = limits.RetentionDays
-            });
-            await ArchiveClosedDraftsAsync();
-        }
-
-        void ApplyArchivePreset(int minutes)
-        {
-            if (minutes == 60) { archivePreset.SelectedIndex = 0; archiveCount.Text = "1"; archiveUnit.SelectedIndex = 1; }
-            else if (minutes == 300) { archivePreset.SelectedIndex = 1; archiveCount.Text = "5"; archiveUnit.SelectedIndex = 1; }
-            else if (minutes == 1440) { archivePreset.SelectedIndex = 2; archiveCount.Text = "1"; archiveUnit.SelectedIndex = 2; }
-            else if (minutes == 10_080) { archivePreset.SelectedIndex = 3; archiveCount.Text = "7"; archiveUnit.SelectedIndex = 2; }
-            else if (minutes == 0) { archivePreset.SelectedIndex = 4; archiveCount.Text = "0"; archiveUnit.SelectedIndex = 1; }
-            else
-            {
-                archivePreset.SelectedIndex = 5;
-                archiveCount.Text = minutes.ToString(CultureInfo.CurrentCulture);
-                archiveUnit.SelectedIndex = 0;
-            }
-        }
-
-        void ApplyRetentionPreset(int days)
-        {
-            if (days == 1) retentionPreset.SelectedIndex = 0;
-            else if (days == 7) retentionPreset.SelectedIndex = 1;
-            else if (days == 30) retentionPreset.SelectedIndex = 2;
-            else if (days == 365) { retentionPreset.SelectedIndex = 3; retentionUnit.SelectedIndex = 3; retentionCount.Text = "1"; return; }
-            else if (days == 0) { retentionPreset.SelectedIndex = 4; retentionCount.Text = "0"; return; }
-            else
-            {
-                retentionPreset.SelectedIndex = 5;
-                retentionCount.Text = days.ToString(CultureInfo.CurrentCulture);
-            }
-            retentionUnit.SelectedIndex = 0;
-            retentionCount.Text = days.ToString(CultureInfo.CurrentCulture);
-        }
-    }
-
     private async Task ShowDraftArchiveAsync()
     {
         var storage = SessionStorage;
@@ -297,28 +197,6 @@ public partial class MainWindow
 
         await RefreshAsync();
         await dialog.ShowDialog(this);
-    }
-
-    private static bool TryParseArchiveMinutes(string? text, int unit, out int minutes)
-    {
-        minutes = 0;
-        if (!int.TryParse(text, NumberStyles.None, CultureInfo.CurrentCulture, out var value) || value < 0) return false;
-        var multiplier = unit switch { 0 => 1L, 1 => 60L, 2 => 1440L, _ => 0L };
-        var result = value * multiplier;
-        if (result > 525_600) return false;
-        minutes = (int)result;
-        return true;
-    }
-
-    private static bool TryParseRetentionDays(string? text, int unit, out int days)
-    {
-        days = 0;
-        if (!int.TryParse(text, NumberStyles.None, CultureInfo.CurrentCulture, out var value) || value < 0) return false;
-        var multiplier = unit switch { 0 => 1L, 1 => 7L, 2 => 30L, 3 => 365L, _ => 0L };
-        var result = value * multiplier;
-        if (result > 3650) return false;
-        days = (int)result;
-        return true;
     }
 
     private static string FormatArchiveSize(long bytes)

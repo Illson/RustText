@@ -2,12 +2,10 @@ using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
-using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
-using Avalonia.Threading;
 using Avalonia.VisualTree;
 using RustText.Demo.Editor;
 using RustText.Demo.Platform;
@@ -63,7 +61,6 @@ public partial class MainWindow
             Command("Вывести окно на передний план…", () => Run(ShowWindowFinderAsync)),
             Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),
             Command("История выпусков…", () => Run(ShowReleaseHistoryAsync)),
-            Command("Черновики и архив…", () => Run(ShowDraftArchiveSettingsAsync)),
             Command("Настройки…", () => Run(ShowSettingsAsync))));
         TopMenu.Items.Add(MenuGroup("_Поиск",
             Command("Найти   Ctrl+F", () => OpenSearchPanel()),
@@ -402,116 +399,6 @@ public partial class MainWindow
         await Dialog("Сравнение списков", body, 740).ShowDialog(this);
     }
 
-    private async Task ShowSettingsAsync()
-    {
-        _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-        var catalog = _workspace.Catalog;
-        var limit = new TextBox { Text = Settings.UntitledTabLimit.ToString(CultureInfo.CurrentCulture) };
-        var perFile = new TextBox { Text = (Settings.VersionFileLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
-        var total = new TextBox { Text = (Settings.VersionTotalLimitBytes / (1024 * 1024)).ToString(CultureInfo.CurrentCulture) };
-        var draftLines = new CheckBox { Content = "Число строк у вкладок без имени", IsChecked = Settings.ShowDraftLineCount };
-        var autoUpdate = new CheckBox { Content = "Проверять обновления при запуске и каждый час", IsChecked = Settings.AutoCheckUpdates };
-        var wordWrap = new CheckBox { Content = "Переносить длинные строки", IsChecked = _wordWrap };
-        var fontSize = new TextBox { Text = _fontSize.ToString(CultureInfo.CurrentCulture) };
-        var startupMode = new ComboBox
-        {
-            ItemsSource = new[] { "Последнее пространство", "Выбранное пространство", "Пустое окно" },
-            SelectedIndex = Settings.WorkspaceStartupMode switch
-            {
-                WorkspaceStartupMode.Specific => 1,
-                WorkspaceStartupMode.Empty => 2,
-                _ => 0
-            }
-        };
-        var startupWorkspace = new ComboBox
-        {
-            ItemsSource = catalog.Workspaces,
-            ItemTemplate = new FuncDataTemplate<WorkspaceEntry>((entry, _) => new TextBlock { Text = entry?.Name }),
-            SelectedItem = catalog.Workspaces.FirstOrDefault(item => item.Id == Settings.StartupWorkspaceId)
-                ?? catalog.Workspaces.FirstOrDefault(item => item.Id == _workspaceId)
-        };
-        var workspaceHistory = new TextBox
-        {
-            Text = Settings.WorkspaceHistoryLimit < 0 ? "Безлимит" : Settings.WorkspaceHistoryLimit.ToString(CultureInfo.CurrentCulture)
-        };
-        startupWorkspace.IsEnabled = startupMode.SelectedIndex == 1;
-        startupMode.SelectionChanged += (_, _) => startupWorkspace.IsEnabled = startupMode.SelectedIndex == 1;
-        var largeFiles = new ComboBox
-        {
-            ItemsSource = new[] { "Спрашивать", "Открывать как лог", "Открывать в редакторе" },
-            SelectedIndex = Settings.OpenLargeFilesAsLog switch { true => 1, false => 2, null => 0 }
-        };
-        var body = DialogPanel(new TextBlock { Text = "Символов в заголовке пустой вкладки (1–200)" }, limit,
-            new TextBlock { Text = "Лимит снимка файла, МиБ" }, perFile,
-            new TextBlock { Text = "Общий лимит снимков, МиБ" }, total,
-            new TextBlock { Text = "Файлы больше 100 МиБ" }, largeFiles, draftLines, autoUpdate, wordWrap,
-            new TextBlock { Text = "Размер текста (8–48 px)" }, fontSize,
-            new TextBlock { Text = "Открывать при запуске" }, startupMode, startupWorkspace,
-            new TextBlock { Text = "Хранить удалённые пространства (0–200 или «Безлимит»)" }, workspaceHistory);
-        var dialog = Dialog("Настройки", body);
-        body.Children.Add(FocusButton(Button("Черновики и архив…", () =>
-        {
-            dialog.Close();
-            Dispatcher.UIThread.Post(() => Run(ShowDraftArchiveSettingsAsync));
-        })));
-        var warning = new TextBlock { Foreground = FocusTheme.Danger };
-        body.Children.Add(warning);
-        body.Children.Add(FocusButton(Button("Сохранить", () =>
-        {
-            if (int.TryParse(limit.Text, out var length) && length is >= 1 and <= 200
-                && int.TryParse(perFile.Text, out var fileLimit) && fileLimit is >= 0 and <= 64
-                && long.TryParse(total.Text, out var totalLimit) && totalLimit is >= 0 and <= 1024
-                && double.TryParse(fontSize.Text, CultureInfo.CurrentCulture, out var parsedFontSize) && parsedFontSize is >= 8 and <= 48
-                && (string.Equals(workspaceHistory.Text?.Trim(), "Безлимит", StringComparison.OrdinalIgnoreCase)
-                    || int.TryParse(workspaceHistory.Text, out var historyLimit) && historyLimit is >= 0 and <= 200))
-            {
-                var wrapEnabled = wordWrap.IsChecked == true;
-                var startup = startupMode.SelectedIndex switch
-                {
-                    1 => WorkspaceStartupMode.Specific,
-                    2 => WorkspaceStartupMode.Empty,
-                    _ => WorkspaceStartupMode.LastUsed
-                };
-                var retention = string.Equals(workspaceHistory.Text?.Trim(), "Безлимит", StringComparison.OrdinalIgnoreCase)
-                    ? -1 : int.Parse(workspaceHistory.Text!, CultureInfo.CurrentCulture);
-                Func<UserSettings, UserSettings> update = settings => settings with
-                {
-                    UntitledTabLimit = length,
-                    VersionFileLimitBytes = fileLimit * 1024 * 1024,
-                    VersionTotalLimitBytes = totalLimit * 1024 * 1024,
-                    ShowDraftLineCount = draftLines.IsChecked == true,
-                    AutoCheckUpdates = autoUpdate.IsChecked == true,
-                    AutoCheckUpdatesChoiceMade = true,
-                    OpenLargeFilesAsLog = largeFiles.SelectedIndex switch { 1 => true, 2 => false, _ => null },
-                    WordWrap = wrapEnabled,
-                    FontSize = parsedFontSize,
-                    WorkspaceStartupMode = startup,
-                    StartupWorkspaceId = startupWorkspace.SelectedItem is WorkspaceEntry selectedWorkspace ? selectedWorkspace.Id : null,
-                    WorkspaceHistoryLimit = retention
-                };
-                dialog.Close(update);
-            }
-            else
-            {
-                warning.Text = "Введите допустимые целые значения.";
-            }
-        }), primary: true));
-
-        if (await dialog.ShowDialog<Func<UserSettings, UserSettings>?>(this) is { } update)
-        {
-            var wasAutomaticChecksEnabled = Settings.AutoCheckUpdates;
-            await SaveWorkspaceSettingsAsync(update);
-            var turnedOn = !wasAutomaticChecksEnabled && Settings.AutoCheckUpdates;
-            SynchronizeAutomaticUpdateTimer(runImmediately: turnedOn, forceImmediateCheck: turnedOn);
-            foreach (var window in _workspace.Windows)
-            {
-                window._wordWrap = Settings.WordWrap ?? window._wordWrap;
-                window._fontSize = Settings.FontSize ?? window._fontSize;
-                window.ApplyTextAppearance();
-            }
-        }
-    }
-
     private async Task SaveWorkspaceSettingsAsync(Func<UserSettings, UserSettings> update)
     {
         await _workspace.SettingsGate.WaitAsync(_lifetime.Token);
@@ -581,7 +468,7 @@ public partial class MainWindow
         return button;
     }
 
-    internal static Window Dialog(string title, Control body, double width = 430)
+    internal static Window Dialog(string title, Control body, double width = 430, bool scrollContent = true)
     {
         var dialog = new Window
         {
@@ -598,7 +485,7 @@ public partial class MainWindow
             Content = new Border
             {
                 Background = FocusTheme.Panel,
-                Child = new ScrollViewer { Content = body }
+                Child = scrollContent ? new ScrollViewer { Content = body } : body
             },
             CanResize = true
         };
