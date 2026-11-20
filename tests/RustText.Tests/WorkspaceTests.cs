@@ -913,6 +913,8 @@ public sealed class WorkspaceTests
     [InlineData("1234 56", @"\d+", "$&$&", "12341234 56", 9, "56")]
     [InlineData("12 34", @"(\d)\d", "$1", "1 34", 2, "34")]
     [InlineData("abc", @"\w", "", "bc", 0, "b")]
+    [InlineData("abc abc", "(?=a)", ">", ">abc abc", 5, "")]
+    [InlineData("aa", "(?=a)", "", "aa", 1, "")]
     public Task SingleRegexReplaceAdvancesPastExpandedReplacement(string text, string pattern,
         string replacement, string expected, int nextOffset, string nextMatch) => HeadlessTests.RunAsync(async profile =>
     {
@@ -932,6 +934,28 @@ public sealed class WorkspaceTests
             Assert.Equal(expected, editor.Text);
             Assert.Equal(nextMatch, editor.SelectedText);
             Assert.Equal(nextOffset, editor.SelectionStart);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ZeroLengthReplaceAtEndWrapsToFirstOccurrence() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "anchors.txt");
+        await File.WriteAllTextAsync(path, "a\nb");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            Invoke(window, "OpenSearchPanel", true);
+            ((TextBox)Field(window, "_searchInput")).Text = "$";
+            ((TextBox)Field(window, "_replacement")).Text = "!";
+            ((ToggleButton)Field(window, "_regexOption")).IsChecked = true;
+            editor.CaretOffset = editor.Document.TextLength;
+            await CallAsync(window, "NavigateSearchAsync", false);
+            await CallAsync(window, "ReplaceAsync", false);
+            Assert.Equal("a\nb!", editor.Text);
+            Assert.Equal(1, editor.CaretOffset);
         }
         finally { await CloseAsync(window); }
     });

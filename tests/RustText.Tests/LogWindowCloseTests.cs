@@ -1,6 +1,8 @@
 using System.Reflection;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
@@ -132,6 +134,80 @@ public sealed class LogWindowCloseTests
         }
     });
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task DeferredLogLoadCannotLosePageInputWhileWindowCloseWaitsForGate(bool closeBeforeClick) => HeadlessTests.RunAsync(async profile =>
+    {
+        const string original = "first row\nsecond row\n";
+        var path = Path.Combine(profile, "deferred-close.log");
+        await File.WriteAllTextAsync(path, original);
+        var window = await OpenWindowAsync();
+        var tab = Property(window, "ActiveTab")
+            ?? window.GetType().GetMethod("AddTab", Private)!.Invoke(window, new object?[] { null, null, true })!;
+        var saved = new SessionTab((long)Property(tab, "Id")!, path, TextEncodingKind.Utf8,
+            Log: new LogTabState(Encoding: null, AutoRefresh: false, EditPages: true));
+        Invoke(window, "SetDeferred", tab, saved);
+        await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<Button>()
+            .Any(button => Equals(button.Content, "Загрузить вкладку")));
+        var gate = CloseGate(window);
+        Assert.True(await gate.WaitAsync(0));
+
+        try
+        {
+            if (closeBeforeClick)
+            {
+                window.Close();
+                await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_closing"));
+                FindButton(window, "Загрузить вкладку").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }
+            else
+            {
+                var item = (ContentControl)Property(tab, "Item")!;
+                var closedDuringLoad = false;
+                item.PropertyChanged += (_, args) =>
+                {
+                    if (closedDuringLoad || args.Property != ContentControl.ContentProperty
+                        || !(bool)Property(tab, "Loading")!) return;
+                    Assert.Null(Property(tab, "Log"));
+                    closedDuringLoad = true;
+                    window.Close();
+                };
+                FindButton(window, "Загрузить вкладку").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert.True(closedDuringLoad);
+            }
+
+            await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_closing"));
+            await HeadlessTests.WaitForAsync(() => Property(tab, "Log") is LogView);
+            var log = Assert.IsType<LogView>(Property(tab, "Log"));
+            await log.InitialPageLoad;
+            var page = PageEditor(log);
+            window.UpdateLayout();
+            await HeadlessTests.WaitForAsync(() => page.Bounds.Width > 0 && page.Bounds.Height > 0
+                && ReferenceEquals(TopLevel.GetTopLevel(page), window));
+
+            var textArea = page.TextArea;
+            var point = textArea.TranslatePoint(new Point(10, 10), window)
+                ?? throw new InvalidOperationException("Page editor is not attached to the window.");
+            window.MouseDown(point, MouseButton.Left, RawInputModifiers.None);
+            window.MouseUp(point, MouseButton.Left, RawInputModifiers.None);
+            page.CaretOffset = page.Document.TextLength;
+            window.KeyTextInput("!");
+            Assert.False(log.HasPendingEdit);
+            Assert.Equal(original, page.Text);
+            Assert.False(page.IsEnabled);
+        }
+        finally
+        {
+            if (Property(tab, "Log") is LogView currentLog) currentLog.DiscardPageEdits();
+            if (!(bool)Field(window, "_closing")) window.Close();
+            gate.Release();
+            await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_closed"));
+        }
+
+        Assert.Equal(original, await File.ReadAllTextAsync(path));
+    });
+
     private static async Task<MainWindow> OpenLogWindowAsync(string path)
     {
         var window = new MainWindow { Width = 900, Height = 700 };
@@ -140,6 +216,14 @@ public sealed class LogWindowCloseTests
         await InvokeTask(window, "OpenPathAsync", path, true, null);
         var log = Assert.IsType<LogView>(Property(ActiveTab(window), "Log"));
         await log.InitialPageLoad;
+        return window;
+    }
+
+    private static async Task<MainWindow> OpenWindowAsync()
+    {
+        var window = new MainWindow { Width = 900, Height = 700 };
+        window.Show();
+        await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
         return window;
     }
 
@@ -162,6 +246,9 @@ public sealed class LogWindowCloseTests
 
     private static Button FindButton(Window dialog, string caption) => dialog.GetVisualDescendants()
         .OfType<Button>().Single(button => Equals(button.Content, caption));
+
+    private static void Invoke(object owner, string name, params object?[] arguments) =>
+        owner.GetType().GetMethod(name, Private | BindingFlags.Public)!.Invoke(owner, arguments);
 
     private static object Field(object owner, string name) =>
         owner.GetType().GetField(name, Private)!.GetValue(owner)!;

@@ -374,6 +374,43 @@ public sealed class VersionTests
         }
     });
 
+    [Theory]
+    [InlineData(@"A\n(B\n)", "$1", "B\rC\nD")]
+    [InlineData(@"(A\n)(?<keep>B\n)", "${keep}$1${keep}", "B\rA\r\nB\rC\nD")]
+    [InlineData(@"(A\n)(B\n)", "$$2$02", "$2B\rC\nD")]
+    [InlineData(@"A\n(B\n)", "$+", "B\rC\nD")]
+    [InlineData(@"(?<first>A\n)|(?<last>B\n)", "$+", "B\rC\nD")]
+    [InlineData(@"(A)\n", "$1z\n", "Az\r\nB\rC\nD")]
+    [InlineData(@"(B\n)", "$1x\n", "A\r\nB\rx\nC\nD")]
+    [InlineData(@"B\n", "$'", "A\r\nC\nDC\nD")]
+    [InlineData(@"B\n", "$`", "A\r\nA\r\nC\nD")]
+    [InlineData(@"B\n", "$_", "A\r\nA\r\nB\rC\nDC\nD")]
+    public Task ReplaceAllCapturePreservesSourceLineEndings(string pattern, string replacement, string expected) =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "captures.txt");
+            var original = Encoding.UTF8.GetBytes("A\r\nB\rC\nD");
+            await File.WriteAllBytesAsync(path, original);
+            var window = await OpenWorkspaceAsync(path);
+            try
+            {
+                var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+                Invoke(window, "OpenSearchPanel", true);
+                ((TextBox)Field(window, "_searchInput")).Text = pattern;
+                ((TextBox)Field(window, "_replacement")).Text = replacement;
+                ((ToggleButton)Field(window, "_regexOption")).IsChecked = true;
+                await CallAsync(window, "ReplaceAsync", true);
+                Assert.Equal(expected.ReplaceLineEndings("\n"), editor.Text);
+                await CallAsync(window, "SaveAsync", false);
+                Assert.Equal(Encoding.UTF8.GetBytes(expected), await File.ReadAllBytesAsync(path));
+                editor.TextArea.Focus();
+                PressUndo(window);
+                await CallAsync(window, "SaveAsync", false);
+                Assert.Equal(original, await File.ReadAllBytesAsync(path));
+            }
+            finally { await CloseAsync(window); }
+        });
+
     [Fact]
     public Task RestoredFormat_UndoSaveRedoSaveKeepsOriginalBytesAndDoesNotDuplicateTheirEncoding() => HeadlessTests.RunAsync(async profilePath =>
     {

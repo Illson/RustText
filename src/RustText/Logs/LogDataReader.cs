@@ -14,7 +14,7 @@ internal sealed class LogDataReader
     private const int MaximumPageBytes = 1024 * 1024;
     private const int MaximumFrameBytes = 64 * 1024;
     private const int DefaultPageSize = 80;
-    private const int DefaultFrameBytes = 16 * 1024;
+    internal const int DefaultFrameBytes = 16 * 1024;
     private const int IndexBufferBytes = 256 * 1024;
     internal const int DefaultPageBytes = 128 * 1024;
 
@@ -54,6 +54,15 @@ internal sealed class LogDataReader
         head.CopyTo(witness, 0);
         tail.CopyTo(witness, count);
         return SHA256.HashData(witness);
+    }
+
+    public string? ReadTerminatedLineText(long offset, int byteCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(byteCount, MaximumPageBytes);
+        var bytes = ReadWindow(_file.SafeFileHandle, offset, byteCount, CancellationToken.None);
+        var ending = FindLineEnding(bytes);
+        return bytes.Length == byteCount && ending.Index >= 0 && ending.Index + ending.Length == byteCount
+            ? _decoder.GetString(bytes, 0, ending.Index) : null;
     }
 
     public bool IsNewlineBefore(long offset) => IsNewlineBefore(_file.SafeFileHandle, offset);

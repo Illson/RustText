@@ -421,7 +421,9 @@ public partial class MainWindow
         }
     }
 
-    private async Task NavigateSearchAsync(bool backward)
+    private Task NavigateSearchAsync(bool backward) => NavigateSearchFromAsync(backward, null);
+
+    private async Task NavigateSearchFromAsync(bool backward, int? startOffset)
     {
         if (ActiveTab is not { Editor: { } editor } tab)
         {
@@ -439,11 +441,10 @@ public partial class MainWindow
         var selection = MultiCaretEditing.Primary(editor.TextArea);
         var same = _searchFocus is { } focused && ReferenceEquals(focused.Tab, tab)
             && focused.Hit.Offset == selection.Start && focused.Hit.Length == selection.Length;
-        var offset = backward ? selection.Start : editor.CaretOffset;
-        if (!backward && same)
+        var offset = startOffset ?? (backward ? selection.Start : editor.CaretOffset);
+        if (startOffset is null && !backward && same)
         {
-            offset = selection.Length > 0 ? selection.End
-                : selection.Start < editor.Document.TextLength ? selection.Start + 1 : 0;
+            offset = selection.Length > 0 ? selection.End : AfterEmptyMatch(selection.Start, editor.Document.TextLength);
         }
         var text = editor.Text;
         var revision = tab.Revision;
@@ -465,6 +466,8 @@ public partial class MainWindow
         RefreshSearchHighlights();
     }
 
+    private static int AfterEmptyMatch(int offset, int textLength) => offset < textLength ? offset + 1 : 0;
+
     private async Task ReplaceAsync(bool all)
     {
         if (ActiveTab is not { Editor: { IsReadOnly: false } editor } tab)
@@ -481,15 +484,18 @@ public partial class MainWindow
             var offset = editor.SelectionStart;
             var selection = editor.SelectedText;
             var match = query.Match(editor.Text, offset);
+            int? nextOffset = null;
             if (match.Success && match.Index == offset && match.Length == selection.Length)
             {
                 var inserted = options.IsRegex ? match.Result(replacement) : replacement;
                 editor.Document.Replace(offset, selection.Length, inserted);
-                editor.Select(offset + inserted.Length, 0);
-                editor.CaretOffset = offset + inserted.Length;
+                var end = offset + inserted.Length;
+                editor.Select(end, 0);
+                editor.CaretOffset = end;
+                nextOffset = match.Length == 0 ? AfterEmptyMatch(end, editor.Document.TextLength) : end;
             }
 
-            await NavigateSearchAsync(false);
+            await NavigateSearchFromAsync(false, nextOffset);
             return;
         }
 

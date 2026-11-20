@@ -92,11 +92,7 @@ public static class DocumentFiles
             }
             else
             {
-                // Lock the directory entry across cooperating writers, including other profiles
-                // and network clients. The original handle alone permits another atomic rename.
-                var nameHash = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFileName(fullPath).ToUpperInvariant()));
-                var lockPath = Path.Combine(directory, $".rusttext-save-{Convert.ToHexString(nameHash)}.lock");
-                using var publishLock = AcquireSaveLock(lockPath);
+                using var publishLock = AcquireSaveLock(fullPath);
                 await using var guard = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
                     1, FileOptions.Asynchronous | FileOptions.RandomAccess);
                 var current = await FileStamp.CaptureAsync(guard, cancellationToken).ConfigureAwait(false);
@@ -113,11 +109,16 @@ public static class DocumentFiles
         }
     }
 
-    private static FileStream AcquireSaveLock(string path)
+    internal static FileStream AcquireSaveLock(string targetPath)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
+        var fullPath = Path.GetFullPath(targetPath);
+        var directory = Path.GetDirectoryName(fullPath) ?? throw new IOException("Не удалось определить папку файла.");
+        var nameHash = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFileName(fullPath).ToUpperInvariant()));
+        var lockPath = Path.Combine(directory, $".rusttext-save-{Convert.ToHexString(nameHash)}.lock");
         try
         {
-            return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose);
+            return new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose);
         }
         catch (IOException ex) when ((ex.HResult & 0xffff) is 32 or 80 or 183)
         {

@@ -914,6 +914,115 @@ public sealed class LogUiTests
     });
 
     [Fact]
+    public Task SearchNavigationKeepsCompletedPrefixHitsAfterAppendButRejectsOpenTailHit() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "append-search.log");
+        await File.WriteAllTextAsync(path, "needle stable\nneedle unfinished");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            Assert.Equal(2, ((System.Collections.ICollection)Field(log, "_searchResults")).Count);
+
+            await File.AppendAllTextAsync(path, " extended\nneedle appended\n");
+
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Equal("needle", SelectedText((TextBox)Field(log, "_logText")));
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Single(((System.Collections.ICollection)Field(log, "_searchResults")).Cast<object>());
+            Assert.Contains("Строка изменилась", log.StatusText);
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Equal("needle", SelectedText((TextBox)Field(log, "_logText")));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task SearchNavigationRejectsRewrittenHitOutsideAppendWitnessAfterGrowth(bool rewriteBoundary) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "append-rewrite-search.log");
+        var content = new string('a', 600) + "\nneedle center\n" + new string('z', 600) + "\n";
+        await File.WriteAllTextAsync(path, content);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            ((TextBox)Field(log, "_searchBox")).Text = "needle";
+            await InvokeTask(log, "SearchAsync", false);
+            Assert.Single(((System.Collections.ICollection)Field(log, "_searchResults")).Cast<object>());
+
+            await using (var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            {
+                stream.Position = rewriteBoundary ? 600 : 601;
+                await stream.WriteAsync(Encoding.UTF8.GetBytes(rewriteBoundary ? "x" : "xxxxxx"));
+            }
+            await File.AppendAllTextAsync(path, "tail\n");
+
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Empty((System.Collections.ICollection)Field(log, "_searchResults"));
+            Assert.Contains("Строка изменилась", log.StatusText);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task AutomaticSearchStopsInsideOversizedPhysicalLineAndCursorCanContinue() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "oversized-continuation.log");
+        const string prefix = "prefix\n";
+        await File.WriteAllTextAsync(path, prefix + new string('x', 20 * 1024 * 1024) + "\nneedle after limit\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var snapshot = log.CaptureSearchSnapshot();
+            var options = new SearchOptions("needle", false, false, false);
+            var start = Encoding.UTF8.GetByteCount(prefix);
+            var automatic = await log.SearchSnapshotAsync(snapshot, options, new LogSearchCursor(start, 0), 32,
+                CancellationToken.None);
+            Assert.Empty(automatic.Hits);
+            Assert.True(automatic.HasMore);
+            Assert.NotNull(automatic.NextCursor);
+            Assert.True(automatic.NextCursor!.SkipLine);
+            Assert.Equal(start + 16 * 1024 * 1024, automatic.NextCursor.Offset);
+
+            var continued = await log.SearchSnapshotAsync(snapshot, options, automatic.NextCursor, 32,
+                CancellationToken.None, long.MaxValue);
+            var hit = Assert.Single(continued.Hits);
+            Assert.True(hit.Offset > 20 * 1024 * 1024);
+            Assert.Equal("needle after limit", hit.Preview);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task SearchResumesAnOrdinaryLineAcrossByteAndResultLimits() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-across-batches.log");
+        await File.WriteAllTextAsync(path, "prefix-needle-needle-suffix\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var snapshot = log.CaptureSearchSnapshot();
+            var options = new SearchOptions("^prefix-needle|needle|^e", true, true, false);
+            var hits = new List<LogSearchHit>();
+            LogSearchCursor? cursor = null;
+            for (var batch = 0; batch < 12; batch++)
+            {
+                var page = await log.SearchSnapshotAsync(snapshot, options, cursor, 1, CancellationToken.None, maxScanBytes: 8);
+                hits.AddRange(page.Hits);
+                cursor = page.NextCursor;
+                if (cursor is null) break;
+            }
+            Assert.Null(cursor);
+            Assert.Equal([0, 14], hits.Select(hit => hit.MatchIndex));
+            Assert.Equal([13, 6], hits.Select(hit => hit.MatchLength));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public async Task SearchFindsCompletedAppendedUtf8AndNullBytesRemainReadable()
     {
         await HeadlessTests.RunAsync(async _ =>

@@ -362,8 +362,15 @@ internal sealed partial class LogView
         }
 
         token.ThrowIfCancellationRequested();
+        if (digest is not null)
+        {
+            if (ReadFileStamp(_path, source) != edit.Stamp) throw ChangedSincePageRead();
+            return Convert.ToHexString(digest.GetHashAndReset());
+        }
+
+        using var publishLock = DocumentFiles.AcquireSaveLock(_path);
         if (ReadFileStamp(_path, source) != edit.Stamp) throw ChangedSincePageRead();
-        if (digest is not null) return Convert.ToHexString(digest.GetHashAndReset());
+        token.ThrowIfCancellationRequested();
         File.Replace(temporary, _path, destinationBackupFileName: null);
         return null;
     }

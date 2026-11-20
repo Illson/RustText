@@ -124,77 +124,34 @@ internal static class TextOperations
     {
         var started = Stopwatch.GetTimestamp();
         var builder = new StringBuilder(text.Length);
-        var endings = originalEndings is null ? null : ImmutableList.CreateBuilder<LineEndingKind>();
-        var endingIndex = 0;
+        ReplacementLineEndings? endings = null;
         var count = 0;
         var previousEnd = 0;
         for (var match = regex.Match(text); match.Success; match = match.NextMatch())
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            CheckBudget(started);
-            var unchanged = text.AsSpan(previousEnd, match.Index - previousEnd);
-            CopySegmentEndings(unchanged);
-            builder.Append(unchanged);
+            CheckOperation();
+            if (originalEndings is not null)
+                endings ??= new ReplacementLineEndings(text, originalEndings, regex, replacement, expandGroups, CheckOperation);
+
+            builder.Append(text.AsSpan(previousEnd, match.Index - previousEnd));
             var inserted = expandGroups ? match.Result(replacement) : replacement;
-            if (endings is not null)
-            {
-                var matched = text.AsSpan(match.Index, match.Length);
-                var removedBreaks = CountLineBreaks(matched, started, cancellationToken);
-                var insertedBreaks = CountLineBreaks(inserted.AsSpan(), started, cancellationToken);
-                var retainedBreaks = Math.Min(removedBreaks, insertedBreaks);
-                CopySourceEndings(retainedBreaks);
-                for (var index = retainedBreaks; index < insertedBreaks; index++) endings.Add(LineEndingKind.Lf);
-                endingIndex += removedBreaks - retainedBreaks;
-            }
             builder.Append(inserted);
+            endings?.AppendSource(previousEnd, match.Index);
+            endings?.AppendReplacement(match, inserted);
             previousEnd = match.Index + match.Length;
             count++;
         }
 
-        if (count == 0)
-        {
-            return new ReplaceAllResult(text, 0, originalEndings);
-        }
+        if (count == 0) return new ReplaceAllResult(text, 0, originalEndings);
+        builder.Append(text.AsSpan(previousEnd));
+        endings?.AppendSource(previousEnd, text.Length);
+        return new ReplaceAllResult(builder.ToString(), count, endings?.Result.ToImmutable());
 
-        var tail = text.AsSpan(previousEnd);
-        CopySegmentEndings(tail);
-        builder.Append(tail);
-        return new ReplaceAllResult(builder.ToString(), count, endings?.ToImmutable());
-
-        void CopySegmentEndings(ReadOnlySpan<char> segment)
+        void CheckOperation()
         {
-            if (endings is null) return;
-            CopySourceEndings(CountLineBreaks(segment, started, cancellationToken));
+            cancellationToken.ThrowIfCancellationRequested();
+            CheckBudget(started);
         }
-
-        void CopySourceEndings(int breaks)
-        {
-            if (endings is null) return;
-            var available = Math.Min(breaks, Math.Max(0, originalEndings!.Count - endingIndex));
-            if (available > 0) endings.AddRange(originalEndings.GetRange(endingIndex, available));
-            for (var index = available; index < breaks; index++) endings.Add(LineEndingKind.Lf);
-            endingIndex += breaks;
-        }
-    }
-
-    private static int CountLineBreaks(ReadOnlySpan<char> text, long started, CancellationToken cancellationToken)
-    {
-        var count = 0;
-        for (var index = 0; index < text.Length; index++)
-        {
-            if ((index & 0x3FFF) == 0)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                CheckBudget(started);
-            }
-            if (text[index] == '\r')
-            {
-                if (index + 1 < text.Length && text[index + 1] == '\n') index++;
-                count++;
-            }
-            else if (text[index] == '\n') count++;
-        }
-        return count;
     }
 
     private static void CheckBudget(long started)
