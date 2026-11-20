@@ -220,7 +220,9 @@ internal sealed class LogDataReader
         var observedLength = Math.Min(_file.Length, endOffset);
         var requestedOffset = Math.Clamp(offset, 0, observedLength);
         var alignedOffset = requestedOffset < observedLength
-            ? AlignOffset(requestedOffset, observedLength)
+            ? scan?.IsExpectedOffset(requestedOffset) == true
+                ? requestedOffset
+                : AlignOffset(requestedOffset, observedLength)
             : requestedOffset;
         var readOffset = Math.Min(requestedOffset, alignedOffset);
         var readLength = (int)Math.Min((long)maxPageBytes + LookaheadBytes, observedLength - readOffset);
@@ -350,6 +352,8 @@ internal sealed class LogDataReader
         private int _length;
         private bool _reuseWindow;
         private bool _disposed;
+        private bool _hasExpectedOffset;
+        private long _expectedOffset;
         private readonly LogDataReader reader;
         private readonly int maxPageBytes;
 
@@ -366,6 +370,8 @@ internal sealed class LogDataReader
             ObjectDisposedException.ThrowIf(_disposed, this);
             var page = reader.ReadPage(offset, DefaultPageSize, DefaultFrameBytes, maxPageBytes,
                 cancellationToken, endOffset, _reuseWindow ? this : null);
+            _expectedOffset = page.NextOffset;
+            _hasExpectedOffset = true;
             // A page limited by bytes already used most of its window. Only retain
             // a window when the preceding page stopped at the row limit early.
             _reuseWindow = page.Rows.Count == DefaultPageSize
@@ -376,6 +382,8 @@ internal sealed class LogDataReader
             }
             return page;
         }
+
+        internal bool IsExpectedOffset(long offset) => _hasExpectedOffset && offset == _expectedOffset;
 
         internal ReadOnlySpan<byte> ReadWindow(SafeFileHandle handle, long offset, int length, long observedLength,
             CancellationToken cancellationToken)
