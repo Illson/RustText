@@ -175,10 +175,11 @@ public sealed class JsonTextTests
     public Task JsonDiagnosticMarkerTracksInvalidTokenAndClearsAfterCorrection() =>
         HeadlessTests.RunAsync(async profile =>
         {
-            const string invalidJson = "{\n  \"имя\": }\n";
-            var invalidOffset = invalidJson.IndexOf('}');
+            const string invalidJson = "{\n  \"имя\": [\n    1,\n    ]\n}\n";
+            const string intermediateJson = "{\n  \"устаревшее\": {\n  }\n}\n";
+            var invalidOffset = invalidJson.IndexOf(']');
             var path = Path.Combine(profile, "invalid.json");
-            await File.WriteAllTextAsync(path, invalidJson);
+            await File.WriteAllTextAsync(path, "{}\n");
             var window = new MainWindow([]);
             TextEditor? editor = null;
             window.Show();
@@ -190,6 +191,8 @@ public sealed class JsonTextTests
 
                 var tab = ((IDictionary)Read<object>(window, "_tabs")).Values.Cast<object>().Single();
                 editor = Read<TextEditor>(tab, "Editor");
+                editor.Document.Replace(0, editor.Document.TextLength, intermediateJson);
+                editor.Document.Replace(0, editor.Document.TextLength, invalidJson);
                 await HeadlessTests.WaitForAsync(() => Value(tab, "JsonError") is not null);
 
                 var marker = Assert.Single(editor.TextArea.TextView.BackgroundRenderers
@@ -198,13 +201,15 @@ public sealed class JsonTextTests
 
                 var view = editor.TextArea.TextView;
                 await HeadlessTests.WaitForAsync(() => view.GetService(typeof(FoldingManager)) is FoldingManager manager
-                    && manager.AllFoldings.Any());
-                var folding = Assert.Single(Assert.IsAssignableFrom<FoldingManager>(view.GetService(typeof(FoldingManager))).AllFoldings);
+                    && manager.AllFoldings.Count() == 2);
+                var foldings = Assert.IsAssignableFrom<FoldingManager>(view.GetService(typeof(FoldingManager)))
+                    .AllFoldings.ToArray();
+                var folding = Assert.Single(foldings, section => section.StartOffset == invalidJson.IndexOf('['));
                 folding.IsFolded = true;
                 var jump = Assert.Single(Read<Border>(tab, "JsonBanner").GetVisualDescendants().OfType<Button>(),
                     button => Equals(button.Content, "Перейти к ошибке"));
                 jump.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                Assert.False(folding.IsFolded);
+                Assert.All(foldings, section => Assert.False(section.IsFolded));
                 Assert.Equal(invalidOffset, editor.CaretOffset);
 
                 editor.Document.Insert(invalidOffset, "null");
