@@ -2364,6 +2364,44 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task EditorWrapKeepsLongRowsInTheViewportBesideMinimap() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "long-line.txt");
+        var line = new string('x', 512) + "-end";
+        await File.WriteAllTextAsync(path, line);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(editor.GetVisualParent()!.GetVisualChildren().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => scroll.Viewport.Width > 0
+                && view.VisualLinesValid && view.VisualLines.Count > 0);
+            Assert.True(editor.WordWrap);
+            Assert.True(scroll.Extent.Width <= scroll.Viewport.Width + 1);
+            Assert.InRange(scroll.Offset.X, 0, 1);
+
+            bool LineWraps() => view.GetVisualPosition(new TextViewPosition(1, line.Length + 1), VisualYPosition.LineMiddle).Y
+                > view.GetVisualPosition(new TextViewPosition(1, 1), VisualYPosition.LineMiddle).Y;
+            Assert.True(LineWraps());
+            Assert.True(editor.Bounds.Right <= minimap.Bounds.Left);
+
+            Invoke(window, "ToggleWrap");
+            await HeadlessTests.WaitForAsync(() => scroll.Extent.Width > scroll.Viewport.Width && !LineWraps());
+            var horizontalMaximum = scroll.Extent.Width - scroll.Viewport.Width;
+            scroll.Offset = new Vector(horizontalMaximum, scroll.Offset.Y);
+            Assert.Equal(horizontalMaximum, scroll.Offset.X, precision: 1);
+            Assert.True(editor.Bounds.Right <= minimap.Bounds.Left);
+
+            Invoke(window, "ToggleWrap");
+            await HeadlessTests.WaitForAsync(() => scroll.Extent.Width <= scroll.Viewport.Width + 1 && LineWraps());
+            Assert.InRange(scroll.Offset.X, 0, 1);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task TextMinimapClickDragAndWheelKeepCaretAndSelection() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "scroll.txt");
@@ -2429,9 +2467,10 @@ public sealed class WorkspaceTests
         const string invalid = """{"kind":"имя🚀","value": }""";
         var path = Path.Combine(profile, name);
         await File.WriteAllTextAsync(path, first + "\r\n" + valid + "\r\n");
-        var window = await OpenWorkspaceAsync(path);
+        var window = await OpenWorkspaceAsync();
         try
         {
+            await CallAsync(window, "OpenPathAsync", path, false, null);
             var tab = ActiveTab(window);
             var editor = Read<TextEditor>(tab, "Editor");
             await HeadlessTests.WaitForAsync(() => Property(tab, "JsonCancellation") is null);
@@ -2614,9 +2653,10 @@ public sealed class WorkspaceTests
     {
         var path = Path.Combine(profile, "editing.log");
         await File.WriteAllTextAsync(path, "INFO on disk\nWARN disk warning\n");
-        var window = await OpenWorkspaceAsync(path);
+        var window = await OpenWorkspaceAsync();
         try
         {
+            await CallAsync(window, "OpenPathAsync", path, false, null);
             var tab = ActiveTab(window);
             var editor = Read<TextEditor>(tab, "Editor");
             Assert.True(Assert.Single(editor.TextArea.TextView.LineTransformers.OfType<LogLevelColorizer>()).Enabled);

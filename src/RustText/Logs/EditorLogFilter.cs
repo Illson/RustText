@@ -149,7 +149,7 @@ internal sealed class EditorLogFilter : IDisposable
             FontFamily = _source.FontFamily, FontSize = _source.FontSize,
             Background = FocusTheme.Editor, Foreground = FocusTheme.Text, LineNumbersForeground = FocusTheme.Gutter,
             LineNumbersMargin = new Thickness(8, 0, 12, 0), WordWrap = _source.WordWrap, ShowLineNumbers = true,
-            IsReadOnly = true, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            IsReadOnly = true, HorizontalScrollBarVisibility = _source.HorizontalScrollBarVisibility,
             VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
         };
         AutomationProperties.SetName(projection, "Строки лога с выбранными уровнями");

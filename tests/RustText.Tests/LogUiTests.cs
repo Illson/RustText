@@ -3,6 +3,7 @@ using System.Text;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Input;
@@ -465,6 +466,39 @@ public sealed class LogUiTests
             await HeadlessTests.WaitForAsync(() => results.Children.Count == 32);
         }
         finally { await CloseMainWindowAsync(window); }
+    });
+
+    [Fact]
+    public Task WrappingKeepsLongLogRowsInTheViewportBesideMinimap() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "long-line.log");
+        var line = new string('x', 512) + "-end";
+        await File.WriteAllTextAsync(path, line);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(WordWrap: true, AutoRefresh: false));
+        try
+        {
+            var text = (TextBox)Field(log, "_logText");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            await HeadlessTests.WaitForAsync(() => text.Text == line
+                && Field(log, "_logScrollViewer") is ScrollViewer { Viewport.Width: > 0 });
+            var scroll = (ScrollViewer)Field(log, "_logScrollViewer");
+            var presenter = Assert.Single(text.GetVisualDescendants().OfType<TextPresenter>());
+            Assert.True(presenter.TextLayout.TextLines.Count > 1);
+            Assert.True(scroll.Extent.Width <= scroll.Viewport.Width + 1);
+            Assert.True(text.Bounds.Right <= minimap.Bounds.Left);
+
+            log.WordWrap = false;
+            await HeadlessTests.WaitForAsync(() => scroll.Extent.Width > scroll.Viewport.Width);
+            var horizontalMaximum = scroll.Extent.Width - scroll.Viewport.Width;
+            scroll.Offset = new Vector(horizontalMaximum, 0);
+            Assert.Equal(horizontalMaximum, scroll.Offset.X, precision: 1);
+            Assert.True(text.Bounds.Right <= minimap.Bounds.Left);
+
+            log.WordWrap = true;
+            await HeadlessTests.WaitForAsync(() => scroll.Extent.Width <= scroll.Viewport.Width + 1);
+            Assert.Equal(0, scroll.Offset.X);
+        }
+        finally { await CloseLogAsync(window, log); }
     });
 
     [Fact]

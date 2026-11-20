@@ -3,6 +3,7 @@ using System.Text;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
@@ -73,7 +74,7 @@ public partial class MainWindow
         await OpenPathsAsync(paths, asLog, encoding);
     }
 
-    private async Task OpenPathsAsync(IEnumerable<string> paths, bool asLog = false, TextEncodingKind? encoding = null)
+    private async Task OpenPathsAsync(IEnumerable<string> paths, bool? asLog = null, TextEncodingKind? encoding = null)
     {
         var pending = new List<OpenRequest>();
         WorkTab? last = null;
@@ -81,7 +82,8 @@ public partial class MainWindow
         {
             try
             {
-                if (await PrepareOpenAsync(path, asLog, encoding) is not { } request) continue;
+                var preferLog = asLog is null && LogLevels.IsLogPath(path);
+                if (await PrepareOpenAsync(path, asLog == true, encoding, preferLog: preferLog) is not { } request) continue;
                 last = request.Tab;
                 if (request.IsNew || encoding is not null) pending.Add(request);
             }
@@ -105,7 +107,8 @@ public partial class MainWindow
         return request.Tab;
     }
 
-    private async Task<OpenRequest?> PrepareOpenAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages = false)
+    private async Task<OpenRequest?> PrepareOpenAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages = false,
+        bool preferLog = false)
     {
         var fullPath = Path.GetFullPath(path);
         var file = new FileInfo(fullPath);
@@ -126,6 +129,10 @@ public partial class MainWindow
                 var useLog = Settings.OpenLargeFilesAsLog ?? await ChooseLargeFileModeAsync(file);
                 if (useLog is null || _closed || _closing) return null;
                 mode = useLog == true ? FileOpenMode.Log : FileOpenMode.PagedEditor;
+            }
+            else if (preferLog)
+            {
+                mode = FileOpenMode.Log;
             }
             else if (file.Length > DocumentFiles.MaximumDocumentBytes)
             {
@@ -287,8 +294,8 @@ public partial class MainWindow
             LineNumbersMargin = new Thickness(8, 0, 12, 0),
             WordWrap = _wordWrap,
             ShowLineNumbers = true,
-            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
+            HorizontalScrollBarVisibility = _wordWrap ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
         GroupedLineNumberMargin.ReplaceExisting(editor);
         EditorCaret.Attach(editor.TextArea);

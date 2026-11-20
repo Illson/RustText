@@ -225,7 +225,6 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         _levelBands = new LogLevelBands(_logText) { IsHitTestVisible = false, ClipToBounds = true };
         Content = BuildLayout();
-        ScrollViewer.SetHorizontalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
         ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
         _fileLabel.Text = draftName ?? System.IO.Path.GetFileName(_path);
         if (!_isDraft) ToolTip.SetTip(_fileLabel, _path);
@@ -262,6 +261,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             _wordWrap = value;
             _logText.TextWrapping = _filteredLogText.TextWrapping = value ? TextWrapping.Wrap : TextWrapping.NoWrap;
+            var horizontalScroll = value ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
+            ScrollViewer.SetHorizontalScrollBarVisibility(_logText, horizontalScroll);
+            ScrollViewer.SetHorizontalScrollBarVisibility(_filteredLogText, horizontalScroll);
             _wrapButton.Content = value ? "Перенос: вкл." : "Перенос: выкл.";
         }
     }

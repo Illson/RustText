@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using Avalonia;
@@ -129,10 +130,14 @@ public sealed class LogLevelTests
     {
         var path = Path.Combine(profile, "editable-bands.log");
         await File.WriteAllTextAsync(path, "plain line\nINFO ok\n[ERR] disk full");
-        var window = new MainWindow([path]);
+        var window = new MainWindow([]);
         window.Show();
         try
         {
+            await HeadlessTests.WaitForAsync(() => (bool)typeof(MainWindow)
+                .GetField("_restoreFinished", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!);
+            await (Task)typeof(MainWindow).GetMethod("OpenPathsAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(window, [new[] { path }, false, null])!;
             await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<AvaloniaEdit.TextEditor>()
                 .Any(editor => editor.TextArea.TextView is { VisualLinesValid: true } view && view.VisualLines.Count >= 3));
             var view = window.GetVisualDescendants().OfType<AvaloniaEdit.TextEditor>().Single().TextArea.TextView;

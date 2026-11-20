@@ -1,6 +1,7 @@
 using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Layout;
@@ -207,10 +208,12 @@ public partial class MainWindow
             if (tab.Editor is { } editor)
             {
                 editor.WordWrap = _wordWrap;
+                editor.HorizontalScrollBarVisibility = _wordWrap ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
                 editor.FontSize = _fontSize;
                 if (tab.EditorLogFilter is { IsFiltering: true } filter)
                 {
                     filter.VisibleEditor.WordWrap = _wordWrap;
+                    filter.VisibleEditor.HorizontalScrollBarVisibility = editor.HorizontalScrollBarVisibility;
                     filter.VisibleEditor.FontSize = _fontSize;
                 }
             }

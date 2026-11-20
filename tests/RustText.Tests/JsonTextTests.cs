@@ -58,12 +58,13 @@ public sealed class JsonTextTests
     {
         var path = Path.Combine(profile, "demo.log");
         await File.WriteAllTextAsync(path, "[INFO] request-42 failed: { \"detail\": \"bad\" }\r\n[404] GET /health");
-        var window = new MainWindow([path]);
+        var window = new MainWindow([]);
         window.Show();
         try
         {
-            await HeadlessTests.WaitForAsync(() => Read<bool>(window, "_restoreFinished")
-                && ((IDictionary)Read<object>(window, "_tabs")).Count == 1);
+            await HeadlessTests.WaitForAsync(() => Read<bool>(window, "_restoreFinished"));
+            var open = typeof(MainWindow).GetMethod("OpenPathAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            await (Task)open.Invoke(window, [path, false, null])!;
             var tab = ((IDictionary)Read<object>(window, "_tabs")).Values.Cast<object>().Single();
             await Task.Delay(400);
             Assert.Null(Value(tab, "JsonCancellation"));
