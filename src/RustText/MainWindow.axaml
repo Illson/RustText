@@ -14,15 +14,19 @@
                 BorderThickness="0,0,0,1" MinHeight="36">
             <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="8,0,0,0">
                 <StackPanel Orientation="Horizontal" Spacing="3" VerticalAlignment="Center">
-                    <Button x:Name="WorkspaceMenuButton" Classes="focus-quiet" Padding="2" IsEnabled="False"
-                            AutomationProperties.Name="Рабочие пространства">
-                        <Border x:Name="WorkspaceBadge" Width="27" Height="27" CornerRadius="4" BorderThickness="1.5"
-                                Background="{x:Static local:FocusTheme.AppIconBackground}" BorderBrush="{x:Static local:FocusTheme.AppIconBorder}">
-                            <TextBlock x:Name="WorkspaceBadgeSymbol" Text="›" FontSize="16" FontWeight="SemiBold"
-                                       Foreground="{x:Static local:FocusTheme.Text}"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                    </Button>
+                    <Menu Classes="focus-menu" VerticalAlignment="Center">
+                        <MenuItem x:Name="WorkspaceMenuButton" Padding="2" IsEnabled="False"
+                                  AutomationProperties.Name="Рабочие пространства">
+                            <MenuItem.Header>
+                                <Border x:Name="WorkspaceBadge" Width="27" Height="27" CornerRadius="4" BorderThickness="1.5"
+                                        Background="{x:Static local:FocusTheme.AppIconBackground}" BorderBrush="{x:Static local:FocusTheme.AppIconBorder}">
+                                    <TextBlock x:Name="WorkspaceBadgeSymbol" Text="›" FontSize="16" FontWeight="SemiBold"
+                                               Foreground="{x:Static local:FocusTheme.Text}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                            </MenuItem.Header>
+                        </MenuItem>
+                    </Menu>
                     <Button Classes="focus-quiet" Foreground="{x:Static local:FocusTheme.Text}" Padding="5,3"
                             AutomationProperties.Name="Главный экран RustText" Click="HomeClicked">
                         <TextBlock Text="RustText" FontWeight="SemiBold" />

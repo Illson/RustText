@@ -21,14 +21,6 @@ public partial class MainWindow
     private WorkspaceEntry? CurrentWorkspaceEntry() => _startEmpty ? null
         : _workspace.Catalog?.Workspaces.FirstOrDefault(workspace => workspace.Id == _workspaceId);
 
-    private void InitializeWorkspaceMenu()
-    {
-        var flyout = new MenuFlyout { Placement = PlacementMode.BottomEdgeAlignedLeft };
-        flyout.Opening += (_, _) => PopulateWorkspaceMenu(flyout);
-        WorkspaceMenuButton.Flyout = flyout;
-        RefreshWorkspaceButton();
-    }
-
     private void RefreshWorkspaceButton()
     {
         var workspace = CurrentWorkspaceEntry();
@@ -40,12 +32,13 @@ public partial class MainWindow
         var label = $"Рабочие пространства · {name}";
         AutomationProperties.SetName(WorkspaceMenuButton, label);
         ToolTip.SetTip(WorkspaceMenuButton, label);
+        if (_restoreFinished) PopulateWorkspaceMenu();
     }
 
-    private void PopulateWorkspaceMenu(MenuFlyout flyout)
+    private void PopulateWorkspaceMenu()
     {
-        RefreshWorkspaceButton();
-        flyout.Items.Clear();
+        var items = WorkspaceMenuButton.Items;
+        items.Clear();
         foreach (var workspace in _workspace.Catalog?.Workspaces ?? [])
         {
             var current = !_startEmpty && workspace.Id == _workspaceId;
@@ -57,18 +50,18 @@ public partial class MainWindow
             };
             item.Icon = CreateWorkspaceBadge(workspace.Symbol ?? DefaultWorkspaceSymbol, workspace.Color);
             item.IsEnabled = !current;
-            flyout.Items.Add(item);
+            items.Add(item);
         }
         if (_windowId == WorkspaceCatalogStore.PrimaryWindowId)
         {
             var empty = Command(_startEmpty ? "Пустое окно · открыто" : "Пустое окно", () => Run(EnterEmptyStartupAsync));
             empty.Icon = CreateWorkspaceBadge(EmptyWorkspaceSymbol, null);
             empty.IsEnabled = !_startEmpty;
-            flyout.Items.Add(empty);
+            items.Add(empty);
         }
-        flyout.Items.Add(new Separator());
-        flyout.Items.Add(Command("Новая рабочая область…", () => Run(ShowCreateWorkspaceAsync)));
-        flyout.Items.Add(Command("Управление…", () => Run(ShowWorkspacesAsync)));
+        items.Add(new Separator());
+        items.Add(Command("Новая рабочая область…", () => Run(ShowCreateWorkspaceAsync)));
+        items.Add(Command("Управление…", () => Run(ShowWorkspacesAsync)));
     }
 
     private async Task ShowCreateWorkspaceAsync()

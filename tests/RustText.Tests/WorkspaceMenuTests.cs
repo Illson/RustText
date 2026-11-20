@@ -32,13 +32,13 @@ public sealed class WorkspaceMenuTests
             Assert.Contains(menu.Items.OfType<MenuItem>(), item => Header(item) == "Существующее пространство");
             Assert.Contains(menu.Items.OfType<MenuItem>(), item => Header(item) == "Пустое окно");
             Assert.Contains(menu.Items.OfType<MenuItem>(), item => Header(item) == "Управление…");
-            menu.Hide();
+            menu.IsSubMenuOpen = false;
 
             const string originalDraft = "Документ в исходном пространстве";
             typeof(MainWindow).GetMethod("NewTab", Private)!.Invoke(window, [originalDraft]);
             menu = await OpenMenuAsync(window);
             var newWorkspace = menu.Items.OfType<MenuItem>().Single(item => Header(item) == "Новая рабочая область…");
-            menu.Hide();
+            menu.IsSubMenuOpen = false;
             newWorkspace.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
             await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
             var dialog = Assert.Single(window.OwnedWindows);
@@ -66,7 +66,7 @@ public sealed class WorkspaceMenuTests
             AssertBadge(window);
             menu = await OpenMenuAsync(window);
             var defaultWorkspace = menu.Items.OfType<MenuItem>().Single(item => Header(item) == "По умолчанию");
-            menu.Hide();
+            menu.IsSubMenuOpen = false;
             defaultWorkspace.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
             await HeadlessTests.WaitForAsync(() => ActiveEditor(window)?.Text == originalDraft);
         }
@@ -77,20 +77,19 @@ public sealed class WorkspaceMenuTests
     {
         var window = new MainWindow();
         window.Show();
-        await HeadlessTests.WaitForAsync(() => window.FindControl<Button>("WorkspaceMenuButton")!.IsEnabled);
+        await HeadlessTests.WaitForAsync(() => window.FindControl<MenuItem>("WorkspaceMenuButton")!.IsEnabled);
         return window;
     }
 
-    private static async Task<MenuFlyout> OpenMenuAsync(MainWindow window)
+    private static async Task<MenuItem> OpenMenuAsync(MainWindow window)
     {
-        var button = window.FindControl<Button>("WorkspaceMenuButton")!;
-        var flyout = Assert.IsType<MenuFlyout>(button.Flyout);
+        var menu = window.FindControl<MenuItem>("WorkspaceMenuButton")!;
         window.UpdateLayout();
-        var point = button.TranslatePoint(new Point(button.Bounds.Width / 2, button.Bounds.Height / 2), window)!.Value;
+        var point = menu.TranslatePoint(new Point(menu.Bounds.Width / 2, menu.Bounds.Height / 2), window)!.Value;
         window.MouseDown(point, MouseButton.Left);
         window.MouseUp(point, MouseButton.Left);
-        await HeadlessTests.WaitForAsync(() => flyout.IsOpen);
-        return flyout;
+        await HeadlessTests.WaitForAsync(() => menu.IsSubMenuOpen);
+        return menu;
     }
 
     private static string Header(MenuItem item) => item.Header is TextBlock text ? text.Text! : (string)item.Header!;
@@ -105,7 +104,7 @@ public sealed class WorkspaceMenuTests
         Assert.Equal("★", BadgeSymbol(window));
         var outline = Assert.IsAssignableFrom<ISolidColorBrush>(window.FindControl<Border>("WorkspaceBadge")!.BorderBrush);
         Assert.Equal(Color.Parse("#BAA0F3"), outline.Color);
-        Assert.Contains("Логи сборки", AutomationProperties.GetName(window.FindControl<Button>("WorkspaceMenuButton")!));
+        Assert.Contains("Логи сборки", AutomationProperties.GetName(window.FindControl<MenuItem>("WorkspaceMenuButton")!));
     }
 
     private static TextEditor? ActiveEditor(MainWindow window)

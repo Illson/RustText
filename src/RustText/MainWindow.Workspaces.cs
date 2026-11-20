@@ -178,6 +178,8 @@ public partial class MainWindow
                 var restore = FocusButton(Button($"Восстановить «{item.Workspace.Name}»", () => Run(async () =>
                 {
                     _workspace.Catalog = await _workspace.CatalogStore.RestoreDeletedAsync(item.Workspace.Id, _lifetime.Token);
+                    foreach (var window in _workspace.Windows)
+                        window.RefreshWorkspaceButton();
                     dialog.Close();
                     await ShowWorkspacesAsync();
                 })));
@@ -481,6 +483,8 @@ public partial class MainWindow
                     Settings.WorkspaceHistoryLimit, _lifetime.Token);
                 ForgetCachedWorkspaceViews(workspace.Id);
                 _workspace.Catalog = deletedCatalog;
+                foreach (var window in _workspace.Windows)
+                    window.RefreshWorkspaceButton();
             }
             finally { _workspace.SaveGate.Release(); }
         }

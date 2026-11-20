@@ -92,7 +92,6 @@ public partial class MainWindow : Window
         ToolTip.SetTip(CaptionClose, "Закрыть окно");
         _root = _active = MakeGroup();
         BuildMenus();
-        InitializeWorkspaceMenu();
         BuildSearchPanel();
         _checkpoint = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _checkpoint.Tick += (_, _) =>
