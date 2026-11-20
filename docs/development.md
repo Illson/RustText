@@ -17,6 +17,31 @@ git status --short --branch
 
 После ошибки команды выясни причину до следующего шага. При занятом имени подключись к worktree нужной задачи или выбери новое имя. Если базовую ветку надо обновить в уже опубликованной задаче, слей свежую `origin/main` в рабочую ветку и повтори проверки. При конфликте разберись с обеими версиями и сохрани смысл изменений. [Git worktree](https://git-scm.com/docs/git-worktree) · [Worktrees в Codex](https://learn.chatgpt.com/docs/environments/git-worktrees)
 
+## Доступ к GitHub в Windows
+
+Проверяй доступ из того же окружения и профиля Windows, где будешь выполнять задачу. Для `fetch` и `push` используй настроенный Git Credential Manager. Имя из `git config user.name` относится к авторству коммитов. Вход на GitHub проверяй отдельно.
+
+~~~powershell
+git config --show-origin --get-all credential.helper
+git credential-manager github list
+git ls-remote --exit-code origin refs/heads/main
+~~~
+
+`credential.helper=manager` указывает на Git Credential Manager. Команда `github list` показывает сохранённые в Windows аккаунты GitHub. `ls-remote` проверяет доступность репозитория. После обычного `push` сверяй опубликованный SHA через `ls-remote`.
+
+Для PR, issues и проверок GitHub Actions сначала используй подключение GitHub в Codex. Сверь учётную запись, репозиторий `Illson/RustText` и доступность нужной операции записи. Для операций API через локальный GitHub CLI найди `gh` в `PATH` или в установленном GitHub CLI. На Windows его конфигурация обычно находится в `%APPDATA%\GitHub CLI`. Переменные `GH_CONFIG_DIR` и `XDG_CONFIG_HOME` могут задавать другой каталог. Переданный окружением `GH_TOKEN` или `GITHUB_TOKEN` имеет приоритет над сохранённым входом CLI.
+
+~~~powershell
+Get-Command gh -ErrorAction SilentlyContinue
+gh auth status --hostname github.com
+gh api --hostname github.com user --jq .login
+gh api --hostname github.com repos/Illson/RustText --jq .permissions.push
+~~~
+
+Проверяй API-вход отдельно от Git. Для публикации выпуска нужен доступ на запись в `Illson/RustText`. Проверь, что подключение умеет создавать выпуск и загружать файлы, или используй авторизованный GitHub CLI. Проверки доступа должны выводить имя аккаунта и статус. Ключи оставляй в настроенном хранилище или окружении CLI.
+
+Открывай браузер только по явной просьбе владельца. Если какая-то операция API недоступна, укажи конкретный шаг и продолжи доступную работу через Git и подключение GitHub.
+
 ## Связь PR с issues
 
 В начале работы просмотри [открытые issues](https://github.com/Illson/RustText/issues?q=is%3Aissue%20is%3Aopen) и проверь [открытые PR](https://github.com/Illson/RustText/pulls?q=is%3Apr%20is%3Aopen) по теме. Если issue уже есть, прочитай её описание и обсуждение, сверь критерии приёмки и учти изменения, которые уже предлагаются. Если от трактовки критерия зависит закрытие issue, согласуй его с владельцем проекта.
@@ -67,7 +92,7 @@ if ($LASTEXITCODE -ne 0 -or ($published -split '\s+')[0] -ne $head) {
 
 При отказе non-fast-forward посмотри, кто и что добавил в ветку. Согласуй чужие изменения перед обновлением своей работы. Прямой push в `main` и перезапись опубликованной истории исключены из обычного процесса. [Git push](https://git-scm.com/docs/git-push)
 
-3. После подтверждения SHA открой PR из рабочей ветки в `main` или обнови существующий PR этой ветки. Для незавершённого изменения используй черновик. Заполни [шаблон PR](../.github/pull_request_template.md). Для GitHub CLI сохрани готовое описание в файл. Например, для issue #17 выполни `gh pr create --base main --head $branch --title "Исправить проверку JSON (#17)" --body-file <файл>`. Без GitHub CLI используй подключение к GitHub или страницу сравнения веток. После публикации сверь номера в заголовке с issues, которые решает PR. [GitHub CLI](https://cli.github.com/manual/gh_pr_create)
+3. После подтверждения SHA открой PR из рабочей ветки в `main` или обнови существующий PR этой ветки. Для незавершённого изменения используй черновик. Заполни [шаблон PR](../.github/pull_request_template.md). Для GitHub CLI сохрани готовое описание в файл. Например, для issue #17 выполни `gh pr create --base main --head $branch --title "Исправить проверку JSON (#17)" --body-file <файл>`. Без GitHub CLI используй подключение GitHub в Codex. После публикации сверь номера в заголовке с issues, которые решает PR. [GitHub CLI](https://cli.github.com/manual/gh_pr_create)
 4. Дождись проверок через `gh pr checks --watch` или [GitHub Actions](https://github.com/Illson/RustText/actions). Проверь, что результаты относятся к текущему коммиту PR. Ошибку разбери по логу и исправь в этой же ветке. При недоступности GitHub или внешнего окружения укажи конкретный блокер. [Проверки PR](https://cli.github.com/manual/gh_pr_checks)
 5. Оставь worktree доступным, пока задача открыта или нужна для проверки. Когда он больше не нужен, проверь чистоту дерева и сохранность коммитов. Для worktree в Codex используй архивирование, для обычного Git — `git worktree remove <путь>` из другого checkout.
 
