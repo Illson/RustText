@@ -330,7 +330,7 @@ public sealed class LogUiTests
             catch (OperationCanceledException)
             {
                 var labelCount = gutter.Text?.Split(Environment.NewLine).Length;
-                Assert.Fail($"Text scroll {scroll.Offset.Y}/{scroll.ScrollBarMaximum.Y}, gutter scroll {gutterScroll.Offset.Y}/{gutterScroll.ScrollBarMaximum.Y}, labels {labelCount}.");
+                Assert.Fail($"Text scroll {scroll.Offset.Y}/{scroll.ScrollBarMaximum.Y}, gutter scroll {gutterScroll.Offset.Y}/{gutterScroll.ScrollBarMaximum.Y}, gutter extent {gutterScroll.Extent.Height}, gutter viewport {gutterScroll.Viewport.Height}, labels {labelCount}.");
             }
             scroll.Offset = default;
             window.UpdateLayout();

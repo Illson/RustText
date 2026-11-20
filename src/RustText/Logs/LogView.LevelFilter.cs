@@ -259,8 +259,12 @@ internal sealed partial class LogView
 
     private void SyncFilteredGutterScroll()
     {
-        if (_levelFilterViewport?.IsVisible == true && _filteredLogScrollViewer is { } scrollViewer)
+        if (_levelFilterViewport?.IsVisible == true && _filteredLogScrollViewer is { Viewport.Height: > 0 } scrollViewer)
+        {
+            _lineGutterScrollViewer.Height = scrollViewer.Viewport.Height;
+            _lineGutterText.MinHeight = scrollViewer.Extent.Height;
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
+        }
     }
 
     private void UpdateFilteredMinimap(FilterPage page)
@@ -313,6 +317,7 @@ internal sealed partial class LogView
         _levelBands.IsVisible = false;
         _verticalLogScrollbar.IsVisible = false;
         _filterStatus.IsVisible = true;
+        _lineGutterScrollViewer.VerticalAlignment = VerticalAlignment.Top;
         ((Grid)_contentViewport!.Children[0]).Children.Add(_levelFilterViewport);
         _levelFilterViewport.IsVisible = true;
     }
@@ -328,6 +333,9 @@ internal sealed partial class LogView
         _filteredPage = null;
         _filteredSourceLineNumbers = [];
         AttachFilteredScrollViewer(null);
+        _lineGutterScrollViewer.Height = double.NaN;
+        _lineGutterScrollViewer.VerticalAlignment = VerticalAlignment.Stretch;
+        _lineGutterText.MinHeight = 0;
         _logText.IsVisible = _pageEdit is null;
         if (_pageEditor is not null) _pageEditor.IsVisible = _pageEdit is not null;
         _lineGutterScrollViewer.IsVisible = _pageEdit is null;
