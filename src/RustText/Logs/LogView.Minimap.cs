@@ -9,6 +9,7 @@ internal sealed partial class LogView
 {
     private void UpdateMinimapViewport()
     {
+        if (_levelFilterViewport?.IsVisible == true) return;
         if (_page is not { } page) return;
         var range = Math.Max(1, page.FileLength - _hiddenOffset);
         var pageHeight = _logScrollViewer is { Extent.Height: > 0 } scroll ? scroll.Extent.Height : 1;

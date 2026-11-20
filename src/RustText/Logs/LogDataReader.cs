@@ -344,9 +344,12 @@ internal sealed class LogDataReader
     }
 
     public long AlignToNextLine(long offset, CancellationToken cancellationToken = default)
+        => AlignToNextLine(offset, _file.Length, cancellationToken);
+
+    public long AlignToNextLine(long offset, long endOffset, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var length = _file.Length;
+        var length = Math.Clamp(endOffset, 0, _file.Length);
         if (length == 0)
         {
             return 0;

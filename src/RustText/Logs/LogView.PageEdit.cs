@@ -177,9 +177,10 @@ internal sealed partial class LogView
         }
         _pageEdit = edit;
         _pageLineNumbers!.FirstLineNumber = _displaySourceLineNumbers.FirstOrDefault();
-        _lineGutterScrollViewer.IsVisible = false;
+        var filtering = _levelFilterViewport?.IsVisible == true;
+        _lineGutterScrollViewer.IsVisible = filtering;
         _logText.IsVisible = false;
-        _pageEditor.IsVisible = true;
+        _pageEditor.IsVisible = !filtering;
         _pageEditor.IsReadOnly = false;
         SetPageText(edit.Original, 0);
     }
@@ -402,7 +403,7 @@ internal sealed partial class LogView
             editor.IsVisible = false;
             editor.Document = new TextDocument();
         }
-        _logText.IsVisible = true;
+        _logText.IsVisible = _levelFilterViewport?.IsVisible != true;
         _lineGutterScrollViewer.IsVisible = true;
     }
 
