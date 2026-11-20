@@ -11,6 +11,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Document;
 using AvaloniaEdit.Highlighting;
@@ -302,7 +303,7 @@ public partial class MainWindow
             WordWrap = _wordWrap,
             ShowLineNumbers = true,
             HorizontalScrollBarVisibility = _wordWrap ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden
         };
         GroupedLineNumberMargin.ReplaceExisting(editor);
         EditorCaret.Attach(editor.TextArea);
@@ -364,9 +365,24 @@ public partial class MainWindow
         Grid.SetRow(editor, 2);
         grid.Children.Add(editor);
         var minimap = new DocumentMinimap(editor);
-        Grid.SetRow(minimap, 2);
-        Grid.SetColumn(minimap, 1);
-        grid.Children.Add(minimap);
+        var minimapDock = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        minimapDock.Children.Add(minimap);
+        var verticalScrollBar = new ViewportScrollBar();
+        Grid.SetColumn(verticalScrollBar, 1);
+        minimapDock.Children.Add(verticalScrollBar);
+        void AttachViewportScrollBar()
+        {
+            verticalScrollBar.SetOwner(editor.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault());
+        }
+        EventHandler<TemplateAppliedEventArgs> templateApplied = (_, _) => AttachViewportScrollBar();
+        EventHandler<VisualTreeAttachmentEventArgs> attached = (_, _) => AttachViewportScrollBar();
+        EventHandler<VisualTreeAttachmentEventArgs> detached = (_, _) => verticalScrollBar.SetOwner(null);
+        editor.TemplateApplied += templateApplied;
+        editor.AttachedToVisualTree += attached;
+        editor.DetachedFromVisualTree += detached;
+        Grid.SetRow(minimapDock, 2);
+        Grid.SetColumn(minimapDock, 1);
+        grid.Children.Add(minimapDock);
         tab.Item.Content = grid;
         System.ComponentModel.PropertyChangedEventHandler undoHandler = (_, e) =>
         {
@@ -474,9 +490,14 @@ public partial class MainWindow
             () => editor.TextArea.CommandBindings.Remove(pasteBinding),
             () => editor.TextArea.RemoveHandler(KeyDownEvent, PasteKeyDown),
             () => editor.TextArea.RemoveHandler(KeyDownEvent, CutLineKeyDown),
+            () => editor.TemplateApplied -= templateApplied,
+            () => editor.AttachedToVisualTree -= attached,
+            () => editor.DetachedFromVisualTree -= detached,
+            () => verticalScrollBar.SetOwner(null),
             multiCaret.Dispose
         ];
         tab.Minimap = minimap;
+        tab.MinimapDock = minimapDock;
         WatchEditorFile(tab);
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
@@ -581,7 +602,7 @@ public partial class MainWindow
     private void ShowEditorLevelFilter(WorkTab tab)
     {
         if (tab.Editor is not { Parent: Grid grid } editor || tab.EditorLogFilter is not null) return;
-        var filter = new EditorLogFilter(editor, tab.Minimap, () => CloseEditorLevelFilter(tab));
+        var filter = new EditorLogFilter(editor, tab.MinimapDock, () => CloseEditorLevelFilter(tab));
         tab.EditorLogFilter = filter;
         Grid.SetRow(filter.PanelControl, 1);
         Grid.SetColumnSpan(filter.PanelControl, 2);
@@ -896,6 +917,7 @@ public partial class MainWindow
         tab.Highlights = null;
         tab.Minimap?.Dispose();
         tab.Minimap = null;
+        tab.MinimapDock = null;
         var document = editor.Document;
         editor.Document = new TextDocument();
         tab.Editor = null;
@@ -1514,6 +1536,7 @@ public partial class MainWindow
         public DateTimeOffset LastWorked { get; set; } = DateTimeOffset.Now;
         public SearchHighlights? Highlights { get; set; }
         public DocumentMinimap? Minimap { get; set; }
+        public Control? MinimapDock { get; set; }
         public List<Action> EditorSubscriptions { get; set; } = [];
         public JsonProblem? JsonError { get; set; }
         public Border? JsonBanner { get; set; }

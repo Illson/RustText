@@ -137,6 +137,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private ScrollViewer? _logScrollViewer;
     private readonly TextBlock _indexLabel = new();
     private readonly LogMinimap _minimap = new() { Width = 54 };
+    private readonly ViewportScrollBar _verticalLogScrollbar = new();
     private Grid? _contentViewport;
     private Grid? _levelFilterViewport;
     private readonly StackPanel _searchPanel = new()
@@ -225,7 +226,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         _levelBands = new LogLevelBands(_logText) { IsHitTestVisible = false, ClipToBounds = true };
         Content = BuildLayout();
-        ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Hidden);
         _fileLabel.Text = draftName ?? System.IO.Path.GetFileName(_path);
         if (!_isDraft) ToolTip.SetTip(_fileLabel, _path);
         ConfigureInteractions();
@@ -494,7 +495,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         _trimCancellation?.Cancel();
         _refreshTimer.Stop();
         _logText.LayoutUpdated -= OnLogTextLayoutUpdated;
-        AttachLogScrollbar(null);
+        _verticalLogScrollbar.Scroll -= OnLogScrollbarScrolled;
+        _verticalLogScrollbar.SetOwner(null);
+        _draggedPage = null;
         _file.Dispose();
         _logText.Text = string.Empty;
         _lineGutterText.Text = string.Empty;
@@ -586,7 +589,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         var content = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"),
             ColumnSpacing = 0,
             Background = FocusTheme.Editor,
         };
@@ -610,6 +613,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         AutomationProperties.SetAutomationId(_minimap, "LogMinimap");
         Grid.SetColumn(_minimap, 2);
         content.Children.Add(_minimap);
+        AutomationProperties.SetName(_verticalLogScrollbar, "Прокрутка страницы лога");
+        Grid.SetColumn(_verticalLogScrollbar, 3);
+        content.Children.Add(_verticalLogScrollbar);
         _contentViewport = new Grid();
         _contentViewport.Children.Add(content);
         _levelFilterViewport = BuildLevelFilterViewport();
@@ -765,6 +771,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void ConfigureInteractions()
     {
+        _verticalLogScrollbar.Scroll += OnLogScrollbarScrolled;
         _startButton.Click += async (_, _) => await NavigateAsync(_hiddenOffset, true);
         _previousButton.Click += async (_, _) =>
         {
@@ -2048,15 +2055,12 @@ internal sealed partial class LogView : UserControl, IDisposable
     private void AttachLogScrollViewer()
     {
         var scrollViewer = _logText.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
-        if (!ReferenceEquals(scrollViewer, _logScrollViewer) || _verticalLogScrollbar is null)
-        {
-            AttachLogScrollbar(scrollViewer?.GetVisualDescendants().OfType<ScrollBar>()
-                .FirstOrDefault(bar => bar.Orientation == Orientation.Vertical));
-        }
         if (ReferenceEquals(scrollViewer, _logScrollViewer))
         {
             return;
         }
+        _verticalLogScrollbar.SetOwner(scrollViewer);
+        _draggedPage = null;
         if (_logScrollViewer is not null)
         {
             _logScrollViewer.ScrollChanged -= OnLogScrollChanged;

@@ -7,7 +7,6 @@ namespace RustText.Demo.Logs;
 
 internal sealed partial class LogView
 {
-    private ScrollBar? _verticalLogScrollbar;
     private LogPage? _draggedPage;
 
     private void OnLogPointerWheel(object? sender, PointerWheelEventArgs e)
@@ -21,15 +20,6 @@ internal sealed partial class LogView
             e.Handled = true;
             _ = ContinueScrollingAsync(page, forward);
         }
-    }
-
-    private void AttachLogScrollbar(ScrollBar? bar)
-    {
-        if (ReferenceEquals(_verticalLogScrollbar, bar)) return;
-        if (_verticalLogScrollbar is { } previous) previous.Scroll -= OnLogScrollbarScrolled;
-        _verticalLogScrollbar = bar;
-        _draggedPage = null;
-        if (bar is not null) bar.Scroll += OnLogScrollbarScrolled;
     }
 
     private void OnLogScrollbarScrolled(object? sender, ScrollEventArgs e)

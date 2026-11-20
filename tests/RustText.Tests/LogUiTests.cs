@@ -27,9 +27,10 @@ public sealed class LogUiTests
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public Task RegularScrollContinuesAtTheNextChunk(bool dragThumb) => HeadlessTests.RunAsync(async profile =>
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public Task RegularScrollContinuesAtTheNextChunk(bool dragThumb, bool wheelOnScrollbar) => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "continuous.log");
         await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(1, 240).Select(row => $"row-{row:D4}\n")));
@@ -38,13 +39,17 @@ public sealed class LogUiTests
         {
             window.Width = 760;
             window.Height = 470;
+            window.UpdateLayout();
             var text = (TextBox)Field(log, "_logText");
             await HeadlessTests.WaitForAsync(() => Field(log, "_logScrollViewer") is ScrollViewer scroll
                 && scroll.Viewport.Height > 0 && scroll.Extent.Height > scroll.Viewport.Height);
-            var pointer = text.TranslatePoint(new Point(100, 80), window)!.Value;
+            var bar = (ScrollBar)Field(log, "_verticalLogScrollbar");
+            await HeadlessTests.WaitForAsync(() => bar.Bounds.Width > 0 && bar.Bounds.Height > 0);
+            Point WheelPosition() => wheelOnScrollbar
+                ? bar.TranslatePoint(new Point(bar.Bounds.Width / 2, bar.Bounds.Height / 2), window)!.Value
+                : text.TranslatePoint(new Point(100, 80), window)!.Value;
             if (dragThumb)
             {
-                var bar = text.GetVisualDescendants().OfType<ScrollBar>().Single(item => item.Orientation == Orientation.Vertical);
                 var thumb = bar.GetVisualDescendants().OfType<Thumb>().Single();
                 await HeadlessTests.WaitForAsync(() => thumb.Bounds.Width > 0 && thumb.Bounds.Height > 0);
                 Point ThumbCenter() => thumb.TranslatePoint(new Point(thumb.Bounds.Width / 2, thumb.Bounds.Height / 2), window)!.Value;
@@ -61,7 +66,7 @@ public sealed class LogUiTests
             {
                 for (var i = 0; i < 60 && Page(log)?.StartOffset == 0; i++)
                 {
-                    window.MouseWheel(pointer, new Vector(0, -1));
+                    window.MouseWheel(WheelPosition(), new Vector(0, -1));
                     await Task.Delay(12);
                 }
             }
@@ -70,7 +75,7 @@ public sealed class LogUiTests
             Assert.Equal("Строки 81–160", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
             var viewer = (ScrollViewer)Field(log, "_logScrollViewer");
             await HeadlessTests.WaitForAsync(() => viewer.Offset.Y <= 1);
-            window.MouseWheel(pointer, new Vector(0, 1));
+            window.MouseWheel(WheelPosition(), new Vector(0, 1));
             await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 0
                 && viewer.Offset.Y >= viewer.Extent.Height - viewer.Viewport.Height - 1);
             Assert.EndsWith("row-0080", text.Text);
@@ -157,6 +162,7 @@ public sealed class LogUiTests
             await InvokeTask(log, "NavigateAsync", 0L, true);
             await InvokeTask(log, "TogglePageEditAsync");
             var source = (TextBox)Field(log, "_logText");
+            var scrollbar = (ScrollBar)Field(log, "_verticalLogScrollbar");
             var originalPage = source.Text;
             source.CaretIndex = Math.Min(12, source.Text!.Length);
             source.SelectionStart = 0;
@@ -176,12 +182,14 @@ public sealed class LogUiTests
             filterPanel.SetLevels(LogLevel.Fatal);
             var filtered = (TextBox)Field(log, "_filteredLogText");
             await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Fatal fatal-row-000", StringComparison.Ordinal) == true);
+            Assert.False(scrollbar.IsEffectivelyVisible);
             Assert.DoesNotContain("Info info-row-", filtered.Text);
             Assert.False(((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
             Assert.Equal(originalPage, source.Text);
 
             ((Button)Field(log, "_levelFilterButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await HeadlessTests.WaitForAsync(() => !filterPanel.IsVisible && ((Grid)((Grid)Field(log, "_contentViewport")).Children[0]).IsVisible);
+            Assert.True(scrollbar.IsEffectivelyVisible);
             Assert.Equal(pageOffset, Page(log)!.StartOffset);
             Assert.Equal(originalPage, source.Text);
             Assert.Equal(originalSelection, SelectedText(source));
@@ -517,8 +525,12 @@ public sealed class LogUiTests
             var text = (TextBox)Field(log, "_logText");
             var minimap = (LogView.LogMinimap)Field(log, "_minimap");
             await HeadlessTests.WaitForAsync(() => Page(log) is not null && minimap.Bounds.Height > 100
-                && minimap.Widths.Length == 32);
+                && minimap.Widths.Length == 32 && Field(log, "_verticalLogScrollbar") is ScrollBar { Bounds.Height: > 100 });
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));
+            var scrollbar = (ScrollBar)Field(log, "_verticalLogScrollbar");
+            var minimapRight = minimap.TranslatePoint(new Point(minimap.Bounds.Width, 0), window)!.Value.X;
+            var scrollbarLeft = scrollbar.TranslatePoint(new Point(0, 0), window)!.Value.X;
+            Assert.True(scrollbarLeft >= minimapRight);
             Assert.Contains("Строки 1–80", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
             var gutter = (TextBlock)Field(log, "_lineGutterText");
             Assert.StartsWith("1", gutter.Text);
