@@ -74,15 +74,20 @@ internal sealed class DocumentMinimap : Control, IDisposable
         var rows = GetRowCount(document.LineCount, Bounds.Height);
         if (rows == 0) return;
 
-        var height = GetPreviewHeight(document.LineCount, Bounds.Height);
+        var height = PreviewHeight;
+        var navigationHeight = NavigationHeight;
         var viewport = _editor.ViewportHeight;
         var maximum = _editor.ExtentHeight - viewport;
         if (viewport > 0 && maximum > 0)
         {
-            var markerHeight = Math.Clamp(height * viewport / _editor.ExtentHeight, Math.Min(8, height), height);
+            var markerHeight = Math.Clamp(navigationHeight * viewport / _editor.ExtentHeight,
+                Math.Min(8, navigationHeight), navigationHeight);
             var fraction = Math.Clamp(_editor.VerticalOffset / maximum, 0, 1);
-            var top = Padding + fraction * (height - markerHeight);
-            context.FillRectangle(FocusTheme.MinimapViewport, new Rect(0, top, Bounds.Width, markerHeight));
+            var top = Padding + fraction * (navigationHeight - markerHeight);
+            var marker = navigationHeight > height
+                ? new Rect(Bounds.Width - 2, top, 2, markerHeight)
+                : new Rect(0, top, Bounds.Width, markerHeight);
+            context.FillRectangle(FocusTheme.MinimapViewport, marker);
         }
 
         if (_preview?.PixelSize.Height != rows * RowPitch)
@@ -152,7 +157,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     {
         base.OnPointerPressed(e);
         var point = e.GetCurrentPoint(this);
-        if (!point.Properties.IsLeftButtonPressed || point.Position.Y > Padding + PreviewHeight) return;
+        if (!point.Properties.IsLeftButtonPressed || point.Position.Y > Padding + NavigationHeight) return;
 
         _dragging = true;
         e.Pointer.Capture(this);
@@ -192,10 +197,51 @@ internal sealed class DocumentMinimap : Control, IDisposable
     }
 
     private double PreviewHeight => GetPreviewHeight(_editor.Document?.LineCount ?? 0, Bounds.Height);
+    private double NavigationHeight
+    {
+        get
+        {
+            var previewHeight = PreviewHeight;
+            var availableHeight = Math.Max(0, Bounds.Height - Padding * 2);
+            if (previewHeight >= availableHeight) return previewHeight;
+
+            var view = _editor.TextArea.TextView;
+            var lineHeight = Math.Max(1, view.DefaultLineHeight);
+            var document = _editor.Document;
+            var logicalHeight = (document?.LineCount ?? 0) * lineHeight;
+            var documentHeight = view.DocumentHeight;
+            var extraHeight = documentHeight - logicalHeight;
+            var paddingAllowance = lineHeight / 2;
+            var hasWrappedRows = _editor.WordWrap && (extraHeight > paddingAllowance || HasWrappedLines(view, document));
+            return documentHeight > _editor.ViewportHeight && hasWrappedRows
+                ? Math.Max(previewHeight, availableHeight)
+                : previewHeight;
+        }
+    }
+
+    private static bool HasWrappedLines(AvaloniaEdit.Rendering.TextView view, TextDocument? document)
+    {
+        if (document is null || document.LineCount > MaxRows || view.Bounds.Width <= 0 || view.WideSpaceWidth <= 0)
+            return false;
+
+        var likelyWrapLength = (int)(view.Bounds.Width / view.WideSpaceWidth);
+        var longestCandidate = 0;
+        foreach (var line in document.Lines)
+        {
+            longestCandidate = Math.Max(longestCandidate, line.Length);
+        }
+        if (longestCandidate <= likelyWrapLength) return false;
+        if (longestCandidate > likelyWrapLength * 2) return true;
+
+        var candidate = document.Lines.First(line => line.Length == longestCandidate);
+        var first = view.GetVisualPosition(new TextViewPosition(candidate.LineNumber, 1), VisualYPosition.LineMiddle).Y;
+        var last = view.GetVisualPosition(new TextViewPosition(candidate.LineNumber, candidate.Length + 1), VisualYPosition.LineMiddle).Y;
+        return last - first > view.DefaultLineHeight / 2;
+    }
 
     private void Jump(PointerEventArgs e)
     {
-        var height = PreviewHeight;
+        var height = NavigationHeight;
         if (height > 0 && FindScrollViewer() is { } scroll)
         {
             var fraction = Math.Clamp((e.GetPosition(this).Y - Padding) / height, 0, 1);

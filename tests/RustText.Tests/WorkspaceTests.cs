@@ -2545,6 +2545,124 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task TextMinimapNavigatesWithinWrappedSingleLine() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "wrapped-line.txt");
+        var line = string.Concat(Enumerable.Repeat("word ", 2_000));
+        await File.WriteAllTextAsync(path, line);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => view.VisualLinesValid
+                && scroll.Extent.Height > scroll.Viewport.Height * 2);
+
+            var navigationHeight = minimap.Bounds.Height - 6;
+            Assert.True(navigationHeight > 100);
+            Assert.True(view.GetVisualPosition(new TextViewPosition(1, line.Length + 1), VisualYPosition.LineMiddle).Y
+                > view.GetVisualPosition(new TextViewPosition(1, 1), VisualYPosition.LineMiddle).Y);
+
+            JumpTo(.25);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .23 and <= .27);
+
+            JumpTo(.75);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .73 and <= .77);
+
+            void JumpTo(double fraction)
+            {
+                var point = minimap.TranslatePoint(new Point(12, 3 + navigationHeight * fraction), window)!.Value;
+                window.MouseDown(point, MouseButton.Left);
+                window.MouseUp(point, MouseButton.Left);
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapNavigationStaysStableWhenLaterLineWraps() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "wrapped-last-line.txt");
+        var longLine = string.Concat(Enumerable.Repeat("word ", 2_000));
+        var lines = Enumerable.Repeat("short line", 40).Append(longLine);
+        await File.WriteAllTextAsync(path, string.Join('\n', lines));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => view.VisualLinesValid
+                && scroll.Extent.Height > scroll.Viewport.Height * 2);
+
+            var navigationHeight = minimap.Bounds.Height - 6;
+            JumpTo(.75);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > 0);
+
+            scroll.Offset = new Vector(scroll.Offset.X, scroll.ScrollBarMaximum.Y);
+            await HeadlessTests.WaitForAsync(() => Math.Abs(scroll.Offset.Y - scroll.ScrollBarMaximum.Y) < 1);
+
+            scroll.Offset = default;
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y < 1);
+            JumpTo(.75);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .73 and <= .77);
+
+            JumpTo(.25);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .23 and <= .27);
+
+            void JumpTo(double fraction)
+            {
+                var point = minimap.TranslatePoint(new Point(12, 3 + navigationHeight * fraction), window)!.Value;
+                window.MouseDown(point, MouseButton.Left);
+                window.MouseUp(point, MouseButton.Left);
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapNavigatesWhenLastLineWrapsToTwoRows() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "two-row-wrap.txt");
+        await File.WriteAllTextAsync(path, string.Join('\n', Enumerable.Repeat("short line", 40).Append("x")));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => view.Bounds.Width > 100 && scroll.Extent.Height > scroll.Viewport.Height);
+
+            var lineLength = (int)(view.Bounds.Width / view.WideSpaceWidth * 1.2);
+            var lastLine = editor.Document.GetLineByNumber(editor.Document.LineCount);
+            editor.Document.Replace(lastLine.Offset, lastLine.Length, new string('W', lineLength));
+            await HeadlessTests.WaitForAsync(() =>
+            {
+                var firstY = view.GetVisualPosition(new TextViewPosition(lastLine.LineNumber, 1), VisualYPosition.LineMiddle).Y;
+                var lastY = view.GetVisualPosition(new TextViewPosition(lastLine.LineNumber, lineLength + 1), VisualYPosition.LineMiddle).Y;
+                return view.VisualLinesValid && lastY > firstY && lastY - firstY < 1.8 * view.DefaultLineHeight;
+            });
+
+            var maximum = scroll.Extent.Height - scroll.Viewport.Height;
+            Assert.True(maximum > 0);
+            var point = minimap.TranslatePoint(new Point(12, 3 + (minimap.Bounds.Height - 6) * .75), window)!.Value;
+            window.MouseDown(point, MouseButton.Left);
+            window.MouseUp(point, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
+                is >= .73 and <= .77);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task ThinViewportScrollbarKeepsItsWiderDragAreaAndTrackPaging() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "scrollbar.txt");
