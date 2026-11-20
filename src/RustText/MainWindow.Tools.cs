@@ -24,7 +24,6 @@ public partial class MainWindow
         TopMenu.Items.Add(MenuGroup("_Файл",
             Command("Новая вкладка   Ctrl+N", () => NewTab()),
             Command("Новое окно", () => Run(() => OpenWorkspaceWindowAsync(_workspaceId))),
-            Command("Рабочие пространства…", () => Run(ShowWorkspacesAsync)),
             Command("Открыть…   Ctrl+O", () => Run(() => OpenDialogAsync())),
             Command("Открыть как лог…", () => Run(() => OpenDialogAsync(asLog: true))),
             Command("Подключиться к консоли…", () => Run(OpenConsoleAsync)),
