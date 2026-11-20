@@ -31,6 +31,37 @@ public sealed class LogUiTests
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
     [Theory]
+    [InlineData(TextEncodingKind.Utf8)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian)]
+    [InlineData(TextEncodingKind.Utf16BigEndian)]
+    public Task TimeJumpSkipsTimestampsInLongLineContinuations(TextEncodingKind encoding) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "timestamps.log");
+        var continuedLine = "entry " + new string('x', 20 * 1024) + " 2026-11-20 11:45:00.000 [INFO] continuation";
+        const string matchingLine = "2026-11-20 12:00:00 [INFO] matching entry";
+        var text = continuedLine + "\n" + matchingLine + "\n";
+        Encoding codec = encoding switch
+        {
+            TextEncodingKind.Utf16LittleEndian => new UnicodeEncoding(false, true),
+            TextEncodingKind.Utf16BigEndian => new UnicodeEncoding(true, true),
+            _ => new UTF8Encoding(true)
+        };
+        var bytes = codec.GetPreamble().Concat(codec.GetBytes(text)).ToArray();
+        await File.WriteAllBytesAsync(path, bytes);
+        var matchingOffset = codec.GetPreamble().Length + codec.GetByteCount(continuedLine + "\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(encoding, AutoRefresh: false));
+        try
+        {
+            var findTimeOffset = typeof(LogView).GetMethod("FindTimeOffset", Private)!;
+            var result = (long?)findTimeOffset.Invoke(log,
+                [new DateTime(2026, 11, 20, 11, 30, 0), CancellationToken.None]);
+
+            Assert.Equal(matchingOffset, result);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]

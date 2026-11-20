@@ -1346,6 +1346,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         var results = new List<SearchResult>(SearchResultsPerPage);
         var reader = _reader;
+        using var scan = reader.BeginSequentialScan();
         var cursor = Math.Max(Math.Max(offset, _hiddenOffset), reader.PreambleLength);
         var pageEnd = _file.Length;
         var pendingLine = new StringBuilder();
@@ -1358,7 +1359,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         while (cursor < pageEnd && results.Count < SearchResultsPerPage)
         {
             token.ThrowIfCancellationRequested();
-            var page = reader.ReadPage(cursor, cancellationToken: token);
+            var page = scan.ReadPage(cursor, token);
             if (page.NextOffset <= cursor) break;
             foreach (var row in page.Rows)
             {
@@ -1467,7 +1468,6 @@ internal sealed partial class LogView : UserControl, IDisposable
     private long? FindTimeOffset(DateTime requested, CancellationToken token)
     {
         var cursor = _hiddenOffset;
-        long line = 0;
         while (cursor < _file.Length)
         {
             token.ThrowIfCancellationRequested();
@@ -1478,11 +1478,10 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
             foreach (var row in page.Rows)
             {
-                if (IsContinuationAt(row.StartOffset))
+                if (row.StartsWithinLine)
                 {
                     continue;
                 }
-                line++;
                 if (TryReadTimestamp(row.Text, out var timestamp) && timestamp >= requested)
                 {
                     return row.StartOffset;
@@ -1498,6 +1497,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         RegexOptions.Compiled,
         TimeSpan.FromMilliseconds(20));
 
+    private static readonly string[] TimestampDateFormats = ["yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss"];
+    private static readonly string[] TimestampClockFormats = ["HH:mm:ss.FFFFFFF", "HH:mm:ss"];
+
     private static bool TryReadTimestamp(string line, out DateTime timestamp)
     {
         var match = TimestampPattern.Match(line);
@@ -1506,9 +1508,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             var value = match.Groups["date"].Success
                 ? $"{match.Groups["date"].Value} {match.Groups["time"].Value}"
                 : match.Groups["clock"].Value;
-            var formats = match.Groups["date"].Success
-                ? new[] { "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss" }
-                : new[] { "HH:mm:ss.FFFFFFF", "HH:mm:ss" };
+            var formats = match.Groups["date"].Success ? TimestampDateFormats : TimestampClockFormats;
             if (DateTime.TryParseExact(value, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp))
             {
                 return true;

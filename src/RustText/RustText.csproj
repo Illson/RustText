@@ -30,25 +30,26 @@
     <PackageReference Include="Avalonia.Angle.Windows.Natives" Version="2.1.27548.20260419" GeneratePathProperty="true" PrivateAssets="all" />
     <PackageReference Include="HarfBuzzSharp.NativeAssets.Win32" Version="8.3.1.3" GeneratePathProperty="true" PrivateAssets="all" />
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.119.4" GeneratePathProperty="true" PrivateAssets="all" />
-    <EmbeddedResource Include="$(NuGetPackageRoot)avalonia.angle.windows.natives\2.1.27548.20260419\runtimes\win-x64\native\av_libglesv2.dll">
-      <LogicalName>RustText.Demo.NativePayload.av_libglesv2.dll</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="$(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\8.3.1.3\runtimes\win-x64\native\libHarfBuzzSharp.dll">
-      <LogicalName>RustText.Demo.NativePayload.libHarfBuzzSharp.dll</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="$(NuGetPackageRoot)skiasharp.nativeassets.win32\3.119.4\runtimes\win-x64\native\libSkiaSharp.dll">
-      <LogicalName>RustText.Demo.NativePayload.libSkiaSharp.dll</LogicalName>
+    <NativePayload Include="$(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\8.3.1.3\runtimes\win-x64\native\libHarfBuzzSharp.dll" />
+    <NativePayload Include="$(NuGetPackageRoot)skiasharp.nativeassets.win32\3.119.4\runtimes\win-x64\native\libSkiaSharp.dll" />
+    <NativePayload Include="$(NuGetPackageRoot)avalonia.angle.windows.natives\2.1.27548.20260419\runtimes\win-x64\native\av_libglesv2.dll" />
+    <EmbeddedResource Include="@(NativePayload)">
+      <LogicalName>RustText.Demo.NativePayload.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
-  <Target Name="ValidateWinX64NativePayload" BeforeTargets="CoreCompile"
+  <Target Name="CreateWinX64NativePayloadHashes" BeforeTargets="AssignTargetPaths"
           Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' == 'win-x64'">
-    <Error Condition="!Exists('$(NuGetPackageRoot)avalonia.angle.windows.natives\2.1.27548.20260419\runtimes\win-x64\native\av_libglesv2.dll')"
-           Text="The Avalonia ANGLE win-x64 native payload is missing from the NuGet cache." />
-    <Error Condition="!Exists('$(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\8.3.1.3\runtimes\win-x64\native\libHarfBuzzSharp.dll')"
-           Text="The HarfBuzz win-x64 native payload is missing from the NuGet cache." />
-    <Error Condition="!Exists('$(NuGetPackageRoot)skiasharp.nativeassets.win32\3.119.4\runtimes\win-x64\native\libSkiaSharp.dll')"
-           Text="The SkiaSharp win-x64 native payload is missing from the NuGet cache." />
+    <GetFileHash Files="@(NativePayload)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="_NativePayloadWithHash" />
+    </GetFileHash>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <WriteLinesToFile File="$(IntermediateOutputPath)native-payload.sha256" Overwrite="true" WriteOnlyWhenDifferent="true"
+                      Lines="@(_NativePayloadWithHash->'%(Filename)%(Extension) %(FileHash)')" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)native-payload.sha256" LogicalName="RustText.Demo.NativePayload.sha256" />
+      <FileWrites Include="$(IntermediateOutputPath)native-payload.sha256" />
+    </ItemGroup>
   </Target>
 
   <Target Name="ExcludeEmbeddedNativePayloadFromPublish" AfterTargets="ComputeFilesToPublish"

@@ -199,7 +199,13 @@ internal sealed class LogDataReader
         int maxFrameBytes = DefaultFrameBytes,
         int maxPageBytes = DefaultPageBytes,
         CancellationToken cancellationToken = default,
-        long endOffset = long.MaxValue)
+        long endOffset = long.MaxValue) =>
+        ReadPage(offset, pageSize, maxFrameBytes, maxPageBytes, cancellationToken, endOffset, null);
+
+    public SequentialScan BeginSequentialScan() => new(this);
+
+    private LogPage ReadPage(long offset, int pageSize, int maxFrameBytes, int maxPageBytes,
+        CancellationToken cancellationToken, long endOffset, SequentialScan? scan)
     {
         if (pageSize is < 1 or > 100)
         {
@@ -218,18 +224,27 @@ internal sealed class LogDataReader
             : requestedOffset;
         var readOffset = Math.Min(requestedOffset, alignedOffset);
         var readLength = (int)Math.Min((long)maxPageBytes + LookaheadBytes, observedLength - readOffset);
-        var buffer = ArrayPool<byte>.Shared.Rent(readLength);
+        var buffer = scan is null ? ArrayPool<byte>.Shared.Rent(readLength) : null;
         try
         {
-            var read = ReadWindowInto(_file.SafeFileHandle, readOffset, buffer.AsSpan(0, readLength), cancellationToken);
-            ReadOnlySpan<byte> bytes = buffer.AsSpan(0, read);
+            var handle = _file.SafeFileHandle;
+            ReadOnlySpan<byte> bytes;
+            if (scan is null)
+            {
+                var read = ReadWindowInto(handle, readOffset, buffer.AsSpan(0, readLength), cancellationToken);
+                bytes = buffer.AsSpan(0, read);
+            }
+            else
+            {
+                bytes = scan.ReadWindow(handle, readOffset, readLength, observedLength, cancellationToken);
+            }
             var firstPosition = (int)Math.Min(Math.Max(_bomLength, alignedOffset) - readOffset, bytes.Length);
             var position = firstPosition;
 
             var pageEnd = Math.Min(bytes.Length, maxPageBytes);
             var rows = new List<LogRow>(Math.Min(pageSize, maxPageBytes / maxFrameBytes));
             var inputStartsWithinLine = alignedOffset > _bomLength
-                && !IsNewlineBefore(_file.SafeFileHandle, alignedOffset);
+                && !IsNewlineBefore(handle, alignedOffset);
 
             while (rows.Count < pageSize && position < pageEnd)
             {
@@ -318,7 +333,78 @@ internal sealed class LogDataReader
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+    }
+
+    internal sealed class SequentialScan(LogDataReader reader) : IDisposable
+    {
+        // Keep the next page contiguous while retaining unread bytes from the current page.
+        private const int Capacity = 2 * DefaultPageBytes;
+        private byte[]? _buffer;
+        private long _offset;
+        private long _observedLength;
+        private int _length;
+        private bool _reuseWindow;
+        private bool _disposed;
+
+        public LogPage ReadPage(long offset, CancellationToken cancellationToken = default)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var page = reader.ReadPage(offset, DefaultPageSize, DefaultFrameBytes, DefaultPageBytes,
+                cancellationToken, long.MaxValue, _reuseWindow ? this : null);
+            // A page limited by bytes already used most of its window. Only retain
+            // a window when the preceding page stopped at the row limit early.
+            _reuseWindow = page.Rows.Count == DefaultPageSize
+                && page.NextOffset - page.StartOffset <= DefaultPageBytes / 2;
+            if (!_reuseWindow)
+            {
+                _length = 0;
+            }
+            return page;
+        }
+
+        internal ReadOnlySpan<byte> ReadWindow(SafeFileHandle handle, long offset, int length, long observedLength,
+            CancellationToken cancellationToken)
+        {
+            var buffer = _buffer ??= ArrayPool<byte>.Shared.Rent(Capacity);
+            if (offset < _offset || offset >= _offset + _length - LookaheadBytes || observedLength < _observedLength)
+            {
+                _offset = offset;
+                _length = 0;
+                _length = ReadWindowInto(handle, offset, buffer.AsSpan(0, length), cancellationToken);
+            }
+            else if (offset + length > _offset + _length)
+            {
+                if (offset + length > _offset + Capacity)
+                {
+                    var consumed = (int)(offset - _offset);
+                    _length -= consumed;
+                    buffer.AsSpan(consumed, _length).CopyTo(buffer);
+                    _offset = offset;
+                }
+
+                var end = _offset + _length;
+                var count = (int)Math.Min(Capacity - _length, observedLength - end);
+                _length += ReadWindowInto(handle, end, buffer.AsSpan(_length, count), cancellationToken);
+            }
+
+            _observedLength = observedLength;
+            var start = (int)(offset - _offset);
+            return buffer.AsSpan(start, Math.Min(length, _length - start));
+        }
+
+        public void Dispose()
+        {
+            _disposed = true;
+            if (_buffer is { } buffer)
+            {
+                _buffer = null;
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
     }
 
