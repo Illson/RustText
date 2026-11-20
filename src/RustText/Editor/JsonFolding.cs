@@ -9,30 +9,44 @@ internal sealed class JsonFolding(TextEditor editor, JsonColorizer colorizer) : 
     private FoldingManager? _manager;
     private CancellationTokenSource? _pending;
 
-    public void Schedule(string? path)
+    public Task<string?>? Schedule(string? path)
     {
         _pending?.Cancel();
         var document = editor.Document;
         if (!colorizer.Enabled || document.LineCount < 2 || TextOperations.IsJsonLinesPath(path))
         {
             RemoveManager();
-            return;
+            return null;
         }
 
         var source = new CancellationTokenSource();
         _pending = source;
-        _ = UpdateAsync(document, source);
+        var textTask = ReadTextAsync(document, source.Token);
+        _ = UpdateAsync(textTask, source);
+        return textTask;
     }
 
-    private async Task UpdateAsync(TextDocument document, CancellationTokenSource source)
+    private static async Task<string?> ReadTextAsync(TextDocument document, CancellationToken token)
+    {
+        await Task.Delay(200, token);
+        var snapshot = document.CreateSnapshot();
+        return await Task.Run(() =>
+        {
+            using var reader = snapshot.CreateReader();
+            return reader.ReadToEnd();
+        }, token);
+    }
+
+    private async Task UpdateAsync(Task<string?> textTask, CancellationTokenSource source)
     {
         var token = source.Token;
         try
         {
-            await Task.Delay(200, token);
-            var snapshot = document.CreateSnapshot();
-            var ranges = await Task.Run(() => JsonFoldRanges.Create(snapshot.Text, token), token);
+            var text = await textTask;
             token.ThrowIfCancellationRequested();
+            if (text is null) return;
+
+            var ranges = await Task.Run(() => JsonFoldRanges.Create(text, token), token);
 
             if (ranges.Count == 0)
             {

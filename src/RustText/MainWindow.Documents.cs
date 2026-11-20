@@ -402,8 +402,7 @@ public partial class MainWindow
                 SetSyntax(editor, null);
             }
             UpdateTab(tab);
-            ScheduleJsonValidation(tab);
-            jsonFolding.Schedule(tab.Path);
+            ScheduleJsonValidation(tab, jsonFolding.Schedule(tab.Path));
             if (PanelHost.IsVisible && (ReferenceEquals(tab, ActiveTab) || _allTabs.IsChecked == true))
             {
                 ScheduleSearch();
@@ -468,8 +467,7 @@ public partial class MainWindow
         tab.MinimapDock = minimapDock;
         WatchEditorFile(tab);
         UpdateTab(tab);
-        ScheduleJsonValidation(tab);
-        jsonFolding.Schedule(tab.Path);
+        ScheduleJsonValidation(tab, jsonFolding.Schedule(tab.Path));
         if (PanelHost.IsVisible && ReferenceEquals(tab, ActiveTab) && _searchCancellation is null) ScheduleSearch();
     }
 
@@ -840,8 +838,7 @@ public partial class MainWindow
         SetSyntax(editor, path);
         if (changedPath)
         {
-            tab.JsonFolding?.Schedule(path);
-            ScheduleJsonValidation(tab);
+            ScheduleJsonValidation(tab, tab.JsonFolding?.Schedule(path));
         }
         tab.Stamp = stamp;
         WatchEditorFile(tab);
@@ -1252,7 +1249,7 @@ public partial class MainWindow
 
     private bool SamePath(string? left, string? right) => string.Equals(left, right, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
-    private void ScheduleJsonValidation(WorkTab tab)
+    private void ScheduleJsonValidation(WorkTab tab, Task<string?>? sharedTextTask = null)
     {
         tab.JsonCancellation?.Cancel();
         tab.JsonError = null;
@@ -1275,10 +1272,11 @@ public partial class MainWindow
 
         var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         tab.JsonCancellation = source;
-        _ = ValidateJsonAsync(tab, editor, source);
+        _ = ValidateJsonAsync(tab, editor, source, sharedTextTask);
     }
 
-    private async Task ValidateJsonAsync(WorkTab tab, TextEditor editor, CancellationTokenSource source)
+    private async Task ValidateJsonAsync(WorkTab tab, TextEditor editor, CancellationTokenSource source,
+        Task<string?>? sharedTextTask)
     {
         try
         {
@@ -1289,15 +1287,14 @@ public partial class MainWindow
                 return;
             }
 
-            var snapshot = editor.Document.CreateSnapshot();
-            var problem = await Task.Run(() =>
-            {
-                using var reader = snapshot.CreateReader();
-                var text = reader.ReadToEnd();
-                return TextOperations.LooksLikeJson(text, path)
+            var text = sharedTextTask is null
+                ? await ReadDocumentTextAsync(editor.Document, source.Token)
+                : await sharedTextTask;
+            var problem = text is null
+                ? null
+                : await Task.Run(() => TextOperations.LooksLikeJson(text, path)
                     ? TextOperations.ValidateJson(text, path, source.Token)
-                    : null;
-            }, source.Token);
+                    : null, source.Token);
             if (!source.IsCancellationRequested && ReferenceEquals(tab.Editor, editor) && problem is not null)
             {
                 tab.JsonError = problem;
@@ -1322,6 +1319,16 @@ public partial class MainWindow
 
             source.Dispose();
         }
+    }
+
+    private static async Task<string> ReadDocumentTextAsync(TextDocument document, CancellationToken token)
+    {
+        var snapshot = document.CreateSnapshot();
+        return await Task.Run(() =>
+        {
+            using var reader = snapshot.CreateReader();
+            return reader.ReadToEnd();
+        }, token);
     }
 
     private static bool ShouldCheckJson(TextDocument document, string? path)
