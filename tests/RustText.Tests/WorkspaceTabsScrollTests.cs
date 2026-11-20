@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -45,6 +46,8 @@ public sealed class WorkspaceTabsScrollTests
             var oneTabHeaderHeight = viewport.Bounds.Height;
             Assert.False(position.IsVisible);
             Assert.False(position.IsHitTestVisible);
+            Assert.True(position.ClipToBounds);
+            Assert.False(viewport.AllowAutoHide);
 
             for (var index = 2; index <= 12; index++)
             {
@@ -68,6 +71,29 @@ public sealed class WorkspaceTabsScrollTests
             var expectedThumbWidth = position.Bounds.Width * position.ViewportSize
                 / (position.Maximum + position.ViewportSize);
             Assert.InRange(Math.Abs(thumb.Bounds.Width - expectedThumbWidth), 0, 1.5);
+
+            window.MouseMove(new Point(-10, -10));
+            await Task.Delay(40);
+            var indicatorPixels = CaptureIndicatorPixels(window, position);
+            var indicatorOrigin = position.TranslatePoint(default, window);
+            Assert.NotNull(indicatorOrigin);
+            var thumbCenter = thumb.TranslatePoint(
+                new Point(thumb.Bounds.Width / 2, thumb.Bounds.Height / 2), window);
+            Assert.NotNull(thumbCenter);
+
+            window.MouseMove(thumbCenter!.Value);
+            await Task.Delay(150);
+            Assert.Equal(indicatorPixels, CaptureIndicatorPixels(window, position));
+            Assert.False(position.IsPointerOver);
+            Assert.False(thumb.IsPointerOver);
+            Assert.DoesNotContain(viewport.GetVisualDescendants().OfType<ScrollBar>(),
+                scrollBar => scrollBar.Orientation == Orientation.Horizontal && scrollBar.IsVisible);
+
+            window.MouseMove(new Point(thumbCenter.Value.X, indicatorOrigin!.Value.Y - 2));
+            await Task.Delay(150);
+            Assert.Equal(indicatorPixels, CaptureIndicatorPixels(window, position));
+            Assert.DoesNotContain(viewport.GetVisualDescendants().OfType<ScrollBar>(),
+                scrollBar => scrollBar.Orientation == Orientation.Horizontal && scrollBar.IsVisible);
 
             var selection = tabs.SelectedItem;
             var viewportCenter = viewport.TranslatePoint(
@@ -139,4 +165,29 @@ public sealed class WorkspaceTabsScrollTests
             window.Close();
         }
     });
+
+    private static byte[] CaptureIndicatorPixels(Window window, Track track)
+    {
+        window.UpdateLayout();
+        using var frame = window.CaptureRenderedFrame();
+        Assert.NotNull(frame);
+        var origin = track.TranslatePoint(default, window)!.Value;
+        var scaling = window.RenderScaling;
+        var left = (int)Math.Round(origin.X * scaling);
+        var top = (int)Math.Round(origin.Y * scaling);
+        var width = (int)Math.Ceiling(track.Bounds.Width * scaling);
+        var height = (int)Math.Ceiling(track.Bounds.Height * scaling);
+        var pixels = new byte[width * height * 4];
+        var address = Marshal.AllocHGlobal(pixels.Length);
+        try
+        {
+            frame.CopyPixels(new PixelRect(left, top, width, height), address, pixels.Length, width * 4);
+            Marshal.Copy(address, pixels, 0, pixels.Length);
+            return pixels;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(address);
+        }
+    }
 }

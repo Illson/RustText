@@ -59,13 +59,14 @@
                                         <Setter Property="IsVisible" Value="False" />
                                     </Style>
                                 </Grid.Styles>
-                                <ScrollViewer Name="TabHeaderScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                                <ScrollViewer Name="TabHeaderScroll" AllowAutoHide="False"
+                                              HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
                                     <ItemsPresenter Name="PART_ItemsPresenter" ItemsPanel="{TemplateBinding ItemsPanel}" />
                                 </ScrollViewer>
                                 <ContentPresenter Grid.Column="1" Content="{TemplateBinding HeaderActions}"
                                                   VerticalAlignment="Center" Margin="4,0,0,3" />
                                 <Track Name="TabScrollPosition" Grid.Row="1" Height="2" Orientation="Horizontal"
-                                       IsHitTestVisible="False" Opacity="0.65"
+                                       ClipToBounds="True" IsHitTestVisible="False" Opacity="0.65"
                                        Maximum="{CompiledBinding #TabHeaderScroll.ScrollBarMaximum.X, Mode=OneWay}"
                                        ViewportSize="{CompiledBinding #TabHeaderScroll.Viewport.Width, Mode=OneWay}"
                                        Value="{CompiledBinding #TabHeaderScroll.Offset.X, Mode=OneWay}">
