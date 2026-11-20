@@ -10,7 +10,6 @@
         <ControlTheme x:Key="FocusDocumentTab" TargetType="TabItem">
             <Setter Property="Background" Value="{x:Static local:FocusTheme.Panel}" />
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
-            <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="Margin" Value="0,0,3,0" />
             <Setter Property="Padding" Value="9,0,3,0" />
             <Setter Property="MinWidth" Value="116" />
@@ -20,7 +19,6 @@
                 <ControlTemplate>
                     <Border Name="TabSurface"
                             Background="{TemplateBinding Background}"
-                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="0,2,0,0"
                             CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}">
                         <ContentPresenter Name="PART_ContentPresenter" Content="{TemplateBinding Header}"
                                           ContentTemplate="{TemplateBinding HeaderTemplate}"
@@ -34,7 +32,6 @@
             </Style>
             <Style Selector="^:selected">
                 <Setter Property="Background" Value="{x:Static local:FocusTheme.Editor}" />
-                <Setter Property="BorderBrush" Value="{x:Static local:FocusTheme.Accent}" />
                 <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
             </Style>
             <Style Selector="^:disabled">
@@ -103,7 +100,7 @@
             <Setter Property="Template">
                 <ControlTemplate>
                     <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
-                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,5,8,0">
+                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,2,8,0">
                             <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
                                 <Grid.Styles>
                                     <Style Selector="Track#TabScrollPosition[Maximum=0]">
