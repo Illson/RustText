@@ -387,6 +387,105 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Fact]
+    public Task FilteredMinimapWheelAdvancesFromCurrentFilteredPageInBothDirections() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "filtered-wheel.log");
+        var contents = string.Concat(Enumerable.Range(0, 480).Select(row =>
+            row % 2 == 0 ? $"Error row-{row:D4}\n" : $"Info row-{row:D4}\n"));
+        await File.WriteAllTextAsync(path, contents);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true
+                && minimap.Bounds.Height > 100);
+            var origin = minimap.TranslatePoint(new Point(0, 0), window) ?? throw new InvalidOperationException("Minimap is not attached.");
+            var point = origin + new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height / 2);
+
+            var firstPage = filtered.Text;
+            window.MouseWheel(point, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => filtered.Text != firstPage);
+            var secondPage = filtered.Text;
+            Assert.True(FirstRowNumber(secondPage) > FirstRowNumber(firstPage));
+
+            window.MouseWheel(point, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => filtered.Text != secondPage);
+            var thirdPage = filtered.Text;
+            Assert.True(FirstRowNumber(thirdPage) > FirstRowNumber(secondPage));
+
+            window.MouseWheel(point, new Vector(0, 1));
+            await HeadlessTests.WaitForAsync(() => filtered.Text != thirdPage);
+            Assert.True(FirstRowNumber(filtered.Text) < FirstRowNumber(thirdPage));
+
+            var beforeClick = filtered.Text;
+            window.MouseDown(point, MouseButton.Left);
+            window.MouseUp(point, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => filtered.Text != beforeClick);
+            var afterClick = filtered.Text;
+            window.MouseWheel(point, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => filtered.Text != afterClick);
+            Assert.True(FirstRowNumber(filtered.Text) > FirstRowNumber(afterClick));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task FilteredMinimapJumpToNoMatchesCanReturnToPreviousResults() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "filtered-empty-jump.log");
+        var contents = string.Concat(Enumerable.Range(0, 480).Select(row =>
+            row < 240 ? $"Error row-{row:D4}\n" : $"Info row-{row:D4}\n"));
+        await File.WriteAllTextAsync(path, contents);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            var previous = (Button)Field(log, "_previousButton");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true
+                && minimap.Bounds.Height > 100);
+            var origin = minimap.TranslatePoint(new Point(0, 0), window) ?? throw new InvalidOperationException("Minimap is not attached.");
+            var target = origin + new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height * .9);
+            window.MouseDown(target, MouseButton.Left);
+            window.MouseUp(target, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.Length == 0 && previous.IsEnabled);
+
+            previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task PageEditingClosesAnActiveLevelFilterBeforeShowingTheEditor() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "edit-filtered-page.log");
+        await File.WriteAllTextAsync(path, "Info ordinary\nError editable\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            await HeadlessTests.WaitForAsync(() => filtered.Text == "Error editable");
+            Assert.True(filtered.IsEffectivelyVisible);
+
+            await InvokeTask(log, "TogglePageEditAsync");
+            var editor = PageEditor(log);
+            var filterViewport = (Control)Field(log, "_levelFilterViewport");
+            await HeadlessTests.WaitForAsync(() => Field(log, "_pageEdit") is not null
+                && !filterViewport.IsVisible && editor.IsEffectivelyVisible);
+            Assert.Equal("Info ordinary\nError editable\n", editor.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

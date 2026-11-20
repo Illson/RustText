@@ -959,11 +959,26 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void OnMinimapPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
-        if (_page is not { } page || e.Delta.Y == 0)
+        if (e.Delta.Y == 0)
         {
             return;
         }
 
+        if (_levelFilterViewport?.IsVisible == true)
+        {
+            if (_filteredPage is not { Rows.Count: > 0 } filteredPage) return;
+            var first = filteredPage.Rows[0];
+            var last = filteredPage.Rows[^1];
+            var filteredPageBytes = Math.Max(1, last.EndOffset - first.StartOffset);
+            var filteredNext = Math.Clamp(first.StartOffset - (long)Math.Sign(e.Delta.Y) * filteredPageBytes,
+                _hiddenOffset, _filterSnapshotLength);
+            var filteredRange = Math.Max(1, _filterSnapshotLength - _hiddenOffset);
+            _ = NavigateMinimapToRatioAsync((filteredNext - _hiddenOffset) / (double)filteredRange);
+            e.Handled = true;
+            return;
+        }
+
+        if (_page is not { } page) return;
         var pageBytes = Math.Max(1, page.NextOffset - page.StartOffset);
         var next = Math.Clamp(page.StartOffset - (long)Math.Sign(e.Delta.Y) * pageBytes, _hiddenOffset, _file.Length);
         var range = Math.Max(1, _file.Length - _hiddenOffset);
