@@ -1,14 +1,24 @@
 using System.Security.Cryptography;
 using System.Text;
 using Avalonia.Controls;
-using Avalonia.Input.Platform;
+using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Automation;
+using AvaloniaEdit;
+using AvaloniaEdit.Document;
+using RustText.Demo.Editor;
 
 namespace RustText.Demo.Logs;
 
 internal sealed partial class LogView
 {
-    private const int EditCharacterLimit = 256 * 1024;
+    private TextEditor? _pageEditor;
+    private GroupedLineNumberMargin? _pageLineNumbers;
+    private Action? _unbindPagePaste;
+    private bool _editedPageChanged;
+    private int _originalPageLines;
     private readonly TextBlock _readModeLabel = new()
     {
         FontSize = 11,
@@ -23,7 +33,24 @@ internal sealed partial class LogView
 
     internal Func<string, string, long, int, bool, CancellationToken, Task>? CommitDraftPage { get; set; }
     internal Action<string>? PreserveExternalPageEdit { get; init; }
-    public bool HasPendingEdit => _pageWrite is not null || (_pageEdit is { } edit && _logText.Text != edit.Original);
+    public bool HasPendingEdit => IsWritingPage || _editedPageChanged;
+    internal bool IsWritingPage => _pageWrite is not null;
+    internal long? DisplayLineCount => KnownLineCount is { } total
+        ? Math.Max(0, total + (_pageEdit is null ? 0 : EditedRowCount() - _originalPageLines))
+        : null;
+
+    private int EditedRowCount()
+    {
+        var document = _pageEditor!.Document;
+        var endsWithText = _pageEdit!.To == _pageEdit.Stamp.Length && document.TextLength > 0
+            && document.GetCharAt(document.TextLength - 1) is not ('\r' or '\n');
+        return document.LineCount - 1 + (endsWithText ? 1 : 0);
+    }
+
+    internal void DiscardPageEdits()
+    {
+        if (_pageEdit is { } edit && !IsWritingPage) SetPageText(edit.Original, _pageEditor!.CaretOffset);
+    }
     private bool PageNavigationBlocked => EditsPagesByDefault ? HasPendingEdit : _pageEdit is not null;
 
     private Control BuildPageModeControls()
@@ -38,23 +65,12 @@ internal sealed partial class LogView
         _cancelPageButton.Click += async (_, _) =>
         {
             if (_pageWrite is { } write) write.Cancel();
-            else if (EditsPagesByDefault && _pageEdit is { } edit)
+            else if (EditsPagesByDefault && _pageEdit is not null)
             {
-                SetPageText(edit.Original, _logText.CaretIndex);
+                DiscardPageEdits();
                 SetStatus(PageEditHint);
             }
             else await EndPageEditAsync();
-        };
-        _logText.TextChanged += (_, _) =>
-        {
-            if (_pageEdit is not null && _levelBands.IsVisible) _levelBands.SetEditedText(_logText.Text ?? "");
-            if (EditsPagesByDefault) RefreshButtons();
-            else
-            {
-                UpdatePageModeControls();
-                _levelFilterButton.IsEnabled = CanFilterLevels || _levelFilterOpen;
-                if (_levelFilterOpen) _levelFilter!.IsEnabled = !HasPendingEdit;
-            }
         };
         panel.Children.Add(_readModeLabel);
         panel.Children.Add(_editPageButton);
@@ -84,7 +100,10 @@ internal sealed partial class LogView
             if (_closed) return;
             _searchPanel.IsVisible = false;
             BeginPageEdit(edit);
-            FocusPageEditor();
+            await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                if (!_closed && ReferenceEquals(_pageEdit, edit)) FocusPageEditor();
+            }, Avalonia.Threading.DispatcherPriority.Loaded);
             SetStatus(PageEditHint);
         }
         catch (OperationCanceledException) when (_closed) { }
@@ -101,8 +120,7 @@ internal sealed partial class LogView
 
     private const string PageEditHint = "Ctrl+S сохраняет изменения страницы. Перед переходом сохраните или отмените правки.";
 
-    private PageEdit ReadPageEdit(LogPage page, LogDataReader reader, FileStamp expected, CancellationToken token,
-        long? caretOffset = null)
+    private PageEdit ReadPageEdit(LogPage page, LogDataReader reader, FileStamp expected, CancellationToken token)
     {
         var from = page.Rows.Count == 0
             ? Math.Min(expected.Length, Math.Max(reader.PreambleLength, page.StartOffset))
@@ -116,120 +134,111 @@ internal sealed partial class LogView
         source.ReadExactly(bytes);
         token.ThrowIfCancellationRequested();
         if (ReadFileStamp(_path, source) != expected) throw ChangedSincePageRead();
-        var caret = caretOffset is { } offset
-            ? encoding.GetCharCount(bytes.AsSpan(0, (int)Math.Clamp(offset - from, 0, bytes.Length))) : 0;
-        return new(from, to, encoding.GetString(bytes), encoding, expected, caret);
+        return new(from, to, encoding.GetString(bytes), encoding, expected);
     }
 
     private void BeginPageEdit(PageEdit edit)
     {
+        StopFollowingEnd();
+        _pageEditor ??= CreatePageEditor();
         _pageEdit = edit;
+        _pageLineNumbers!.FirstLineNumber = _displaySourceLineNumbers.FirstOrDefault();
         _lineGutterScrollViewer.IsVisible = false;
-        _logText.MaxLength = Math.Max(EditCharacterLimit, edit.Original.Length);
-        SetPageText(edit.Original, edit.InitialCaret);
-        _logText.IsReadOnly = false;
+        _logText.IsVisible = false;
+        _pageEditor.IsVisible = true;
+        _pageEditor.IsReadOnly = false;
+        SetPageText(edit.Original, 0);
+    }
+
+    private TextEditor CreatePageEditor()
+    {
+        var editor = new TextEditor
+        {
+            FontFamily = _logText.FontFamily, FontSize = _logText.FontSize,
+            Background = _logText.Background, Foreground = _logText.Foreground,
+            WordWrap = _wordWrap, Padding = _logText.Padding,
+            ShowLineNumbers = true, LineNumbersForeground = _lineGutterText.Foreground,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden
+        };
+        _pageLineNumbers = GroupedLineNumberMargin.ReplaceExisting(editor);
+        EditorCaret.Attach(editor.TextArea);
+        var levels = new LogLevelColorizer { Enabled = !_isDraft && (!EditsPagesByDefault || LogLevels.IsLogPath(_path)) };
+        editor.TextArea.TextView.LineTransformers.Add(levels);
+        editor.TextArea.TextView.BackgroundRenderers.Add(levels);
+        editor.TextChanged += (_, _) =>
+        {
+            if (_pageEdit is not { } edit || _closed) return;
+            var changed = editor.Document.TextLength != edit.Original.Length || editor.Text != edit.Original;
+            if (changed != _editedPageChanged)
+            {
+                _editedPageChanged = changed;
+                RefreshButtons();
+            }
+            UpdateDisplayedLineCount();
+            TextPositionChanged?.Invoke();
+        };
+        editor.TextArea.Caret.PositionChanged += (_, _) => TextPositionChanged?.Invoke();
+        editor.TextArea.SelectionChanged += (_, _) => TextPositionChanged?.Invoke();
+        editor.TextArea.AddHandler(KeyDownEvent, OnLogKeyDown, RoutingStrategies.Tunnel);
+        _unbindPagePaste = EditorClipboard.BindPaste(editor, () => !_closed && _pageEdit is not null && !IsWritingPage,
+            editor.TextArea.PerformTextInput, RunPageClipboard);
+
+        editor.LayoutUpdated += OnLogTextLayoutUpdated;
+        AutomationProperties.SetAutomationId(editor, "LogPageEditor");
+        Grid.SetColumn(editor, 1);
+        ((Grid)_logText.Parent!).Children.Add(editor);
+        return editor;
     }
 
     private void SetPageText(string text, int caret)
     {
-        // Undo must never bring the previous page's text into the new page.
-        _logText.IsUndoEnabled = false;
-        _logText.Text = text;
-        _logText.IsUndoEnabled = true;
+        var editor = _pageEditor!;
+        editor.Document = new TextDocument(text);
+        _originalPageLines = EditedRowCount();
+        _editedPageChanged = false;
         RestorePageCaret(caret, focus: false);
+        RefreshButtons();
+        UpdateDisplayedLineCount();
+        TextPositionChanged?.Invoke();
     }
 
-    internal void FocusPageEditor() => _logText.Focus();
-
-    private async Task CutCurrentPageLineAsync()
+    internal void FocusPageEditor()
     {
-        if (_closed || _pageWrite is not null || _pageEdit is not { } pageEdit
-            || _logText.IsReadOnly || _logText.SelectionStart != _logText.SelectionEnd
-            || TopLevel.GetTopLevel(_logText)?.Clipboard is not { } clipboard
-            || _logText.Text is not { } text)
-        {
-            return;
-        }
-
-        var caret = _logText.CaretIndex;
-        var previousLineBreak = caret == 0 ? -1 : LastLineBreak(text, caret - 1);
-        var lineStart = previousLineBreak + 1;
-        var lineEnd = NextLineBreak(text, caret);
-        if (lineEnd < 0 && lineStart == text.Length)
-        {
-            return;
-        }
-
-        var lineTextEnd = lineEnd < 0 ? text.Length
-            : lineEnd + (text[lineEnd] == '\r' && lineEnd + 1 < text.Length && text[lineEnd + 1] == '\n' ? 2 : 1);
-        var deleteStart = lineStart;
-        if (lineEnd < 0 && lineStart > 0)
-        {
-            deleteStart--;
-            if (deleteStart > 0 && text[deleteStart] == '\n' && text[deleteStart - 1] == '\r')
-            {
-                deleteStart--;
-            }
-        }
-        var deleteLength = lineTextEnd - deleteStart;
-        var lineText = text[lineStart..lineTextEnd];
-        await clipboard.SetTextAsync(lineText.Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Replace('\r', '\n').Replace("\n", Environment.NewLine, StringComparison.Ordinal));
-
-        if (_closed || !ReferenceEquals(_pageEdit, pageEdit) || _pageWrite is not null
-            || _logText.IsReadOnly || _logText.Text != text || _logText.CaretIndex != caret
-            || _logText.SelectionStart != _logText.SelectionEnd)
-        {
-            return;
-        }
-
-        _logText.SelectionStart = deleteStart;
-        _logText.SelectionEnd = deleteStart + deleteLength;
-        _logText.SelectedText = "";
-        _logText.CaretIndex = deleteStart;
-        _logText.SelectionStart = _logText.SelectionEnd = deleteStart;
+        if (_pageEdit is not null) _pageEditor!.TextArea.Focus();
+        else _logText.Focus();
     }
 
-    private static int LastLineBreak(string text, int start)
+    private async void RunPageClipboard(Func<Task> action)
     {
-        for (var index = start; index >= 0; index--)
+        try { await action(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
         {
-            if (text[index] is '\r' or '\n') return index;
+            if (!_closed) SetStatus($"Буфер обмена недоступен. {error.Message}");
         }
-        return -1;
-    }
-
-    private static int NextLineBreak(string text, int start)
-    {
-        for (var index = start; index < text.Length; index++)
-        {
-            if (text[index] is '\r' or '\n') return index;
-        }
-        return -1;
     }
 
     internal void RestorePageCaret(int caret, bool focus)
     {
         if (_pageEdit is null || _closed) return;
-        _logText.CaretIndex = Math.Clamp(caret, 0, _logText.Text?.Length ?? 0);
-        _logText.SelectionStart = _logText.SelectionEnd = _logText.CaretIndex;
+        _pageEditor!.Select(Math.Clamp(caret, 0, _pageEditor.Document.TextLength), 0);
         if (focus) FocusPageEditor();
     }
 
     public async Task SavePageEditAsync()
     {
-        if (_closed || _busy || _pageWrite is not null || _pageEdit is not { } edit || _logText.Text is not { } text) return;
+        if (_closed || _busy || _pageWrite is not null || _pageEdit is not { } edit || _pageEditor is not { } editor) return;
+        var text = editor.Text;
         if (text == edit.Original)
         {
             if (!EditsPagesByDefault) await EndPageEditAsync();
             return;
         }
 
-        var caret = _logText.CaretIndex;
+        var caret = editor.CaretOffset;
         var hadFocus = IsKeyboardFocusWithin;
         using var write = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
         _pageWrite = write;
-        _logText.IsReadOnly = true;
+        editor.IsReadOnly = true;
         RefreshButtons();
         SetStatus("Сохранение страницы…");
         var temporary = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(_path)!, $".rusttext-page-{Guid.NewGuid():N}.pending");
@@ -263,7 +272,7 @@ internal sealed partial class LogView
             _pageWrite = null;
             if (!_closed)
             {
-                _logText.IsReadOnly = false;
+                editor.IsReadOnly = false;
                 RefreshButtons();
             }
         }
@@ -329,14 +338,14 @@ internal sealed partial class LogView
     {
         if (_closed || _pageEdit is not { } edit) return;
         ClearPageEdit();
-        await LoadPageAsync(edit.From, saveHistory: false, allowFollowEnd: false);
+        await LoadPageAsync(edit.From, saveHistory: false);
         RefreshButtons();
     }
 
     private bool ExitPageEditForExternalRefresh()
     {
         if (_pageEdit is not { } edit) return false;
-        var text = _logText.Text ?? "";
+        var text = _pageEditor!.Text;
         var modified = text != edit.Original;
         if (modified) PreserveExternalPageEdit!(text);
         ClearPageEdit();
@@ -346,8 +355,13 @@ internal sealed partial class LogView
     private void ClearPageEdit()
     {
         _pageEdit = null;
-        _logText.IsReadOnly = true;
-        _logText.MaxLength = 0;
+        _editedPageChanged = false;
+        if (_pageEditor is { } editor)
+        {
+            editor.IsVisible = false;
+            editor.Document = new TextDocument();
+        }
+        _logText.IsVisible = true;
         _lineGutterScrollViewer.IsVisible = true;
     }
 
@@ -355,7 +369,7 @@ internal sealed partial class LogView
     {
         var editing = _pageEdit is not null;
         var saving = _pageWrite is not null;
-        _readModeLabel.Text = _isDraft ? "РЕДАКТИРОВАНИЕ ЧЕРНОВИКА"
+        _readModeLabel.Text = _isDraft && (editing || EditsPagesByDefault) ? "РЕДАКТИРОВАНИЕ ЧЕРНОВИКА"
             : EditsPagesByDefault || editing ? "РЕДАКТИРОВАНИЕ" : "ТОЛЬКО ЧТЕНИЕ";
         _editPageButton.IsVisible = !EditsPagesByDefault;
         _editPageButton.Content = editing ? "Только чтение" : "Редактировать";
@@ -369,5 +383,5 @@ internal sealed partial class LogView
 
     private static IOException ChangedSincePageRead() => new("Файл изменился на диске. Обновите страницу перед сохранением.");
 
-    private sealed record PageEdit(long From, long To, string Original, Encoding Encoding, FileStamp Stamp, int InitialCaret);
+    private sealed record PageEdit(long From, long To, string Original, Encoding Encoding, FileStamp Stamp);
 }

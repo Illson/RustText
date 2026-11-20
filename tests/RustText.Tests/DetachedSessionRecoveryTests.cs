@@ -26,6 +26,7 @@ public sealed class DetachedSessionRecoveryTests
                 var draftText = new string('x', 64 * 1024 + 1);
                 Invoke(primary, "NewTab", draftText);
                 var draft = ActiveTab(primary);
+                await CallAsync(primary, "ToggleLogModeAsync", draft);
                 await HeadlessTests.WaitForAsync(() => Property(draft, "Recovery") is SessionTab);
                 var stored = Assert.IsType<SessionTab>(Property(draft, "Recovery"));
                 var sourceStorage = Assert.IsType<StorageService>(Property(primary, "SessionStorage"));

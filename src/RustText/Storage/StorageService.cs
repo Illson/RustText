@@ -296,11 +296,11 @@ internal sealed class StorageService
         return candidate ?? throw new IOException("Черновик больше не доступен в сохранённых контрольных точках.");
     }
 
-    public async Task<string?> LoadDraftAsync(SessionTab tab, CancellationToken cancellationToken = default)
+    public async Task<string?> LoadDraftAsync(SessionTab tab, CancellationToken cancellationToken = default, bool fullEditor = false)
     {
         if (string.IsNullOrWhiteSpace(tab.DraftRef)) return null;
         var path = ResolveAnyDraftReference(tab.DraftRef);
-        if (new FileInfo(path).Length > 8L * 1024 * 1024) throw new IOException("Черновик больше 8 МиБ. Используйте GetDraftPath для потокового чтения.");
+        if (!fullEditor && new FileInfo(path).Length > 8L * 1024 * 1024) throw new IOException("Черновик больше 8 МиБ. Используйте GetDraftPath для потокового чтения.");
         var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
         if (tab.DraftSha256 is not null && !string.Equals(Convert.ToHexString(SHA256.HashData(bytes)), tab.DraftSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Черновик повреждён.");
@@ -317,7 +317,7 @@ internal sealed class StorageService
 
     public async Task<SessionTab> SaveClosedDraftAsync(SessionTab tab, Func<TextReader> openReader, CancellationToken token = default)
     {
-        var (temporary, hash, lineCount) = await WriteDraftStreamAsync(_drafts, tab.Id, openReader, token).ConfigureAwait(false);
+        var (temporary, hash, lineCount) = await Task.Run(() => WriteDraftStreamAsync(_drafts, tab.Id, openReader, token), token).ConfigureAwait(false);
         var name = $"closed-{tab.Id}-{hash}.txt";
         var file = Path.Combine(_drafts, name);
         try

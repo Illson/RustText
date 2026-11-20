@@ -197,6 +197,7 @@ internal sealed partial class LogView
         _contentViewport.Children[0].IsVisible = true;
         if (!wasFiltered) return;
         _contentViewport.Children.Remove(_levelFilterViewport);
+        if (_pageEdit is not null) return;
         _logText.CaretIndex = Math.Clamp(_sourceCaretIndex, 0, _logText.Text?.Length ?? 0);
         _logText.SelectionStart = Math.Clamp(_sourceSelectionStart, 0, _logText.Text?.Length ?? 0);
         _logText.SelectionEnd = Math.Clamp(_sourceSelectionEnd, 0, _logText.Text?.Length ?? 0);

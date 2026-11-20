@@ -11,7 +11,7 @@ namespace RustText.Demo.Editor;
 internal sealed class GroupedLineNumberMargin : LineNumberMargin
 {
     private IReadOnlyList<int>? _sourceLines;
-    private readonly Dictionary<int, TextLayout> _labels = [];
+    private readonly Dictionary<long, TextLayout> _labels = [];
     private Typeface _labelTypeface;
     private double _labelSize;
     private IBrush? _labelBrush;
@@ -22,6 +22,20 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
         InvalidateMeasure();
         InvalidateVisual();
     }
+
+    internal long? FirstLineNumber
+    {
+        get;
+        set
+        {
+            if (field == value) return;
+            field = value;
+            InvalidateMeasure();
+            InvalidateVisual();
+        }
+    } = 1;
+
+    private long SourceNumber(int row) => _sourceLines is null ? (FirstLineNumber + row - 1 ?? 0) : _sourceLines[row - 1];
 
     internal static GroupedLineNumberMargin? ReplaceExisting(TextEditor editor)
     {
@@ -50,7 +64,7 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
     protected override Size MeasureOverride(Size availableSize)
     {
         var size = base.MeasureOverride(availableSize);
-        var lastNumber = _sourceLines is { Count: > 0 } ? _sourceLines[^1] : Document?.LineCount ?? 1;
+        var lastNumber = _sourceLines is { Count: > 0 } ? _sourceLines[^1] : (FirstLineNumber + (Document?.LineCount ?? 1) - 1 ?? 0);
         UpdateLabelStyle();
         return new Size(Math.Max(size.Width, GetLabel(lastNumber).Width), size.Height);
     }
@@ -67,7 +81,7 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
         {
             var row = line.FirstDocumentLine.LineNumber;
             if (_sourceLines is not null && row > _sourceLines.Count) continue;
-            var text = GetLabel(_sourceLines is null ? row : _sourceLines[row - 1]);
+            var text = GetLabel(SourceNumber(row));
             var y = line.GetTextLineVisualYPosition(line.TextLines[0], VisualYPosition.TextTop);
             text.Draw(drawingContext, new Point(Bounds.Width - text.Width, y - textView.VerticalOffset));
         }
@@ -81,12 +95,12 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
         (_labelTypeface, _labelSize, _labelBrush) = (Typeface, EmSize, brush);
     }
 
-    private TextLayout GetLabel(int number)
+    private TextLayout GetLabel(long number)
     {
         if (_labels.TryGetValue(number, out var label)) return label;
         // Keep scrolling through a large document from retaining its entire line-number index.
         if (_labels.Count >= 256) ClearLabels();
-        label = new TextLayout(LineNumbers.Format(number), _labelTypeface, _labelSize, _labelBrush);
+        label = new TextLayout(number == 0 ? "?" : LineNumbers.Format(number), _labelTypeface, _labelSize, _labelBrush);
         _labels.Add(number, label);
         return label;
     }

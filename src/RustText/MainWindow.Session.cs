@@ -336,6 +336,7 @@ public partial class MainWindow
         {
             JsonValidationDisabled = tab.JsonDisabled,
             AutoRefresh = tab.AutoRefresh,
+            DraftLogMode = editor is null ? null : false,
             CustomTitle = tab.CustomTitle,
             UntitledName = tab.Path is null ? UntitledName(tab) : null
         };
@@ -685,51 +686,45 @@ public partial class MainWindow
             else if (saved.DraftRef is not null)
             {
                 var draftPath = storage.GetDraftPath(saved);
-                if (draftPath is not null && new FileInfo(draftPath).Length > LineGeneratorThreshold)
+                if (draftPath is not null && (saved.DraftLogMode == true || saved.DraftOffset.HasValue
+                    || saved.DraftLogMode is null && new FileInfo(draftPath).Length > LineGeneratorThreshold))
                 {
                     AttachPagedDraftEditor(tab, saved, draftPath);
                 }
                 else
                 {
-                    var draft = await storage.LoadDraftAsync(saved, token) ?? "";
+                    var draft = await storage.LoadDraftAsync(saved, token, fullEditor: saved.DraftLogMode == false) ?? "";
                     if (!IsCurrentTab()) return;
-                    if (draftPath is not null && IsOversizedEditorText(draft))
+                    if (!TryShareFileEditor(tab, saved.Encoding, draft))
                     {
-                        AttachPagedDraftEditor(tab, saved, draftPath);
+                        AttachEditor(tab, draft);
+                        tab.Dirty = draft.Length != 0 || tab.Path is not null;
+                        tab.RestoredDirty = tab.Dirty;
                     }
-                    else
+                    if (tab.Stamp is null && tab.Path is { } original && File.Exists(original))
                     {
-                        if (!TryShareFileEditor(tab, saved.Encoding, draft))
+                        try
                         {
-                            AttachEditor(tab, draft);
-                            tab.Dirty = draft.Length != 0 || tab.Path is not null;
-                            tab.RestoredDirty = tab.Dirty;
-                        }
-                        if (tab.Stamp is null && tab.Path is { } original && File.Exists(original))
-                        {
-                            try
+                            if (saved.LegacyStamp is { } legacy)
                             {
-                                if (saved.LegacyStamp is { } legacy)
+                                var stamp = await DocumentFiles.GetStampAsync(original, token);
+                                if (!IsCurrentTab()) return;
+                                if (stamp.Length == legacy.Length && stamp.LastWriteUtc == legacy.LastWriteUtc
+                                    && (legacy.CreatedUtc is null || File.GetCreationTimeUtc(original) == legacy.CreatedUtc))
                                 {
-                                    var stamp = await DocumentFiles.GetStampAsync(original, token);
-                                    if (!IsCurrentTab()) return;
-                                    if (stamp.Length == legacy.Length && stamp.LastWriteUtc == legacy.LastWriteUtc
-                                        && (legacy.CreatedUtc is null || File.GetCreationTimeUtc(original) == legacy.CreatedUtc))
-                                    {
-                                        tab.Stamp = stamp;
-                                    }
+                                    tab.Stamp = stamp;
                                 }
                             }
-                            catch (IOException)
-                            {
-                            }
-                            catch (UnauthorizedAccessException)
-                            {
-                            }
-
-                            tab.DiskStatus = tab.Stamp is null
-                                ? "Проверьте исходник и сохраните черновик через «Сохранить как»." : null;
                         }
+                        catch (IOException)
+                        {
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                        }
+
+                        tab.DiskStatus = tab.Stamp is null
+                            ? "Проверьте исходник и сохраните черновик через «Сохранить как»." : null;
                     }
                 }
             }
@@ -834,12 +829,13 @@ public partial class MainWindow
     }
 
     private void AttachPagedDraftEditor(WorkTab tab, SessionTab saved, string draftPath, int? pageCaret = null,
-        bool focus = false, long? byteCaret = null)
+        bool focus = false)
     {
         var name = saved.Path is { } path ? Path.GetFileName(path) : saved.UntitledName;
-        var state = new LogTabState(TextEncodingKind.Utf8, saved.DraftOffset ?? 0, WordWrap: _wordWrap);
+        var state = new LogTabState(TextEncodingKind.Utf8, saved.DraftOffset ?? 0, WordWrap: _wordWrap,
+            EditPages: saved.DraftLogMode != true);
         var lineCount = saved.DraftOffset.HasValue ? saved.LineCount : null;
-        AttachLog(tab, draftPath, TextEncodingKind.Utf8, state, name ?? "Черновик", lineCount, initialDraftCaretBytes: byteCaret);
+        AttachLog(tab, draftPath, TextEncodingKind.Utf8, state, name ?? "Черновик", lineCount);
         tab.Recovery = saved;
         UpdateTab(tab);
         var editor = tab.Log!;
