@@ -40,7 +40,11 @@ public sealed class WorkspaceTabsScrollTests
             await HeadlessTests.WaitForAsync(() => tabs.HeaderViewport is
                 { Bounds.Width: > 0, Bounds.Height: > 0 });
             var viewport = Assert.IsType<ScrollViewer>(tabs.HeaderViewport);
+            var position = Assert.Single(tabs.GetVisualDescendants().OfType<Track>(),
+                track => track.Name == "TabScrollPosition");
             var oneTabHeaderHeight = viewport.Bounds.Height;
+            Assert.False(position.IsVisible);
+            Assert.False(position.IsHitTestVisible);
 
             for (var index = 2; index <= 12; index++)
             {
@@ -52,6 +56,19 @@ public sealed class WorkspaceTabsScrollTests
             }
 
             await HeadlessTests.WaitForAsync(() => viewport.Extent.Width > viewport.Viewport.Width);
+            await HeadlessTests.WaitForAsync(() => position.IsVisible && position.Maximum > 0);
+            Assert.Equal(2, position.Bounds.Height);
+            Assert.Equal(viewport.Bounds.Bottom, position.Bounds.Top);
+            Assert.Equal(viewport.Bounds.Width, position.Bounds.Width);
+            Assert.Equal(viewport.ScrollBarMaximum.X, position.Maximum, precision: 3);
+            Assert.Equal(viewport.Viewport.Width, position.ViewportSize, precision: 3);
+            Assert.Equal(0, position.Value, precision: 3);
+
+            var thumb = Assert.IsType<Thumb>(position.Thumb);
+            var expectedThumbWidth = position.Bounds.Width * position.ViewportSize
+                / (position.Maximum + position.ViewportSize);
+            Assert.InRange(Math.Abs(thumb.Bounds.Width - expectedThumbWidth), 0, 1.5);
+
             var selection = tabs.SelectedItem;
             var viewportCenter = viewport.TranslatePoint(
                 new Point(viewport.Bounds.Width / 2, viewport.Bounds.Height / 2), window);
@@ -59,13 +76,26 @@ public sealed class WorkspaceTabsScrollTests
 
             var initialOffset = viewport.Offset.X;
             window.MouseWheel(viewportCenter!.Value, new Vector(0, -1));
+            window.UpdateLayout();
             Assert.True(viewport.Offset.X > initialOffset);
+            Assert.Equal(viewport.Offset.X, position.Value, precision: 3);
             Assert.Same(selection, tabs.SelectedItem);
+            Assert.True(thumb.Bounds.X > 0);
 
             var scrolledOffset = viewport.Offset.X;
             window.MouseWheel(viewportCenter.Value, new Vector(0, 1));
             Assert.True(viewport.Offset.X < scrolledOffset);
             Assert.Same(selection, tabs.SelectedItem);
+
+            window.MouseWheel(viewportCenter.Value, new Vector(0, -50));
+            window.UpdateLayout();
+            Assert.Equal(position.Maximum, position.Value);
+            Assert.InRange(Math.Abs(thumb.Bounds.Right - position.Bounds.Width), 0, 1.5);
+
+            window.MouseWheel(viewportCenter.Value, new Vector(0, 50));
+            window.UpdateLayout();
+            Assert.Equal(0, position.Value);
+            Assert.InRange(Math.Abs(thumb.Bounds.X), 0, 1.5);
 
             var lastTab = tabs.Items.OfType<TabItem>().Last();
             var clippedEdge = lastTab.TranslatePoint(
@@ -93,6 +123,16 @@ public sealed class WorkspaceTabsScrollTests
             var beforeContentWheel = viewport.Offset.X;
             window.MouseWheel(contentCenter!.Value, new Vector(0, -1));
             Assert.Equal(beforeContentWheel, viewport.Offset.X);
+
+            var originalIndicatorWidth = position.Bounds.Width;
+            tabs.Width -= 120;
+            window.UpdateLayout();
+            Assert.True(position.Bounds.Width < originalIndicatorWidth);
+            Assert.Equal(viewport.Viewport.Width, position.ViewportSize, precision: 3);
+
+            foreach (var extraTab in tabs.Items.Skip(1).ToArray()) tabs.Items.Remove(extraTab);
+            await HeadlessTests.WaitForAsync(() => !position.IsVisible);
+            Assert.Equal(0, position.Maximum);
         }
         finally
         {
