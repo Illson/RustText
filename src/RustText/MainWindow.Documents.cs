@@ -3,6 +3,7 @@ using System.Text;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
@@ -10,6 +11,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Document;
 using AvaloniaEdit.Highlighting;
@@ -73,7 +75,7 @@ public partial class MainWindow
         await OpenPathsAsync(paths, asLog, encoding);
     }
 
-    private async Task OpenPathsAsync(IEnumerable<string> paths, bool asLog = false, TextEncodingKind? encoding = null)
+    private async Task OpenPathsAsync(IEnumerable<string> paths, bool? asLog = null, TextEncodingKind? encoding = null)
     {
         var pending = new List<OpenRequest>();
         WorkTab? last = null;
@@ -105,7 +107,7 @@ public partial class MainWindow
         return request.Tab;
     }
 
-    private async Task<OpenRequest?> PrepareOpenAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages = false)
+    private async Task<OpenRequest?> PrepareOpenAsync(string path, bool? asLog, TextEncodingKind? encoding, bool editPages = false)
     {
         var fullPath = Path.GetFullPath(path);
         var file = new FileInfo(fullPath);
@@ -114,7 +116,9 @@ public partial class MainWindow
             throw new FileNotFoundException($"Файл не найден. {fullPath}", fullPath);
         }
 
-        var mode = editPages ? FileOpenMode.PagedEditor : asLog ? FileOpenMode.Log : FileOpenMode.Editor;
+        var openAsLog = asLog ?? (file.Length <= LargeFilePromptBytes && await ShouldOpenAsLogAsync(fullPath, encoding));
+        if (_closed || _closing) return null;
+        var mode = editPages ? FileOpenMode.PagedEditor : openAsLog ? FileOpenMode.Log : FileOpenMode.Editor;
         if (mode == FileOpenMode.Editor)
         {
             var existingEditor = _tabs.Values.FirstOrDefault(tab =>
@@ -149,6 +153,17 @@ public partial class MainWindow
         tab.Item.Content = new TextBlock { Text = "Ожидание загрузки…", Margin = new Thickness(18) };
         UpdateTab(tab);
         return new(tab, true, mode);
+    }
+
+    private async Task<bool> ShouldOpenAsLogAsync(string path, TextEncodingKind? encoding)
+    {
+        if (LogLevels.IsLogPath(path)) return true;
+        if (!string.Equals(Path.GetExtension(path), ".txt", StringComparison.OrdinalIgnoreCase)) return false;
+        if (_tabs.Values.Any(tab => tab.OpensAsLog && tab.Recovery is null && SamePath(tab.Path, path))
+            || _recent.Any(entry => entry.ViewAsLog && entry.Log?.EditPages != true && SamePath(entry.Path, path))) return true;
+
+        var token = _lifetime.Token;
+        return await Task.Run(() => LogLevels.HasLogRecords(path, encoding, token), token);
     }
 
     private async Task<bool?> ChooseLargeFileModeAsync(FileInfo file)
@@ -287,8 +302,8 @@ public partial class MainWindow
             LineNumbersMargin = new Thickness(8, 0, 12, 0),
             WordWrap = _wordWrap,
             ShowLineNumbers = true,
-            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
+            HorizontalScrollBarVisibility = _wordWrap ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden
         };
         GroupedLineNumberMargin.ReplaceExisting(editor);
         EditorCaret.Attach(editor.TextArea);
@@ -350,9 +365,24 @@ public partial class MainWindow
         Grid.SetRow(editor, 2);
         grid.Children.Add(editor);
         var minimap = new DocumentMinimap(editor);
-        Grid.SetRow(minimap, 2);
-        Grid.SetColumn(minimap, 1);
-        grid.Children.Add(minimap);
+        var minimapDock = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        minimapDock.Children.Add(minimap);
+        var verticalScrollBar = new ViewportScrollBar();
+        Grid.SetColumn(verticalScrollBar, 1);
+        minimapDock.Children.Add(verticalScrollBar);
+        void AttachViewportScrollBar()
+        {
+            verticalScrollBar.SetOwner(editor.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault());
+        }
+        EventHandler<TemplateAppliedEventArgs> templateApplied = (_, _) => AttachViewportScrollBar();
+        EventHandler<VisualTreeAttachmentEventArgs> attached = (_, _) => AttachViewportScrollBar();
+        EventHandler<VisualTreeAttachmentEventArgs> detached = (_, _) => verticalScrollBar.SetOwner(null);
+        editor.TemplateApplied += templateApplied;
+        editor.AttachedToVisualTree += attached;
+        editor.DetachedFromVisualTree += detached;
+        Grid.SetRow(minimapDock, 2);
+        Grid.SetColumn(minimapDock, 1);
+        grid.Children.Add(minimapDock);
         tab.Item.Content = grid;
         System.ComponentModel.PropertyChangedEventHandler undoHandler = (_, e) =>
         {
@@ -460,9 +490,14 @@ public partial class MainWindow
             () => editor.TextArea.CommandBindings.Remove(pasteBinding),
             () => editor.TextArea.RemoveHandler(KeyDownEvent, PasteKeyDown),
             () => editor.TextArea.RemoveHandler(KeyDownEvent, CutLineKeyDown),
+            () => editor.TemplateApplied -= templateApplied,
+            () => editor.AttachedToVisualTree -= attached,
+            () => editor.DetachedFromVisualTree -= detached,
+            () => verticalScrollBar.SetOwner(null),
             multiCaret.Dispose
         ];
         tab.Minimap = minimap;
+        tab.MinimapDock = minimapDock;
         WatchEditorFile(tab);
         UpdateTab(tab);
         ScheduleJsonValidation(tab);
@@ -567,7 +602,7 @@ public partial class MainWindow
     private void ShowEditorLevelFilter(WorkTab tab)
     {
         if (tab.Editor is not { Parent: Grid grid } editor || tab.EditorLogFilter is not null) return;
-        var filter = new EditorLogFilter(editor, tab.Minimap, () => CloseEditorLevelFilter(tab));
+        var filter = new EditorLogFilter(editor, tab.MinimapDock, () => CloseEditorLevelFilter(tab));
         tab.EditorLogFilter = filter;
         Grid.SetRow(filter.PanelControl, 1);
         Grid.SetColumnSpan(filter.PanelControl, 2);
@@ -882,6 +917,7 @@ public partial class MainWindow
         tab.Highlights = null;
         tab.Minimap?.Dispose();
         tab.Minimap = null;
+        tab.MinimapDock = null;
         var document = editor.Document;
         editor.Document = new TextDocument();
         tab.Editor = null;
@@ -1372,7 +1408,7 @@ public partial class MainWindow
             return;
         }
 
-        if (LogLevels.IsLogPath(tab.Path) && !MightBeJsonLogLinesPrefix(editor.Document))
+        if (!ShouldCheckJson(editor.Document, tab.Path))
         {
             return;
         }
@@ -1425,6 +1461,21 @@ public partial class MainWindow
 
             source.Dispose();
         }
+    }
+
+    private static bool ShouldCheckJson(TextDocument document, string? path)
+    {
+        if (TextOperations.IsJsonPath(path)) return true;
+        if (LogLevels.IsLogPath(path)) return MightBeJsonLogLinesPrefix(document);
+
+        // A long whitespace prefix is inconclusive. Leave the full check on the worker.
+        var end = Math.Min(document.TextLength, 64);
+        for (var i = 0; i < end; i++)
+        {
+            var c = document.GetCharAt(i);
+            if (c != '\uFEFF' && !char.IsWhiteSpace(c)) return c is '{' or '[';
+        }
+        return document.TextLength > end;
     }
 
     private static bool MightBeJsonLogLinesPrefix(TextDocument document)
@@ -1485,6 +1536,7 @@ public partial class MainWindow
         public DateTimeOffset LastWorked { get; set; } = DateTimeOffset.Now;
         public SearchHighlights? Highlights { get; set; }
         public DocumentMinimap? Minimap { get; set; }
+        public Control? MinimapDock { get; set; }
         public List<Action> EditorSubscriptions { get; set; } = [];
         public JsonProblem? JsonError { get; set; }
         public Border? JsonBanner { get; set; }

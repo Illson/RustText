@@ -29,12 +29,44 @@ public sealed class WorkspaceTests
     [Theory]
     [InlineData(1, 700, 1)]
     [InlineData(20, 700, 20)]
-    [InlineData(300, 700, 160)]
-    [InlineData(300, 1800, 160)]
+    [InlineData(300, 700, 64)]
+    [InlineData(300, 1800, 64)]
     [InlineData(0, 700, 0)]
+    [InlineData(4000, 120, 20)]
     [InlineData(20, 1, 0)]
     public void TextMinimapUsesAtMostOneSamplePerDocumentLine(int lineCount, double height, int expected) =>
         Assert.Equal(expected, DocumentMinimap.GetRowCount(lineCount, height));
+
+    [Fact]
+    public Task TypingInLargeDocumentUpdatesWatermarkWithoutCopyingTheText() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "");
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.Watermark = "Введите текст";
+            await HeadlessTests.WaitForAsync(() => editor.GetVisualDescendants().OfType<TextBlock>()
+                .Any(block => block.Name == "PART_Watermark"));
+            var watermark = editor.GetVisualDescendants().OfType<TextBlock>().Single(block => block.Name == "PART_Watermark");
+            Assert.True(watermark.IsVisible);
+            Assert.Equal(editor.Watermark, watermark.Text);
+
+            editor.Text = string.Concat(Enumerable.Repeat(new string('я', 80) + "\n", 12_000));
+            editor.CaretOffset = editor.Document.TextLength;
+            editor.TextArea.PerformTextInput("ж");
+            Assert.False(watermark.IsVisible);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 4; i++) editor.TextArea.PerformTextInput("ж");
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.True(allocated < editor.Document.TextLength * sizeof(char), $"Allocated {allocated} bytes for four edits.");
+            Assert.Equal("жжжжж", editor.Document.GetText(editor.CaretOffset - 5, 5));
+
+            editor.Clear();
+            Assert.True(watermark.IsVisible);
+        }
+        finally { await CloseAsync(window); }
+    });
 
     [Fact]
     public Task ClosingDetachedWindowRestoresInputInRemainingWindow() => HeadlessTests.RunAsync(async profile =>
@@ -2332,6 +2364,47 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task EditorWrapKeepsLongRowsInTheViewportBesideMinimap() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "long-line.txt");
+        var line = new string('x', 512) + "-end";
+        await File.WriteAllTextAsync(path, line);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var viewport = editor.GetVisualParent()!;
+            var minimap = Assert.Single(viewport.GetVisualDescendants().OfType<DocumentMinimap>());
+            var minimapDock = Assert.IsType<Grid>(minimap.GetVisualParent());
+            var verticalScrollBar = Assert.Single(minimapDock.GetVisualChildren().OfType<ViewportScrollBar>());
+            var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => scroll.Viewport.Width > 0
+                && view.VisualLinesValid && view.VisualLines.Count > 0);
+            Assert.True(editor.WordWrap);
+            Assert.True(scroll.Extent.Width <= scroll.Viewport.Width + 1);
+            Assert.InRange(scroll.Offset.X, 0, 1);
+
+            bool LineWraps() => view.GetVisualPosition(new TextViewPosition(1, line.Length + 1), VisualYPosition.LineMiddle).Y
+                > view.GetVisualPosition(new TextViewPosition(1, 1), VisualYPosition.LineMiddle).Y;
+            Assert.True(LineWraps());
+            AssertViewportControlsDoNotOverlap(editor, minimap, verticalScrollBar, viewport, window);
+
+            Invoke(window, "ToggleWrap");
+            await HeadlessTests.WaitForAsync(() => scroll.Extent.Width > scroll.Viewport.Width && !LineWraps());
+            var horizontalMaximum = scroll.Extent.Width - scroll.Viewport.Width;
+            scroll.Offset = new Vector(horizontalMaximum, scroll.Offset.Y);
+            Assert.Equal(horizontalMaximum, scroll.Offset.X, precision: 1);
+            AssertViewportControlsDoNotOverlap(editor, minimap, verticalScrollBar, viewport, window);
+
+            Invoke(window, "ToggleWrap");
+            await HeadlessTests.WaitForAsync(() => scroll.Extent.Width <= scroll.Viewport.Width + 1 && LineWraps());
+            Assert.InRange(scroll.Offset.X, 0, 1);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task TextMinimapClickDragAndWheelKeepCaretAndSelection() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "scroll.txt");
@@ -2340,9 +2413,15 @@ public sealed class WorkspaceTests
         try
         {
             var editor = Read<TextEditor>(ActiveTab(window), "Editor");
-            var minimap = Assert.Single(editor.GetVisualParent()!.GetVisualChildren().OfType<DocumentMinimap>());
+            var viewport = editor.GetVisualParent()!;
+            var minimap = Assert.Single(viewport.GetVisualDescendants().OfType<DocumentMinimap>());
+            var minimapDock = Assert.IsType<Grid>(minimap.GetVisualParent());
+            var verticalScrollBar = Assert.Single(minimapDock.GetVisualChildren().OfType<ViewportScrollBar>());
             var scroll = editor.GetVisualDescendants().OfType<ScrollViewer>().First();
             await HeadlessTests.WaitForAsync(() => scroll.Extent.Height > scroll.Viewport.Height && minimap.Bounds.Height > 10);
+            Assert.Equal(ScrollBarVisibility.Hidden, editor.VerticalScrollBarVisibility);
+            Assert.True(verticalScrollBar.IsVisible);
+            AssertViewportControlsDoNotOverlap(editor, minimap, verticalScrollBar, viewport, window);
             editor.Select(3, 5);
             editor.CaretOffset = 8;
             var top = minimap.TranslatePoint(new Point(20, 1), window)!.Value;
@@ -2350,7 +2429,24 @@ public sealed class WorkspaceTests
             var bottom = minimap.TranslatePoint(new Point(20, minimap.Bounds.Height + 2), window)!.Value;
             var maximum = scroll.Extent.Height - scroll.Viewport.Height;
 
+            verticalScrollBar.Value = maximum / 2;
+            await HeadlessTests.WaitForAsync(() => Math.Abs(scroll.Offset.Y - maximum / 2) < 1);
+            Assert.InRange(verticalScrollBar.Value, maximum * .49, maximum * .51);
+            verticalScrollBar.Value = 0;
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y < 1);
+
+            var editorPoint = editor.TranslatePoint(new Point(editor.Bounds.Width / 2, editor.Bounds.Height / 2), window)!.Value;
+            window.MouseWheel(editorPoint, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > 0);
+            Assert.InRange(verticalScrollBar.Value, scroll.Offset.Y - 1, scroll.Offset.Y + 1);
+            var previousWheelOffset = scroll.Offset.Y;
+            var barPoint = verticalScrollBar.TranslatePoint(
+                new Point(verticalScrollBar.Bounds.Width / 2, verticalScrollBar.Bounds.Height / 2), window)!.Value;
+            window.MouseWheel(barPoint, new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > previousWheelOffset);
+
             window.MouseDown(middle, MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y is > 0);
             Assert.InRange(scroll.Offset.Y, maximum * .45, maximum * .55);
             window.MouseMove(bottom, RawInputModifiers.LeftMouseButton);
             Assert.InRange(scroll.Offset.Y, maximum - 1, maximum + 1);
@@ -2363,6 +2459,16 @@ public sealed class WorkspaceTests
             Assert.Equal(3, editor.SelectionStart);
             Assert.Equal(5, editor.SelectionLength);
             Assert.Equal(8, editor.CaretOffset);
+
+            var tab = ActiveTab(window);
+            Invoke(window, "ShowEditorLevelFilter", tab);
+            var filter = Assert.IsType<EditorLogFilter>(Property(tab, "EditorLogFilter"));
+            filter.PanelControl.SetLevels(LogLevel.Error);
+            Assert.False(minimapDock.IsVisible);
+            Assert.False(verticalScrollBar.IsEffectivelyVisible);
+            filter.PanelControl.SetLevels(LogLevel.All);
+            Assert.True(minimapDock.IsVisible);
+            Assert.True(verticalScrollBar.IsEffectivelyVisible);
         }
         finally
         {
@@ -2397,9 +2503,10 @@ public sealed class WorkspaceTests
         const string invalid = """{"kind":"имя🚀","value": }""";
         var path = Path.Combine(profile, name);
         await File.WriteAllTextAsync(path, first + "\r\n" + valid + "\r\n");
-        var window = await OpenWorkspaceAsync(path);
+        var window = await OpenWorkspaceAsync();
         try
         {
+            await CallAsync(window, "OpenPathAsync", path, false, null);
             var tab = ActiveTab(window);
             var editor = Read<TextEditor>(tab, "Editor");
             await HeadlessTests.WaitForAsync(() => Property(tab, "JsonCancellation") is null);
@@ -2418,6 +2525,28 @@ public sealed class WorkspaceTests
             Assert.Equal("{\"kind\":\"start\"}\n{\"kind\":\"имя\",\"value\":true}\n", editor.Text);
             await HeadlessTests.WaitForAsync(() => Property(tab, "JsonCancellation") is null);
             Assert.Null(Property(tab, "JsonError"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task PlainTypingSkipsJsonWorkAndEditingThePrefixStillEnablesValidation() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "  заметка");
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Insert(editor.Document.TextLength, "!");
+            Assert.Null(Property(tab, "JsonCancellation"));
+
+            editor.Document.Replace(0, editor.Document.TextLength, new string(' ', 90) + "{broken");
+            await HeadlessTests.WaitForAsync(() => Property(tab, "JsonError") is not null);
+            editor.Document.Insert(0, "текст");
+            Assert.Null(Property(tab, "JsonError"));
+            Assert.False(Read<Border>(tab, "JsonBanner").IsVisible);
+            Assert.Null(Property(tab, "JsonCancellation"));
         }
         finally { await CloseAsync(window); }
     });
@@ -2560,9 +2689,10 @@ public sealed class WorkspaceTests
     {
         var path = Path.Combine(profile, "editing.log");
         await File.WriteAllTextAsync(path, "INFO on disk\nWARN disk warning\n");
-        var window = await OpenWorkspaceAsync(path);
+        var window = await OpenWorkspaceAsync();
         try
         {
+            await CallAsync(window, "OpenPathAsync", path, false, null);
             var tab = ActiveTab(window);
             var editor = Read<TextEditor>(tab, "Editor");
             Assert.True(Assert.Single(editor.TextArea.TextView.LineTransformers.OfType<LogLevelColorizer>()).Enabled);
@@ -2680,6 +2810,20 @@ public sealed class WorkspaceTests
     });
 
     private static Color SolidColor(IBrush? brush) => Assert.IsAssignableFrom<ISolidColorBrush>(brush).Color;
+
+    private static void AssertViewportControlsDoNotOverlap(TextEditor editor, DocumentMinimap minimap,
+        ViewportScrollBar verticalScrollBar, Visual viewport, Window window)
+    {
+        var editorOrigin = editor.TranslatePoint(default, window)!.Value;
+        var minimapOrigin = minimap.TranslatePoint(default, window)!.Value;
+        Assert.True(editorOrigin.X + editor.Bounds.Width <= minimapOrigin.X);
+        if (!verticalScrollBar.IsEffectivelyVisible) return;
+
+        var scrollBarOrigin = verticalScrollBar.TranslatePoint(default, window)!.Value;
+        var viewportOrigin = viewport.TranslatePoint(default, window)!.Value;
+        Assert.True(minimapOrigin.X + minimap.Bounds.Width <= scrollBarOrigin.X);
+        Assert.True(scrollBarOrigin.X + verticalScrollBar.Bounds.Width <= viewportOrigin.X + viewport.Bounds.Width);
+    }
 
     private static async Task<MainWindow> OpenWorkspaceAsync(params string[] paths)
     {

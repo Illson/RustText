@@ -8,6 +8,7 @@ namespace RustText.Demo.Logs;
 
 internal sealed class LogDataReader
 {
+    internal const int MinimapColumns = 32;
     private const int LookaheadBytes = 4;
     private const int MidpointScanBytes = 64 * 1024;
     private const int MaximumPageBytes = 1024 * 1024;
@@ -157,6 +158,39 @@ internal sealed class LogDataReader
             return TextEncodingKind.Utf8Bom;
         }
         return TextEncodingKind.Utf8;
+    }
+
+    internal byte[] ReadMinimapWidths(long start, long fileLength, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        start = Math.Max(start, _bomLength);
+        if (start >= fileLength) return [];
+        if (_codeUnitBytes == 2) start += (start - _bomLength) % 2;
+        var units = (fileLength - start) / _codeUnitBytes;
+        if (units == 0) return [];
+
+        const int maxSamples = 32;
+        var widths = new byte[(int)Math.Min(units, maxSamples)];
+        var intervals = Math.Max(1, widths.Length - 1);
+        // Four bytes per displayed character, plus room to skip an initial partial UTF-8 scalar.
+        Span<byte> buffer = stackalloc byte[MinimapColumns * 4 + 3];
+        var handle = _file.SafeFileHandle;
+        for (var i = 0; i < widths.Length; i++)
+        {
+            var unit = (long)((Int128)i * (units - 1) / intervals);
+            var offset = start + unit * _codeUnitBytes;
+            var count = (int)Math.Min(buffer.Length, fileLength - offset);
+            var read = ReadWindowInto(handle, offset, buffer[..count], token);
+            ReadOnlySpan<byte> bytes = buffer[..(read - read % _codeUnitBytes)];
+            if ((Encoding is TextEncodingKind.Utf8 or TextEncodingKind.Utf8Bom) && offset > _bomLength)
+            {
+                while (!bytes.IsEmpty && IsUtf8Continuation(bytes[0])) bytes = bytes[1..];
+            }
+            var end = FindLineEnding(bytes).Index;
+            if (end >= 0) bytes = bytes[..end];
+            widths[i] = (byte)Math.Min(MinimapColumns, _decoder.GetCharCount(bytes));
+        }
+        return widths;
     }
 
     public LogPage ReadPage(
@@ -420,21 +454,16 @@ internal sealed class LogDataReader
 
     private (int Index, int Length) FindLineEnding(ReadOnlySpan<byte> bytes)
     {
+        if (_codeUnitBytes == 1)
+        {
+            var index = bytes.IndexOfAny((byte)'\r', (byte)'\n');
+            if (index < 0) return (-1, 0);
+            return (index, bytes[index..].StartsWith("\r\n"u8) ? 2 : 1);
+        }
+
         for (var index = 0; index + _codeUnitBytes <= bytes.Length; index += _codeUnitBytes)
         {
-            var codeUnit = bytes.Slice(index, _codeUnitBytes);
-            if (IsLineFeed(codeUnit))
-            {
-                return (index, _codeUnitBytes);
-            }
-            if (IsCarriageReturn(codeUnit))
-            {
-                var length = index + _codeUnitBytes * 2 <= bytes.Length
-                    && IsLineFeed(bytes.Slice(index + _codeUnitBytes, _codeUnitBytes))
-                        ? _codeUnitBytes * 2
-                        : _codeUnitBytes;
-                return (index, length);
-            }
+            if (TryGetLineEndingAt(bytes, index, out var length)) return (index, length);
         }
         return (-1, 0);
     }

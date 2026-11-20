@@ -1,7 +1,7 @@
-using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
+using Avalonia.Media.TextFormatting;
 using AvaloniaEdit;
 using AvaloniaEdit.Editing;
 using AvaloniaEdit.Rendering;
@@ -11,6 +11,10 @@ namespace RustText.Demo.Editor;
 internal sealed class GroupedLineNumberMargin : LineNumberMargin
 {
     private IReadOnlyList<int>? _sourceLines;
+    private readonly Dictionary<int, TextLayout> _labels = [];
+    private Typeface _labelTypeface;
+    private double _labelSize;
+    private IBrush? _labelBrush;
 
     internal void SetSourceLineNumbers(IReadOnlyList<int> lineNumbers)
     {
@@ -47,10 +51,8 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
     {
         var size = base.MeasureOverride(availableSize);
         var lastNumber = _sourceLines is { Count: > 0 } ? _sourceLines[^1] : Document?.LineCount ?? 1;
-        var number = LineNumbers.Format(lastNumber);
-        var text = new FormattedText(number, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
-            Typeface, EmSize, GetValue(TextBlock.ForegroundProperty));
-        return new Size(Math.Max(size.Width, text.Width), size.Height);
+        UpdateLabelStyle();
+        return new Size(Math.Max(size.Width, GetLabel(lastNumber).Width), size.Height);
     }
 
     public override void Render(DrawingContext drawingContext)
@@ -60,16 +62,44 @@ internal sealed class GroupedLineNumberMargin : LineNumberMargin
             return;
         }
 
-        var foreground = GetValue(TextBlock.ForegroundProperty);
+        UpdateLabelStyle();
         foreach (var line in textView.VisualLines)
         {
             var row = line.FirstDocumentLine.LineNumber;
             if (_sourceLines is not null && row > _sourceLines.Count) continue;
-            var number = LineNumbers.Format(_sourceLines is null ? row : _sourceLines[row - 1]);
-            var text = new FormattedText(number, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
-                Typeface, EmSize, foreground);
+            var text = GetLabel(_sourceLines is null ? row : _sourceLines[row - 1]);
             var y = line.GetTextLineVisualYPosition(line.TextLines[0], VisualYPosition.TextTop);
-            drawingContext.DrawText(text, new Point(Bounds.Width - text.Width, y - textView.VerticalOffset));
+            text.Draw(drawingContext, new Point(Bounds.Width - text.Width, y - textView.VerticalOffset));
         }
+    }
+
+    private void UpdateLabelStyle()
+    {
+        var brush = GetValue(TextBlock.ForegroundProperty);
+        if (_labelTypeface == Typeface && _labelSize == EmSize && ReferenceEquals(_labelBrush, brush)) return;
+        ClearLabels();
+        (_labelTypeface, _labelSize, _labelBrush) = (Typeface, EmSize, brush);
+    }
+
+    private TextLayout GetLabel(int number)
+    {
+        if (_labels.TryGetValue(number, out var label)) return label;
+        // Keep scrolling through a large document from retaining its entire line-number index.
+        if (_labels.Count >= 256) ClearLabels();
+        label = new TextLayout(LineNumbers.Format(number), _labelTypeface, _labelSize, _labelBrush);
+        _labels.Add(number, label);
+        return label;
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        ClearLabels();
+        base.OnDetachedFromVisualTree(e);
+    }
+
+    private void ClearLabels()
+    {
+        foreach (var label in _labels.Values) label.Dispose();
+        _labels.Clear();
     }
 }

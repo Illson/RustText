@@ -60,17 +60,19 @@ internal sealed class DocumentMinimap : Control, IDisposable
         context.FillRectangle(FocusTheme.Border, new Rect(0, 0, 1, Bounds.Height));
         var count = document.LineCount;
         var rows = GetRowCount(count, Bounds.Height);
-        if (FindScrollViewer() is { } scroll && scroll.Extent.Height > 0)
+        var extent = _editor.ExtentHeight;
+        if (extent > 0)
         {
-            var height = Math.Clamp(Bounds.Height * scroll.Viewport.Height / scroll.Extent.Height,
+            var height = Math.Clamp(Bounds.Height * _editor.ViewportHeight / extent,
                 Math.Min(10, Bounds.Height), Bounds.Height);
-            var maximum = scroll.Extent.Height - scroll.Viewport.Height;
-            var fraction = maximum > 0 ? Math.Clamp(scroll.Offset.Y / maximum, 0, 1) : 0;
+            var maximum = extent - _editor.ViewportHeight;
+            var fraction = maximum > 0 ? Math.Clamp(_editor.VerticalOffset / maximum, 0, 1) : 0;
             context.FillRectangle(FocusTheme.MinimapViewport, new Rect(1, fraction * (Bounds.Height - height), Bounds.Width - 1, height));
         }
         for (var row = 0; row < rows; row++)
         {
-            var line = document.GetLineByNumber(1 + (int)((long)row * count / rows));
+            var index = rows == 1 ? 0 : (int)((long)row * (count - 1) / (rows - 1));
+            var line = document.GetLineByNumber(index + 1);
             var width = Math.Min(Bounds.Width - 12, line.Length * .6);
             if (width > 0)
             {
@@ -86,7 +88,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
             return 0;
         }
 
-        return Math.Min(Math.Clamp((int)(height / 3), 1, 160), lineCount);
+        return Math.Min(Math.Clamp((int)(height / 6), 1, 64), lineCount);
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)

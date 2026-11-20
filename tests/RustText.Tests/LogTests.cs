@@ -12,6 +12,33 @@ public sealed class LogTests
     [InlineData(TextEncodingKind.Utf8Bom, true)]
     [InlineData(TextEncodingKind.Utf16LittleEndian, true)]
     [InlineData(TextEncodingKind.Utf16BigEndian, true)]
+    [InlineData(TextEncodingKind.Windows1251, false)]
+    public void MinimapSamplesTheVisibleRangeInItsEncoding(TextEncodingKind encoding, bool bom)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "minimap.log");
+        const string hidden = "hidden\r\n";
+        var start = Encode(hidden, encoding, bom).Length;
+        var end = Encode(hidden + "ЁяZ", encoding, bom).Length;
+        File.WriteAllBytes(path, Encode(hidden + "ЁяZ\r" + new string('x', 100) + "\nQ", encoding, bom));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+
+        var widths = reader.ReadMinimapWidths(start, file.Length, default);
+        Assert.Equal(32, widths.Length);
+        Assert.Equal(3, widths[0]);
+        Assert.Contains((byte)32, widths);
+        Assert.Equal(1, widths[^1]);
+        Assert.Equal(2, reader.ReadMinimapWidths(start + 1, end, default)[0]);
+        Assert.Empty(reader.ReadMinimapWidths(end, end, default));
+        Assert.Throws<OperationCanceledException>(() => reader.ReadMinimapWidths(start, end, new CancellationToken(true)));
+    }
+
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8, false)]
+    [InlineData(TextEncodingKind.Utf8Bom, true)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, true)]
+    [InlineData(TextEncodingKind.Utf16BigEndian, true)]
     public void ReadPage_RecognizesLfCrLfAndBareCr(TextEncodingKind encoding, bool preamble)
     {
         using var directory = new TempDirectory();
@@ -138,11 +165,13 @@ public sealed class LogTests
 
     private static byte[] Encode(string text, TextEncodingKind encoding, bool preamble)
     {
+        if (encoding == TextEncodingKind.Windows1251) Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         Encoding codec = encoding switch
         {
             TextEncodingKind.Utf16LittleEndian => new UnicodeEncoding(false, preamble),
             TextEncodingKind.Utf16BigEndian => new UnicodeEncoding(true, preamble),
             TextEncodingKind.Utf8Bom => new UTF8Encoding(preamble),
+            TextEncodingKind.Windows1251 => Encoding.GetEncoding(1251),
             _ => new UTF8Encoding(false)
         };
         var bytes = codec.GetBytes(text);

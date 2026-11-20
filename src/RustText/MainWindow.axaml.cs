@@ -99,7 +99,7 @@ public partial class MainWindow : Window
             if (_home && DateTimeOffset.Now - _lastHomeRefresh > TimeSpan.FromSeconds(10))
             {
                 _lastHomeRefresh = DateTimeOffset.Now;
-                _refreshHome?.Invoke();
+                _refreshHomeTimes?.Invoke();
             }
 
             if (_workspace.SaveGate.CurrentCount > 0)
@@ -460,6 +460,7 @@ public partial class MainWindow : Window
     private void ShowGroups()
     {
         _refreshHome = null;
+        _refreshHomeTimes = null;
         _home = false;
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids)

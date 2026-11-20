@@ -65,7 +65,6 @@ internal sealed partial class LogView : UserControl, IDisposable
     private readonly DispatcherTimer _searchDebounce = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly List<long> _previousOffsets = [];
     private readonly ObservableCollection<SearchResult> _searchResults = [];
-    private readonly List<string> _miniSamples = [];
     private readonly TextBlock _fileLabel = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBox _logText = new()
     {
@@ -138,6 +137,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private ScrollViewer? _logScrollViewer;
     private readonly TextBlock _indexLabel = new();
     private readonly LogMinimap _minimap = new() { Width = 54 };
+    private readonly ViewportScrollBar _verticalLogScrollbar = new();
     private Grid? _contentViewport;
     private Grid? _levelFilterViewport;
     private readonly StackPanel _searchPanel = new()
@@ -181,6 +181,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private bool _searchHasMore;
     private bool _indexBuilding;
     private bool _minimapLoading;
+    private bool _minimapRefreshPending;
     private bool _minimapDragging;
     private double? _pendingMinimapRatio;
     private long _minimapRequest;
@@ -225,8 +226,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         _levelBands = new LogLevelBands(_logText) { IsHitTestVisible = false, ClipToBounds = true };
         Content = BuildLayout();
-        ScrollViewer.SetHorizontalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
-        ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(_logText, ScrollBarVisibility.Hidden);
         _fileLabel.Text = draftName ?? System.IO.Path.GetFileName(_path);
         if (!_isDraft) ToolTip.SetTip(_fileLabel, _path);
         ConfigureInteractions();
@@ -262,6 +262,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             _wordWrap = value;
             _logText.TextWrapping = _filteredLogText.TextWrapping = value ? TextWrapping.Wrap : TextWrapping.NoWrap;
+            var horizontalScroll = value ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
+            ScrollViewer.SetHorizontalScrollBarVisibility(_logText, horizontalScroll);
+            ScrollViewer.SetHorizontalScrollBarVisibility(_filteredLogText, horizontalScroll);
             _wrapButton.Content = value ? "Перенос: вкл." : "Перенос: выкл.";
         }
     }
@@ -492,7 +495,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         _trimCancellation?.Cancel();
         _refreshTimer.Stop();
         _logText.LayoutUpdated -= OnLogTextLayoutUpdated;
-        AttachLogScrollbar(null);
+        _verticalLogScrollbar.Scroll -= OnLogScrollbarScrolled;
+        _verticalLogScrollbar.SetOwner(null);
+        _draggedPage = null;
         _file.Dispose();
         _logText.Text = string.Empty;
         _lineGutterText.Text = string.Empty;
@@ -505,7 +510,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _searchStatusText.Text = string.Empty;
         _searchResults.Clear();
         _searchResultButtons.Children.Clear();
-        _miniSamples.Clear();
+        _minimap.Widths = [];
         _previousOffsets.Clear();
         _skippedSearchLines.Clear();
         _displayRowStarts = [];
@@ -584,7 +589,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         var content = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"),
             ColumnSpacing = 0,
             Background = FocusTheme.Editor,
         };
@@ -604,11 +609,13 @@ internal sealed partial class LogView : UserControl, IDisposable
         content.Children.Add(_logText);
         Grid.SetColumn(_levelBands, 1);
         content.Children.Add(_levelBands);
-        _minimap.Samples = _miniSamples;
         AutomationProperties.SetName(_minimap, "Прокрутка лога");
         AutomationProperties.SetAutomationId(_minimap, "LogMinimap");
         Grid.SetColumn(_minimap, 2);
         content.Children.Add(_minimap);
+        AutomationProperties.SetName(_verticalLogScrollbar, "Прокрутка страницы лога");
+        Grid.SetColumn(_verticalLogScrollbar, 3);
+        content.Children.Add(_verticalLogScrollbar);
         _contentViewport = new Grid();
         _contentViewport.Children.Add(content);
         _levelFilterViewport = BuildLevelFilterViewport();
@@ -764,6 +771,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void ConfigureInteractions()
     {
+        _verticalLogScrollbar.Scroll += OnLogScrollbarScrolled;
         _startButton.Click += async (_, _) => await NavigateAsync(_hiddenOffset, true);
         _previousButton.Click += async (_, _) =>
         {
@@ -2047,15 +2055,12 @@ internal sealed partial class LogView : UserControl, IDisposable
     private void AttachLogScrollViewer()
     {
         var scrollViewer = _logText.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
-        if (!ReferenceEquals(scrollViewer, _logScrollViewer) || _verticalLogScrollbar is null)
-        {
-            AttachLogScrollbar(scrollViewer?.GetVisualDescendants().OfType<ScrollBar>()
-                .FirstOrDefault(bar => bar.Orientation == Orientation.Vertical));
-        }
         if (ReferenceEquals(scrollViewer, _logScrollViewer))
         {
             return;
         }
+        _verticalLogScrollbar.SetOwner(scrollViewer);
+        _draggedPage = null;
         if (_logScrollViewer is not null)
         {
             _logScrollViewer.ScrollChanged -= OnLogScrollChanged;
@@ -2121,15 +2126,17 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async void LoadMinimapSamples()
     {
-        if (_closed || _minimapLoading)
+        if (_closed) return;
+        if (_minimapLoading)
         {
+            _minimapRefreshPending = true;
             return;
         }
+        _minimapRefreshPending = false;
         var length = _file.Length;
         if (length == 0)
         {
-            _miniSamples.Clear();
-            _minimap.InvalidateVisual();
+            _minimap.Widths = [];
             return;
         }
         _minimapLoading = true;
@@ -2138,14 +2145,13 @@ internal sealed partial class LogView : UserControl, IDisposable
         var start = _hiddenOffset;
         try
         {
-            var samples = await Task.Run(() => BuildMinimapSamples(reader, start, length, _closing.Token), _closing.Token);
+            var token = _closing.Token;
+            var widths = await Task.Run(() => reader.ReadMinimapWidths(start, length, token), token);
             if (_closed || generation != _dataGeneration || start != _hiddenOffset)
             {
                 return;
             }
-            _miniSamples.Clear();
-            _miniSamples.AddRange(samples);
-            _minimap.InvalidateVisual();
+            _minimap.Widths = widths;
         }
         catch (OperationCanceledException) when (_closing.IsCancellationRequested)
         {
@@ -2160,26 +2166,11 @@ internal sealed partial class LogView : UserControl, IDisposable
         finally
         {
             _minimapLoading = false;
-            if (!_closed && (generation != _dataGeneration || start != _hiddenOffset))
+            if (!_closed && (_minimapRefreshPending || generation != _dataGeneration || start != _hiddenOffset))
             {
                 Dispatcher.UIThread.Post(LoadMinimapSamples);
             }
         }
-    }
-
-    private static IReadOnlyList<string> BuildMinimapSamples(LogDataReader reader, long start, long fileLength, CancellationToken token)
-    {
-        var samples = new List<string>(64);
-        var range = Math.Max(0, fileLength - start - 1);
-        for (var index = 0; index < 64; index++)
-        {
-            token.ThrowIfCancellationRequested();
-            var pageOffset = start + (long)(range * (index / 63d));
-            var page = reader.ReadPage(pageOffset, pageSize: 1, maxFrameBytes: 256, maxPageBytes: 256, cancellationToken: token);
-            var text = page.Rows.FirstOrDefault()?.Text ?? string.Empty;
-            samples.Add(ClipText(text, 32));
-        }
-        return samples;
     }
 
     private void RefreshButtons()

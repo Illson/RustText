@@ -26,7 +26,8 @@ public sealed class LogRefreshTests
             Assert.True(new FileInfo(path).Length > 50L * 1024 * 1024);
             await WithLogAsync(path, followEnd: true, async log =>
             {
-                await HeadlessTests.WaitForAsync(() => Field<ICollection>(log, "_miniSamples").Count > 0);
+                var minimap = Field<LogView.LogMinimap>(log, "_minimap");
+                await HeadlessTests.WaitForAsync(() => minimap.Widths.Length > 0);
                 await File.AppendAllTextAsync(path, "appended marker\n");
                 Refresh(log);
                 await HeadlessTests.WaitForAsync(() => Text(log).Contains("appended marker", StringComparison.Ordinal));

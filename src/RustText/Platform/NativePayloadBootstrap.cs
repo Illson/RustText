@@ -24,14 +24,14 @@ internal static partial class NativePayloadBootstrap
             if (_moduleHandles is not null) return;
 
             var assembly = typeof(NativePayloadBootstrap).Assembly;
-            var embedded = ReadEmbeddedPayloads(assembly);
+            var embedded = ReadPayloadHashes(assembly);
             if (embedded is null)
             {
                 if (RuntimeFeature.IsDynamicCodeSupported) return;
                 throw new InvalidDataException("В исполняемый файл не встроены графические библиотеки RustText.");
             }
 
-            var directory = MaterializePayloads(embedded);
+            var directory = MaterializePayloads(assembly, embedded);
 
             const uint loadLibrarySearchSystem32 = 0x00000800;
             const uint loadLibrarySearchUserDirs = 0x00000400;
@@ -68,9 +68,9 @@ internal static partial class NativePayloadBootstrap
         }
     }
 
-    private static Dictionary<string, Payload>? ReadEmbeddedPayloads(Assembly assembly)
+    private static Dictionary<string, byte[]>? ReadPayloadHashes(Assembly assembly)
     {
-        var result = new Dictionary<string, Payload>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         foreach (var name in NativeFiles)
         {
             using var stream = assembly.GetManifestResourceStream(ResourcePrefix + name);
@@ -80,17 +80,14 @@ internal static partial class NativePayloadBootstrap
                 throw new InvalidDataException($"Не найден встроенный ресурс {name}.");
             }
 
-            using var buffer = new MemoryStream();
-            stream.CopyTo(buffer);
-            var bytes = buffer.ToArray();
-            if (bytes.Length == 0) throw new InvalidDataException($"Встроенная библиотека {name} пуста.");
-            result.Add(name, new Payload(bytes, SHA256.HashData(bytes)));
+            if (stream.Length == 0) throw new InvalidDataException($"Встроенная библиотека {name} пуста.");
+            result.Add(name, SHA256.HashData(stream));
         }
 
         return result;
     }
 
-    private static string MaterializePayloads(Dictionary<string, Payload> payloads)
+    private static string MaterializePayloads(Assembly assembly, Dictionary<string, byte[]> hashes)
     {
         var profileOverride = Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR");
         string appRoot;
@@ -115,14 +112,14 @@ internal static partial class NativePayloadBootstrap
         Directory.CreateDirectory(root);
         if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidDataException("Папка кеша библиотек RustText не должна быть ссылкой.");
-        var version = ComputePayloadVersion(payloads);
+        var version = ComputePayloadVersion(hashes);
         var stable = Path.Combine(root, version);
-        if (IsComplete(stable, payloads)) return stable;
+        if (IsComplete(stable, hashes)) return stable;
 
         // Repair into a stable immutable sibling so later launches reuse it while
         // another process may still have the damaged directory mapped.
         var repaired = Path.Combine(root, version + "-repaired");
-        if (IsComplete(repaired, payloads)) return repaired;
+        if (IsComplete(repaired, hashes)) return repaired;
         var target = Directory.Exists(stable) ? repaired : stable;
         if (Directory.Exists(target)) target = Path.Combine(root, $"{version}-{Guid.NewGuid():N}");
 
@@ -130,16 +127,18 @@ internal static partial class NativePayloadBootstrap
         Directory.CreateDirectory(temporary);
         try
         {
-            foreach (var (name, payload) in payloads)
+            foreach (var (name, expectedHash) in hashes)
             {
                 var path = Path.Combine(temporary, name);
                 using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                     128 * 1024, FileOptions.WriteThrough))
                 {
-                    stream.Write(payload.Bytes);
+                    using var resource = assembly.GetManifestResourceStream(ResourcePrefix + name)
+                        ?? throw new InvalidDataException($"Не найден встроенный ресурс {name}.");
+                    resource.CopyTo(stream);
                     stream.Flush(flushToDisk: true);
                 }
-                if (!HashMatches(path, payload.Hash)) throw new IOException($"Не удалось проверить кешированную библиотеку {name}.");
+                if (!HashMatches(path, expectedHash)) throw new IOException($"Не удалось проверить кешированную библиотеку {name}.");
             }
 
             if (!Directory.Exists(target))
@@ -149,7 +148,7 @@ internal static partial class NativePayloadBootstrap
                     Directory.Move(temporary, target);
                     return target;
                 }
-                catch (IOException) when (Directory.Exists(target) && IsComplete(target, payloads))
+                catch (IOException) when (Directory.Exists(target) && IsComplete(target, hashes))
                 {
                     Directory.Delete(temporary, recursive: true);
                     return target;
@@ -174,14 +173,14 @@ internal static partial class NativePayloadBootstrap
         }
     }
 
-    private static bool IsComplete(string directory, Dictionary<string, Payload> payloads)
+    private static bool IsComplete(string directory, Dictionary<string, byte[]> hashes)
     {
         if (!Directory.Exists(directory) || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return false;
-        foreach (var (name, payload) in payloads)
+        foreach (var (name, expectedHash) in hashes)
         {
             var path = Path.Combine(directory, name);
             if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0
-                || !HashMatches(path, payload.Hash)) return false;
+                || !HashMatches(path, expectedHash)) return false;
         }
         return true;
     }
@@ -194,13 +193,13 @@ internal static partial class NativePayloadBootstrap
         return CryptographicOperations.FixedTimeEquals(actual, expected);
     }
 
-    private static string ComputePayloadVersion(Dictionary<string, Payload> payloads)
+    private static string ComputePayloadVersion(Dictionary<string, byte[]> hashes)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         foreach (var name in NativeFiles)
         {
             hash.AppendData(Encoding.UTF8.GetBytes(name));
-            hash.AppendData(payloads[name].Hash);
+            hash.AppendData(hashes[name]);
         }
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
@@ -215,6 +214,4 @@ internal static partial class NativePayloadBootstrap
     [LibraryImport("kernel32.dll", EntryPoint = "RemoveDllDirectory", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool RemoveDllDirectory(IntPtr cookie);
-
-    private sealed record Payload(byte[] Bytes, byte[] Hash);
 }

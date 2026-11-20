@@ -15,6 +15,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Keep short-lived editing allocations from growing the desktop working set on CPUs with large caches. -->
+    <RuntimeHostConfigurationOption Include="System.GC.Gen0MaxBudget" Value="4194304" />
+    <RuntimeHostConfigurationOption Include="System.GC.RegionSize" Value="1048576" />
     <InternalsVisibleTo Include="RustText.Tests" />
     <AvaloniaResource Include="../../assets/rusttext.ico" Link="Assets/rusttext.ico" />
     <PackageReference Include="Avalonia.AvaloniaEdit" Version="12.0.0" />

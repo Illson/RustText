@@ -13,7 +13,7 @@ namespace RustText.Demo.Logs;
 internal sealed class EditorLogFilter : IDisposable
 {
     private readonly TextEditor _source;
-    private readonly Control? _minimap;
+    private readonly Control? _minimapDock;
     private readonly bool _sourceWasReadOnly;
     private readonly Action _closeRequested;
     private readonly LogLevelFilterPanel _panel;
@@ -27,10 +27,10 @@ internal sealed class EditorLogFilter : IDisposable
     private bool _closing;
     private bool _disposed;
 
-    internal EditorLogFilter(TextEditor source, Control? minimap, Action closeRequested)
+    internal EditorLogFilter(TextEditor source, Control? minimapDock, Action closeRequested)
     {
         _source = source;
-        _minimap = minimap;
+        _minimapDock = minimapDock;
         _sourceWasReadOnly = source.IsReadOnly;
         _closeRequested = closeRequested;
         _panel = new LogLevelFilterPanel();
@@ -60,7 +60,7 @@ internal sealed class EditorLogFilter : IDisposable
         CancelScan();
         _source.IsReadOnly = _sourceWasReadOnly;
         _source.IsVisible = true;
-        if (_minimap is not null) _minimap.IsVisible = true;
+        if (_minimapDock is not null) _minimapDock.IsVisible = true;
         ReleaseProjection();
     }
 
@@ -72,14 +72,14 @@ internal sealed class EditorLogFilter : IDisposable
             _filteredView.IsVisible = false;
             _source.IsVisible = true;
             _source.IsReadOnly = _sourceWasReadOnly;
-            if (_minimap is not null) _minimap.IsVisible = true;
+            if (_minimapDock is not null) _minimapDock.IsVisible = true;
             ReleaseProjection();
             return;
         }
         EnsureProjection();
         _source.IsReadOnly = true;
         _source.IsVisible = false;
-        if (_minimap is not null) _minimap.IsVisible = false;
+        if (_minimapDock is not null) _minimapDock.IsVisible = false;
         _filteredView.IsVisible = true;
         _ = RefreshProjectionAsync(_panel.SelectedLevels);
     }
@@ -149,7 +149,7 @@ internal sealed class EditorLogFilter : IDisposable
             FontFamily = _source.FontFamily, FontSize = _source.FontSize,
             Background = FocusTheme.Editor, Foreground = FocusTheme.Text, LineNumbersForeground = FocusTheme.Gutter,
             LineNumbersMargin = new Thickness(8, 0, 12, 0), WordWrap = _source.WordWrap, ShowLineNumbers = true,
-            IsReadOnly = true, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            IsReadOnly = true, HorizontalScrollBarVisibility = _source.HorizontalScrollBarVisibility,
             VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
         };
         AutomationProperties.SetName(projection, "Строки лога с выбранными уровнями");
