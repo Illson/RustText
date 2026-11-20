@@ -68,7 +68,13 @@ public partial class MainWindow
             throw;
         }
 
-        if (await capture.Completion is { } error && ReferenceEquals(ActiveTab, tab))
-            SetStatus(error.Message);
+        var log = tab.Log;
+        if (log is null) return;
+        var error = await capture.Completion;
+        if (error is null && capture.IsDisposed) return;
+        var status = error is null
+            ? "Подключённый процесс завершил работу."
+            : $"Подключение к консоли завершено с ошибкой. {error.Message}";
+        log.ReportConsoleDisconnected(status);
     }
 }

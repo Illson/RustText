@@ -174,6 +174,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private bool FollowEnd => _endButton.IsChecked == true;
     private enum PagePosition { Start, End, Preserve, FollowEnd }
     private bool _autoRefresh;
+    private string? _consoleDisconnectMessage;
     private bool _indexPaused;
     private bool _indexOptIn;
     private bool _busy;
@@ -1800,6 +1801,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             var now = FileStamp.Read(_path, _file);
             if (now == _fileStamp)
             {
+                CompleteConsoleRefresh();
                 return;
             }
 
@@ -1847,6 +1849,21 @@ internal sealed partial class LogView : UserControl, IDisposable
     }
 
     internal void ReportPreservedExternalEdit() => SetStatus(MainWindow.ExternalDraftStatus);
+
+    internal void ReportConsoleDisconnected(string message)
+    {
+        if (_closed) return;
+        _consoleDisconnectMessage = message;
+        RefreshButtons();
+        if (!_autoRefresh) SetStatus(message);
+    }
+
+    private void CompleteConsoleRefresh()
+    {
+        if (_consoleDisconnectMessage is null || _closed) return;
+        SetAutoRefresh(false);
+        SetStatus(_consoleDisconnectMessage);
+    }
 
     private void ApplyLargeLogIndexOptInPolicy()
     {
@@ -2214,8 +2231,9 @@ internal sealed partial class LogView : UserControl, IDisposable
         _levelBands.IsVisible = _levelFilterButton.IsVisible && _pageEdit is null;
         _levelFilterButton.IsEnabled = CanFilterLevels || _levelFilterOpen;
         _pauseButton.Content = _autoRefresh ? "Пауза" : "Продолжить";
-        _liveLabel.Text = _isDraft ? "" : _autoRefresh ? "● Обновляется" : "● На паузе";
-        _liveLabel.Foreground = _autoRefresh ? FocusTheme.Success : FocusTheme.Muted;
+        _liveLabel.Text = _isDraft ? "" : _consoleDisconnectMessage is not null ? "● Источник отключён"
+            : _autoRefresh ? "● Обновляется" : "● На паузе";
+        _liveLabel.Foreground = _autoRefresh && _consoleDisconnectMessage is null ? FocusTheme.Success : FocusTheme.Muted;
         _indexButton.Background = _indexPaused ? FocusTheme.Hover : Brushes.Transparent;
         _indexButton.Foreground = _indexPaused ? FocusTheme.Accent : FocusTheme.Text;
         var largeIndexOptInRequired = _file.Length >= LargeLogIndexOptInBytes && !_indexOptIn;
@@ -2235,7 +2253,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _middleButton.IsEnabled = enabled && _file.Length > 0;
         _pauseButton.IsVisible = !_isDraft;
         _liveLabel.IsVisible = !_isDraft && (_pageEdit is null || EditsPagesByDefault);
-        _pauseButton.IsEnabled = !_closed;
+        _pauseButton.IsEnabled = !_closed && _consoleDisconnectMessage is null;
         _indexButton.IsEnabled = !_closed && (!_indexBuilding || _indexCancellation is not null);
         _cancelIndexButton.IsVisible = _indexBuilding;
         _cancelTrimButton.IsVisible = _trimCancellation is not null;

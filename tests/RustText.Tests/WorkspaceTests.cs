@@ -2874,6 +2874,74 @@ public sealed class WorkspaceTests
         }
     });
 
+    [Fact]
+    public Task BackgroundConsoleDisconnectRefreshesFinalOutputAndKeepsItsIndicator() => HeadlessTests.RunAsync(async profile =>
+    {
+        var consolePath = Path.Combine(profile, "console.log");
+        var otherPath = Path.Combine(profile, "other.txt");
+        await File.WriteAllTextAsync(consolePath, "first capture frame\n");
+        await File.WriteAllTextAsync(otherPath, "selected document");
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenSinglePathAsync", consolePath, true, null, false);
+            var consoleTab = ActiveTab(window);
+            var log = Read<LogView>(consoleTab, "Log");
+            var live = (TextBlock)typeof(LogView).GetField("_liveLabel", Private)!.GetValue(log)!;
+            await log.InitialPageLoad;
+
+            await CallAsync(window, "OpenSinglePathAsync", otherPath, false, null, false);
+            var status = window.FindControl<TextBlock>("StatusText")!;
+            var selectedTabStatus = status.Text;
+
+            await File.AppendAllTextAsync(consolePath, "final capture frame\n");
+            log.ReportConsoleDisconnected("Подключённый процесс завершил работу.");
+
+            await HeadlessTests.WaitForAsync(() => !log.AutoRefresh
+                && LogText(log).Text?.Contains("final capture frame", StringComparison.Ordinal) == true);
+            Assert.Equal(selectedTabStatus, status.Text);
+            Assert.Equal("● Источник отключён", live.Text);
+
+            Invoke(window, "Select", consoleTab);
+            Assert.Equal("Подключённый процесс завершил работу.", status.Text);
+            log.SetAutoRefresh(false);
+            Assert.Equal("● Источник отключён", live.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task PausedConsoleDisconnectPreservesFollowedPageAndReportsStatus() => HeadlessTests.RunAsync(async profile =>
+    {
+        var consolePath = Path.Combine(profile, "console.log");
+        await File.WriteAllTextAsync(consolePath,
+            string.Join('\n', Enumerable.Range(1, 180).Select(line => $"capture row {line:D3}")) + "\n");
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenSinglePathAsync", consolePath, true, null, false);
+            var log = Read<LogView>(ActiveTab(window), "Log");
+            await log.InitialPageLoad;
+            await (Task)typeof(LogView).GetMethod("GoToEndAsync", Private)!.Invoke(log, null)!;
+            Assert.True(log.CaptureState().FollowEnd);
+            log.SetAutoRefresh(false);
+
+            var pausedOffset = log.CurrentOffset;
+            var pausedText = LogText(log).Text;
+            var appendedRows = string.Concat(Enumerable.Repeat("final capture row\n", 3200));
+            await File.AppendAllTextAsync(consolePath, appendedRows);
+            log.ReportConsoleDisconnected("Подключённый процесс завершил работу.");
+
+            Assert.False(log.AutoRefresh);
+            Assert.Equal(pausedOffset, log.CurrentOffset);
+            Assert.Equal(pausedText, LogText(log).Text);
+            Assert.True(log.CaptureState().FollowEnd);
+            Assert.Equal("Подключённый процесс завершил работу.", log.StatusText);
+            Assert.Equal("Подключённый процесс завершил работу.", window.FindControl<TextBlock>("StatusText")!.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
     private static Color SolidColor(IBrush? brush) => Assert.IsAssignableFrom<ISolidColorBrush>(brush).Color;
 
     private static void AssertViewportControlsDoNotOverlap(TextEditor editor, DocumentMinimap minimap,
