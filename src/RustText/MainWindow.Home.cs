@@ -43,37 +43,6 @@ public partial class MainWindow
         head.Children.Add(new TextBlock { Text = "История файлов", FontSize = 20, VerticalAlignment = VerticalAlignment.Center });
         head.Children.Add(FocusButton(Button("Открыть…", () => Run(() => OpenDialogAsync())), primary: true));
         head.Children.Add(FocusButton(Button("Новый документ", () => { ShowGroups(); NewTab(); })));
-        var workspaceButtons = new WrapPanel { ItemSpacing = 5, LineSpacing = 4 };
-        foreach (var workspace in _workspace.Catalog.Workspaces)
-        {
-            var label = workspace.Id == _workspaceId && !_startEmpty ? workspace.Name + " · открыто" : workspace.Name;
-            workspaceButtons.Children.Add(FocusButton(Button(label,
-                () => Run(() => SwitchWorkspaceAsync(workspace.Id)))));
-        }
-        if (_windowId == WorkspaceCatalogStore.PrimaryWindowId)
-        {
-            var emptyStart = FocusButton(Button(_startEmpty ? "Пустое окно · открыто" : "Пустое окно",
-                () => Run(EnterEmptyStartupAsync)));
-            emptyStart.IsEnabled = !_startEmpty;
-            workspaceButtons.Children.Add(emptyStart);
-        }
-        workspaceButtons.Children.Add(FocusButton(Button("Управление…", () => Run(ShowWorkspacesAsync))));
-        head.Children.Add(new Border
-        {
-            Background = FocusTheme.Deep,
-            BorderBrush = FocusTheme.Border,
-            BorderThickness = new Thickness(1),
-            Padding = new Thickness(8),
-            Child = new StackPanel
-            {
-                Spacing = 6,
-                Children =
-                {
-                    new TextBlock { Text = "Рабочие пространства", FontWeight = FontWeight.SemiBold },
-                    workspaceButtons
-                }
-            }
-        });
         if (_tabs.Count > 0) head.Children.Add(FocusButton(Button("К вкладкам", ShowGroups)));
 
         var surface = new Grid

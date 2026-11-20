@@ -100,12 +100,13 @@ public partial class MainWindow
         var dialog = Dialog("Рабочие пространства", DialogPanel(rows), 720);
         foreach (var workspace in catalog.Workspaces)
         {
-            var selected = workspace.Id == _workspaceId;
+            var selected = !_startEmpty && workspace.Id == _workspaceId;
             var name = new TextBlock
             {
                 Text = workspace.Name + (selected ? " · открыто" : ""),
                 VerticalAlignment = VerticalAlignment.Center,
-                FontWeight = selected ? FontWeight.SemiBold : FontWeight.Normal
+                FontWeight = selected ? FontWeight.SemiBold : FontWeight.Normal,
+                TextTrimming = TextTrimming.CharacterEllipsis
             };
             var buttons = new WrapPanel { ItemSpacing = 5, LineSpacing = 4 };
             buttons.Children.Add(FocusButton(Button("Переключить", () => Run(async () =>
@@ -130,6 +131,8 @@ public partial class MainWindow
                     if (name is null) return;
                     await _workspace.CatalogStore.RenameAsync(workspace.Id, name, _lifetime.Token);
                     _workspace.Catalog = await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
+                    foreach (var window in _workspace.Windows)
+                        window.RefreshWorkspaceButton();
                     dialog.Close();
                     await ShowWorkspacesAsync();
                 }))));
@@ -140,7 +143,11 @@ public partial class MainWindow
             }
 
             var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 10 };
-            row.Children.Add(name);
+            var identity = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 8 };
+            identity.Children.Add(CreateWorkspaceBadge(workspace.Symbol ?? DefaultWorkspaceSymbol, workspace.Color));
+            Grid.SetColumn(name, 1);
+            identity.Children.Add(name);
+            row.Children.Add(identity);
             Grid.SetColumn(buttons, 1);
             row.Children.Add(buttons);
             rows.Children.Add(new Border
@@ -295,6 +302,7 @@ public partial class MainWindow
         _startEmpty = enteringEmpty;
         ApplyWorkspaceTheme();
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
+        _closedTabs.RemoveAll(tab => IsKnownEmptyUntitledDraft(tab, SessionStorage));
 
         if (cachedView is { } view)
         {
@@ -321,7 +329,8 @@ public partial class MainWindow
         else if (targetState is not null)
         {
             RestoreDetachedDraftTracking(SessionStorage, _workspaceId, targetState);
-            _closedTabs.AddRange((targetState.ClosedTabs ?? []).Take(100));
+            _closedTabs.AddRange((targetState.ClosedTabs ?? [])
+                .Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)).Take(100));
             MountSessionTabs(targetState, pending: false);
             ApplyTextAppearance();
             if (SelectedIn(_active) is { } selected)
@@ -385,7 +394,8 @@ public partial class MainWindow
         }
         if (state is null && sourceStorage.HasSessionCheckpoint)
             throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
-        var copy = await _workspace.CatalogStore.CreateAsync(name, GetWorkspaceThemeKey(source.Id), _lifetime.Token);
+        var copy = await _workspace.CatalogStore.CreateAsync(name, GetWorkspaceThemeKey(source.Id), _lifetime.Token,
+            symbol: source.Symbol, color: source.Color);
         try
         {
             if (state is not null)
@@ -408,7 +418,9 @@ public partial class MainWindow
     private async Task CreateWorkspaceFromCurrentAsync(string name)
     {
         await SaveWorkspaceSessionAsync(excludeWindow: null);
-        var created = await _workspace.CatalogStore.CreateAsync(name, WorkspaceThemeKey, _lifetime.Token);
+        var current = CurrentWorkspaceEntry();
+        var created = await _workspace.CatalogStore.CreateAsync(name, WorkspaceThemeKey, _lifetime.Token,
+            symbol: current?.Symbol, color: current?.Color);
         try
         {
             await CopyWorkspaceSessionAsync(SessionStorage, _workspace.GetStorage(created.Id, _windowId));

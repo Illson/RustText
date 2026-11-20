@@ -92,6 +92,7 @@ public partial class MainWindow : Window
         ToolTip.SetTip(CaptionClose, "Закрыть окно");
         _root = _active = MakeGroup();
         BuildMenus();
+        InitializeWorkspaceMenu();
         BuildSearchPanel();
         _checkpoint = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _checkpoint.Tick += (_, _) =>
@@ -126,6 +127,7 @@ public partial class MainWindow : Window
         if (!_restoreWorkspace)
         {
             _restoreFinished = true;
+            RefreshWorkspaceButton();
             _checkpoint.Start();
             ShowKnownUpdate();
             SynchronizeAutomaticUpdateTimer(runImmediately: true);
@@ -152,6 +154,7 @@ public partial class MainWindow : Window
         });
         if (_closed || _closing) return;
         _restoreFinished = true;
+        RefreshWorkspaceButton();
         _checkpoint.Start();
         ShowKnownUpdate();
         SynchronizeAutomaticUpdateTimer(runImmediately: true);

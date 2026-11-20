@@ -26,6 +26,16 @@ namespace RustText.Tests;
 [Collection(HeadlessCollection.Name)]
 public sealed class WorkspaceTests
 {
+    [Theory]
+    [InlineData(1, 700, 1)]
+    [InlineData(20, 700, 20)]
+    [InlineData(300, 700, 160)]
+    [InlineData(300, 1800, 160)]
+    [InlineData(0, 700, 0)]
+    [InlineData(20, 1, 0)]
+    public void TextMinimapUsesAtMostOneSamplePerDocumentLine(int lineCount, double height, int expected) =>
+        Assert.Equal(expected, DocumentMinimap.GetRowCount(lineCount, height));
+
     [Fact]
     public Task ClosingDetachedWindowRestoresInputInRemainingWindow() => HeadlessTests.RunAsync(async profile =>
     {

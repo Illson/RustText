@@ -65,7 +65,10 @@ public partial class MainWindow
         var active = _workspace.Windows.FirstOrDefault(window => window.IsActive && !window._closed) ?? this;
         FocusTheme.Apply(active.SelectedTheme);
         foreach (var window in _workspace.Windows)
+        {
             window.RefreshThemeMenu();
+            window.RefreshWorkspaceButton();
+        }
     }
 
     private void RefreshThemeMenu()

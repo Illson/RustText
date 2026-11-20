@@ -59,7 +59,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
         context.FillRectangle(FocusTheme.MinimapBackground, new Rect(Bounds.Size));
         context.FillRectangle(FocusTheme.Border, new Rect(0, 0, 1, Bounds.Height));
         var count = document.LineCount;
-        var rows = Math.Clamp((int)(Bounds.Height / 3), 1, 160);
+        var rows = GetRowCount(count, Bounds.Height);
         if (FindScrollViewer() is { } scroll && scroll.Extent.Height > 0)
         {
             var height = Math.Clamp(Bounds.Height * scroll.Viewport.Height / scroll.Extent.Height,
@@ -77,6 +77,16 @@ internal sealed class DocumentMinimap : Control, IDisposable
                 context.FillRectangle(FocusTheme.DocumentMinimapInk, new Rect(7, row * Bounds.Height / rows, width, 1));
             }
         }
+    }
+
+    internal static int GetRowCount(int lineCount, double height)
+    {
+        if (lineCount <= 0 || height < 2)
+        {
+            return 0;
+        }
+
+        return Math.Min(Math.Clamp((int)(height / 3), 1, 160), lineCount);
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)

@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -6,6 +9,12 @@ namespace RustText.Demo;
 internal sealed record WorkspaceEntry(string Id, string Name, long LastUsedMs = 0)
 {
     public string? Theme { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Symbol { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Color { get; init; }
 }
 internal sealed record DeletedWorkspaceEntry(WorkspaceEntry Workspace, long DeletedAtMs, string DirectoryName);
 public enum WorkspaceStartupMode { LastUsed, Specific, Empty }
@@ -56,9 +65,12 @@ internal sealed class WorkspaceCatalogStore
         }
     }
 
-    public async Task<WorkspaceEntry> CreateAsync(string name, string? theme = null, CancellationToken cancellationToken = default)
+    public async Task<WorkspaceEntry> CreateAsync(string name, string? theme = null, CancellationToken cancellationToken = default,
+        string? symbol = null, string? color = null)
     {
         name = ValidateName(name);
+        symbol = ValidateSymbol(symbol);
+        color = ValidateColor(color);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -67,7 +79,12 @@ internal sealed class WorkspaceCatalogStore
             if (catalog.Workspaces.Count >= MaximumWorkspaceCount)
                 throw new InvalidOperationException("Достигнут предел в 200 рабочих пространств.");
             EnsureNameAvailable(catalog, name);
-            var entry = new WorkspaceEntry(Guid.NewGuid().ToString("N"), name) { Theme = theme };
+            var entry = new WorkspaceEntry(Guid.NewGuid().ToString("N"), name)
+            {
+                Theme = theme,
+                Symbol = symbol,
+                Color = color
+            };
             var updated = catalog with { Workspaces = [.. catalog.Workspaces, entry] };
             await SaveCoreAsync(updated, cancellationToken).ConfigureAwait(false);
             return entry;
@@ -76,6 +93,72 @@ internal sealed class WorkspaceCatalogStore
         {
             _gate.Release();
         }
+    }
+
+    public static string? ValidateSymbol(string? symbol)
+    {
+        if (symbol is null) return null;
+        if (symbol.Length == 0 || string.IsNullOrWhiteSpace(symbol)
+            || StringInfo.ParseCombiningCharacters(symbol).Length != 1)
+            throw new ArgumentException("Укажите один видимый символ или эмодзи.", nameof(symbol));
+
+        var runes = new List<Rune>();
+        var remaining = symbol.AsSpan();
+        while (!remaining.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(remaining, out var rune, out var consumed) != OperationStatus.Done)
+                throw new ArgumentException("Символ содержит некорректную последовательность Unicode.", nameof(symbol));
+            runes.Add(rune);
+            if (runes.Count > 32)
+                throw new ArgumentException("Символ слишком длинный.", nameof(symbol));
+            remaining = remaining[consumed..];
+        }
+
+        var hasVisibleRune = false;
+        for (var index = 0; index < runes.Count; index++)
+        {
+            var rune = runes[index];
+            var category = Rune.GetUnicodeCategory(rune);
+            if (Rune.IsWhiteSpace(rune) || category is UnicodeCategory.Control or UnicodeCategory.LineSeparator
+                or UnicodeCategory.ParagraphSeparator or UnicodeCategory.Surrogate or UnicodeCategory.OtherNotAssigned
+                or UnicodeCategory.PrivateUse)
+                throw new ArgumentException("Символ должен быть видимым и не содержать управляющих знаков.", nameof(symbol));
+
+            if (category == UnicodeCategory.Format && rune.Value != 0x200D
+                && rune.Value is not (>= 0xE0020 and <= 0xE007F))
+                throw new ArgumentException("Символ содержит невидимый управляющий знак.", nameof(symbol));
+
+            if (rune.Value == 0x200D
+                && (!runes.Take(index).Any(previous => !IsNonVisibleRune(previous))
+                    || !runes.Skip(index + 1).Any(next => !IsNonVisibleRune(next))))
+                throw new ArgumentException("Соединитель эмодзи должен находиться между видимыми символами.", nameof(symbol));
+
+            if (!IsNonVisibleRune(rune)) hasVisibleRune = true;
+        }
+
+        if (!hasVisibleRune)
+            throw new ArgumentException("Укажите один видимый символ или эмодзи.", nameof(symbol));
+        return symbol;
+    }
+
+    public static string? ValidateColor(string? color)
+    {
+        if (color is null) return null;
+        if (color.Length != 7 || color[0] != '#')
+            throw new ArgumentException("Цвет должен быть задан в формате #RRGGBB.", nameof(color));
+        for (var index = 1; index < color.Length; index++)
+        {
+            if (!char.IsAsciiHexDigit(color[index]))
+                throw new ArgumentException("Цвет должен быть задан в формате #RRGGBB.", nameof(color));
+        }
+        return color.ToUpperInvariant();
+    }
+
+    private static bool IsNonVisibleRune(Rune rune)
+    {
+        var category = Rune.GetUnicodeCategory(rune);
+        return category is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark
+            or UnicodeCategory.EnclosingMark or UnicodeCategory.Format;
     }
 
     public async Task<WorkspaceCatalog> SetThemeAsync(string id, string theme, CancellationToken cancellationToken = default)
@@ -432,8 +515,28 @@ internal sealed class WorkspaceCatalogStore
             _ = ValidateStoredName(deleted.Workspace.Name);
         }
 
-        return catalog;
+        try
+        {
+            return catalog with
+            {
+                Workspaces = catalog.Workspaces.Select(NormalizeAppearance).ToList(),
+                DeletedWorkspaces = catalog.DeletedWorkspaces?.Select(item => item with
+                {
+                    Workspace = NormalizeAppearance(item.Workspace)
+                }).ToList()
+            };
+        }
+        catch (ArgumentException error)
+        {
+            throw new InvalidDataException("Каталог содержит некорректный символ или цвет рабочего пространства.", error);
+        }
     }
+
+    private static WorkspaceEntry NormalizeAppearance(WorkspaceEntry entry) => entry with
+    {
+        Symbol = ValidateSymbol(entry.Symbol),
+        Color = ValidateColor(entry.Color)
+    };
 
     private static string ValidateName(string name)
     {
