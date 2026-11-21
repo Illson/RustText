@@ -1,6 +1,6 @@
 # RustText — инструкции для агентов
 
-RustText — редактор и просмотрщик больших логов для Windows x64 на .NET 11 и Avalonia. Историческая реализация хранится в [архиве Rust](archive/README.md). Сборка, проверки и выпуск описаны в [README.md](README.md). Полный рабочий цикл — в [docs/development.md](docs/development.md).
+RustText — редактор и просмотрщик больших логов для Windows x64 на .NET 11 и Avalonia. Историческая реализация хранится в [архиве Rust](archive/README.md). Сборка, проверки и выпуск описаны в [руководстве](docs/user-guide.md). Полный рабочий цикл — в [docs/development.md](docs/development.md).
 
 ## Рабочий цикл
 
