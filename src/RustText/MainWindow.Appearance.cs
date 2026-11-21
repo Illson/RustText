@@ -12,8 +12,6 @@ public partial class MainWindow
     ];
 
     private MenuItem _themeMenu = null!;
-    private MenuItem _glassToggle = null!;
-    private MenuItem _glassIntensityItem = null!;
 
     private AppTheme SelectedTheme => ThemeOptions.FirstOrDefault(option => option.Key == WorkspaceThemeKey).Theme;
     private string WorkspaceThemeKey => GetWorkspaceThemeKey(_workspaceId);
@@ -36,14 +34,9 @@ public partial class MainWindow
             item.ToggleType = MenuItemToggleType.Radio;
             _themeMenu.Items.Add(item);
         }
-        _glassToggle = Command("Liquid Glass", () => Run(ToggleGlassAsync));
-        _glassToggle.ToggleType = MenuItemToggleType.CheckBox;
-        _glassIntensityItem = Command("Интенсивность стекла…", () => Run(ShowGlassIntensityAsync));
         _themeMenu.Items.Add(new Separator());
-        _themeMenu.Items.Add(_glassToggle);
-        _themeMenu.Items.Add(_glassIntensityItem);
+        _themeMenu.Items.Add(Command("Настройки тем…", () => Run(() => ShowSettingsPageAsync(showThemes: true))));
         RefreshThemeMenu();
-        RefreshGlassMenu();
         return _themeMenu;
     }
 

@@ -1111,6 +1111,8 @@ internal static class SettingsExtensions
 {
     internal static UserSettings Normalize(this UserSettings settings) => settings with
     {
+        GlassIntensity = settings.GlassEnabled == false ? 0 : Math.Clamp(settings.GlassIntensity, 0, 100),
+        GlassEnabled = null,
         UntitledTabLimit = Math.Clamp(settings.UntitledTabLimit, 1, 200),
         RecentFileLimit = Math.Clamp(settings.RecentFileLimit, 1, 100),
         VersionFileLimitBytes = Math.Clamp(settings.VersionFileLimitBytes, 0, 50 * 1024 * 1024),

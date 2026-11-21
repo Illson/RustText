@@ -428,7 +428,7 @@ public partial class MainWindow
             }
             if (settings.Theme != previous.Theme)
                 ApplyWorkspaceTheme();
-            else if (settings.GlassEnabled != previous.GlassEnabled || settings.GlassIntensity != previous.GlassIntensity)
+            else if (settings.GlassIntensity != previous.GlassIntensity)
                 ApplyWorkspaceGlass();
         }
         finally { _workspace.SettingsGate.Release(); }

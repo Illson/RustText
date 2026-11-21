@@ -9,7 +9,7 @@
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
         <ControlTheme x:Key="FocusDocumentTab" TargetType="TabItem">
-            <Setter Property="Background" Value="{x:Static local:FocusTheme.Panel}" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.InactiveTab}" />
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
             <Setter Property="Margin" Value="0,0,3,0" />
             <Setter Property="Padding" Value="9,0,3,0" />
@@ -32,7 +32,7 @@
                 <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
             </Style>
             <Style Selector="^:selected">
-                <Setter Property="Background" Value="{x:Static local:FocusTheme.Editor}" />
+                <Setter Property="Background" Value="{x:Static local:FocusTheme.ActiveTab}" />
                 <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
             </Style>
             <Style Selector="^:disabled">
