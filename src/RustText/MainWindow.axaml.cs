@@ -93,7 +93,7 @@ public partial class MainWindow : Window
         ToolTip.SetTip(CaptionClose, "Закрыть окно");
         _root = _active = MakeGroup();
         BuildMenus();
-        ApplyGlassToWindow(_workspace.GlassPreviewIntensity ?? Settings.GlassIntensity);
+        ApplyGlassToWindow(EffectiveGlassIntensity);
         BuildSearchPanel();
         _checkpoint = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _checkpoint.Tick += (_, _) =>
@@ -476,7 +476,6 @@ public partial class MainWindow : Window
         _refreshHome = null;
         _refreshHomeTimes = null;
         _home = false;
-        TitlePalmExtension.IsVisible = true;
         WorkspaceHost.Background = null;
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids)
@@ -679,6 +678,8 @@ public partial class MainWindow : Window
         var priorHistory = new List<(int Index, SessionTab Tab)>();
         try
         {
+            _themeMenu.IsSubMenuOpen = false;
+            await _glassMenuSave;
             foreach (var tab in _tabs.Values.Where(tab => tab.Log?.HasPendingEdit == true).ToArray())
             {
                 if (!await ResolvePendingPageAsync(tab))

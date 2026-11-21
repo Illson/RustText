@@ -17,6 +17,7 @@ public partial class MainWindow
     private sealed class WorkspaceSession
     {
         public int? GlassPreviewIntensity { get; set; }
+        public int GlassPreviewRevision { get; set; }
         public StorageService Storage { get; } = StorageService.OpenDefault();
         public WorkspaceCatalogStore CatalogStore { get; } = new(StorageService.GetProfileBaseDirectory());
         public WorkspaceCatalog? Catalog;

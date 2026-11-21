@@ -11,9 +11,7 @@ namespace RustText.Demo;
 
 public partial class MainWindow
 {
-    private Task ShowSettingsAsync() => ShowSettingsPageAsync(showThemes: false);
-
-    private async Task ShowSettingsPageAsync(bool showThemes)
+    private async Task ShowSettingsAsync()
     {
         _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         var initial = Settings with { WordWrap = _wordWrap, FontSize = _fontSize };
@@ -95,34 +93,12 @@ public partial class MainWindow
                 Foreground = FocusTheme.Muted
             });
         var updates = SettingsPage("Обновления", autoUpdate);
-        var glass = SettingsControl(new Slider
-        {
-            Minimum = 0, Maximum = 100, Value = initial.GlassIntensity,
-            TickFrequency = 1, IsSnapToTickEnabled = true, SmallChange = 1, LargeChange = 10
-        }, "SettingsGlassIntensity");
-        AutomationProperties.SetName(glass, "Интенсивность Liquid Glass");
-        var glassValue = new TextBlock();
-        var themes = SettingsPage("Темы", new TextBlock { Text = "Liquid Glass" }, glass, glassValue);
-        var previewingGlass = false;
-        UpdateGlassLabel();
-        glass.ValueChanged += (_, _) =>
-        {
-            UpdateGlassLabel();
-            if (!previewingGlass && _workspace.GlassPreviewIntensity.HasValue) return;
-            previewingGlass = true;
-            _workspace.GlassPreviewIntensity = (int)glass.Value;
-            ApplyWorkspaceGlass();
-        };
-
-        void UpdateGlassLabel() =>
-            glassValue.Text = glass.Value == 0 ? "0% · Выкл." : $"{(int)glass.Value}%";
 
         var sections = new ListBox { SelectionMode = SelectionMode.AlwaysSelected, Background = Brushes.Transparent };
         AutomationProperties.SetName(sections, "Разделы настроек");
         var sectionPages = new (string Title, string Id, Control Page)[]
         {
             ("Редактор", "SettingsSectionEditor", editor),
-            ("Темы", "SettingsSectionThemes", themes),
             ("Файлы и версии", "SettingsSectionFilesVersions", files),
             ("Рабочие пространства", "SettingsSectionWorkspaces", workspace),
             ("Черновики и архив", "SettingsSectionDraftArchive", drafts),
@@ -147,7 +123,7 @@ public partial class MainWindow
             pageScroller.Content = sectionPages[sections.SelectedIndex].Page;
             pageScroller.Offset = default;
         };
-        sections.SelectedIndex = showThemes ? Array.FindIndex(sectionPages, section => section.Page == themes) : 0;
+        sections.SelectedIndex = 0;
 
         var sidebar = new Border
         {
@@ -199,43 +175,31 @@ public partial class MainWindow
         footer.Children.Add(actions);
         dialog.Opened += (_, _) => sections.Focus();
 
+        if (await dialog.ShowDialog<UserSettings?>(this) is not { } edited) return;
         var previous = Settings;
-        try
+        await SaveWorkspaceSettingsAsync(current =>
         {
-            if (await dialog.ShowDialog<UserSettings?>(this) is not { } edited) return;
-            await SaveWorkspaceSettingsAsync(current =>
+            previous = current;
+            return current with
             {
-                previous = current;
-                return current with
-                {
-                    UntitledTabLimit = Changed(initial.UntitledTabLimit, edited.UntitledTabLimit, current.UntitledTabLimit),
-                    VersionFileLimitBytes = Changed(initial.VersionFileLimitBytes, edited.VersionFileLimitBytes, current.VersionFileLimitBytes),
-                    VersionTotalLimitBytes = Changed(initial.VersionTotalLimitBytes, edited.VersionTotalLimitBytes, current.VersionTotalLimitBytes),
-                    GlassIntensity = Changed(initial.GlassIntensity, edited.GlassIntensity, current.GlassIntensity),
-                    ShowDraftLineCount = Changed(initial.ShowDraftLineCount, edited.ShowDraftLineCount, current.ShowDraftLineCount),
-                    AutoCheckUpdates = Changed(initial.AutoCheckUpdates, edited.AutoCheckUpdates, current.AutoCheckUpdates),
-                    AutoCheckUpdatesChoiceMade = true,
-                    OpenLargeFilesAsLog = Changed(initial.OpenLargeFilesAsLog, edited.OpenLargeFilesAsLog, current.OpenLargeFilesAsLog),
-                    WordWrap = Changed(initial.WordWrap, edited.WordWrap, current.WordWrap),
-                    FontSize = Changed(initial.FontSize, edited.FontSize, current.FontSize),
-                    WorkspaceStartupMode = Changed(initial.WorkspaceStartupMode, edited.WorkspaceStartupMode, current.WorkspaceStartupMode),
-                    StartupWorkspaceId = Changed(initial.StartupWorkspaceId, edited.StartupWorkspaceId, current.StartupWorkspaceId),
-                    WorkspaceHistoryLimit = Changed(initial.WorkspaceHistoryLimit, edited.WorkspaceHistoryLimit, current.WorkspaceHistoryLimit),
-                    ArchiveClosedDraftAfterMinutes = Changed(initial.ArchiveClosedDraftAfterMinutes, edited.ArchiveClosedDraftAfterMinutes,
-                        current.ArchiveClosedDraftAfterMinutes),
-                    ArchivedDraftRetentionDays = Changed(initial.ArchivedDraftRetentionDays, edited.ArchivedDraftRetentionDays,
-                        current.ArchivedDraftRetentionDays)
-                };
-            });
-        }
-        finally
-        {
-            if (previewingGlass)
-            {
-                _workspace.GlassPreviewIntensity = null;
-                ApplyWorkspaceGlass();
-            }
-        }
+                UntitledTabLimit = Changed(initial.UntitledTabLimit, edited.UntitledTabLimit, current.UntitledTabLimit),
+                VersionFileLimitBytes = Changed(initial.VersionFileLimitBytes, edited.VersionFileLimitBytes, current.VersionFileLimitBytes),
+                VersionTotalLimitBytes = Changed(initial.VersionTotalLimitBytes, edited.VersionTotalLimitBytes, current.VersionTotalLimitBytes),
+                ShowDraftLineCount = Changed(initial.ShowDraftLineCount, edited.ShowDraftLineCount, current.ShowDraftLineCount),
+                AutoCheckUpdates = Changed(initial.AutoCheckUpdates, edited.AutoCheckUpdates, current.AutoCheckUpdates),
+                AutoCheckUpdatesChoiceMade = true,
+                OpenLargeFilesAsLog = Changed(initial.OpenLargeFilesAsLog, edited.OpenLargeFilesAsLog, current.OpenLargeFilesAsLog),
+                WordWrap = Changed(initial.WordWrap, edited.WordWrap, current.WordWrap),
+                FontSize = Changed(initial.FontSize, edited.FontSize, current.FontSize),
+                WorkspaceStartupMode = Changed(initial.WorkspaceStartupMode, edited.WorkspaceStartupMode, current.WorkspaceStartupMode),
+                StartupWorkspaceId = Changed(initial.StartupWorkspaceId, edited.StartupWorkspaceId, current.StartupWorkspaceId),
+                WorkspaceHistoryLimit = Changed(initial.WorkspaceHistoryLimit, edited.WorkspaceHistoryLimit, current.WorkspaceHistoryLimit),
+                ArchiveClosedDraftAfterMinutes = Changed(initial.ArchiveClosedDraftAfterMinutes, edited.ArchiveClosedDraftAfterMinutes,
+                    current.ArchiveClosedDraftAfterMinutes),
+                ArchivedDraftRetentionDays = Changed(initial.ArchivedDraftRetentionDays, edited.ArchivedDraftRetentionDays,
+                    current.ArchivedDraftRetentionDays)
+            };
+        });
 
         var turnedOn = !previous.AutoCheckUpdates && Settings.AutoCheckUpdates;
         SynchronizeAutomaticUpdateTimer(runImmediately: turnedOn, forceImmediateCheck: turnedOn);
@@ -301,7 +265,6 @@ public partial class MainWindow
                 ? selectedWorkspace?.Id : initial.StartupWorkspaceId;
             dialog.Close(initial with
             {
-                GlassIntensity = (int)glass.Value,
                 UntitledTabLimit = length,
                 VersionFileLimitBytes = fileLimit * 1024 * 1024,
                 VersionTotalLimitBytes = totalLimit * 1024 * 1024,
