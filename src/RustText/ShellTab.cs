@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using Avalonia;
 using Avalonia.Controls;
@@ -59,7 +60,6 @@ internal sealed class ShellTab : Grid, IDisposable
 
     internal static Process Start(ShellKind shell, string workingDirectory)
     {
-        var system = Environment.SystemDirectory;
         var codePage = CultureInfo.CurrentCulture.TextInfo.OEMCodePage;
         var encoding = shell == ShellKind.Cmd && codePage != Encoding.UTF8.CodePage
             ? CodePagesEncodingProvider.Instance.GetEncoding(codePage)!
@@ -73,13 +73,21 @@ internal sealed class ShellTab : Grid, IDisposable
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardInputEncoding = encoding,
+            StandardInputEncoding = new UTF8Encoding(false),
             StandardOutputEncoding = encoding,
             StandardErrorEncoding = encoding
         };
         if (shell == ShellKind.Cmd)
         {
-            info.Arguments = $"/D /Q /S /K \"\"{Path.Combine(system, "chcp.com")}\" {encoding.CodePage} >nul\"";
+            // A portable copy can be renamed. An external host (e.g. headless tests) uses the apphost.
+            info.FileName = Assembly.GetEntryAssembly() == typeof(Program).Assembly
+                ? Environment.ProcessPath ?? throw new IOException("Путь RustText недоступен.")
+                : Path.Combine(AppContext.BaseDirectory, "rusttext.exe");
+            if (Path.GetFileNameWithoutExtension(info.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                info.ArgumentList.Add(Path.GetFullPath(Environment.GetCommandLineArgs()[0]));
+            info.WindowStyle = ProcessWindowStyle.Hidden;
+            info.ArgumentList.Add(CmdInputHost.Argument);
+            info.ArgumentList.Add(encoding.CodePage.ToString(CultureInfo.InvariantCulture));
         }
         else
         {
@@ -115,17 +123,6 @@ internal sealed class ShellTab : Grid, IDisposable
         _sending = true;
         try
         {
-            if (_shell == ShellKind.Cmd)
-            {
-                var encoding = _process.StandardInput.Encoding;
-                var bytes = encoding.GetBytes(command);
-                // CMD reads redirected interactive input one byte at a time, including on DBCS pages.
-                if (bytes.Length != command.Length || encoding.GetString(bytes) != command)
-                {
-                    AppendNotice($"CMD не может передать эти символы без искажения (кодовая страница {encoding.CodePage}). Используйте PowerShell.");
-                    return;
-                }
-            }
             _input.Text = "";
             Append(command + Environment.NewLine);
             await _process.StandardInput.WriteLineAsync(command.AsMemory(), _lifetime.Token);

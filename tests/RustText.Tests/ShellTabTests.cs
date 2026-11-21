@@ -64,13 +64,16 @@ public sealed class ShellTabTests
         return Task.CompletedTask;
     });
 
-    [Fact]
-    public Task CmdDoesNotExecuteLossyInputAndStillAcceptsRepresentableText() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData("chcp 437 >nul")]
+    [InlineData("call switch.cmd")]
+    public Task CmdPreservesUnicodePathsAcrossCodePageChanges(string changePage) => HeadlessTests.RunAsync(async profile =>
     {
         var culture = CultureInfo.CurrentCulture;
         try
         {
             CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("ru-RU");
+            await File.WriteAllTextAsync(Path.Combine(profile, "switch.cmd"), "@chcp 437 >nul\r\n");
             using var shell = new ShellTab(ShellKind.Cmd, profile, 14);
             var window = new Window { Content = shell };
             window.Show();
@@ -79,17 +82,21 @@ public sealed class ShellTabTests
                 var output = Assert.Single(shell.GetLogicalDescendants().OfType<TextEditor>());
                 var input = Assert.Single(shell.GetLogicalDescendants().OfType<TextBox>());
                 await HeadlessTests.WaitForAsync(() => output.Text.Contains('>'));
-                const string rejected = "echo 漢字>unexpected.txt";
-                input.Text = rejected;
                 shell.FocusInput();
-                window.KeyPress(Key.Enter, RawInputModifiers.None, PhysicalKey.Enter, "");
-                Assert.Equal(rejected, input.Text);
-                Assert.Contains("866", output.Text);
-                input.Text = "mkdir Привет & exit 0";
-                window.KeyPress(Key.Enter, RawInputModifiers.None, PhysicalKey.Enter, "");
+                Send($"{changePage} && echo ready>changed.txt");
+                await HeadlessTests.WaitForAsync(() => File.Exists(Path.Combine(profile, "changed.txt")));
+                Send("mkdir Привет");
+                Send("mkdir 漢字");
+                Send("exit 0");
                 await HeadlessTests.WaitForAsync(() => !input.IsEnabled);
-                Assert.True(Directory.Exists(Path.Combine(profile, "Привет")));
-                Assert.False(File.Exists(Path.Combine(profile, "unexpected.txt")));
+                Assert.Equal(new[] { "Привет", "漢字" }, Directory.GetDirectories(profile)
+                    .Select(Path.GetFileName).Order(StringComparer.Ordinal));
+
+                void Send(string command)
+                {
+                    input.Text = command;
+                    window.KeyPress(Key.Enter, RawInputModifiers.None, PhysicalKey.Enter, "");
+                }
             }
             finally { window.Close(); }
         }
