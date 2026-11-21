@@ -44,7 +44,7 @@ public sealed class HistoryMenuTests
                 Assert.Equal(new[]
                 {
                     "Редактор и просмотр", "Форматирование и данные", "История и черновики", "Обновления",
-                    "Найти окно процесса…", "Настройки…"
+                    "Найти окно процесса…", "Прокси-чекер…", "Настройки…"
                 }, toolsGroups.Select(MenuHeader));
 
                 var editorGroup = toolsGroups.Single(item => MenuHeader(item) == "Редактор и просмотр");

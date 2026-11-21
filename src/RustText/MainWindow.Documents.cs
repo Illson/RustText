@@ -1074,6 +1074,7 @@ public partial class MainWindow
         ForgetSearchTab(tab);
         tab.LoadCancellation?.Cancel();
         tab.JsonCancellation?.Cancel();
+        tab.ProxyChecker?.Dispose();
         tab.Log?.Close();
         tab.Log = null;
         _ = DetachEditor(tab);
@@ -1364,6 +1365,8 @@ public partial class MainWindow
         public long Id { get; } = id;
         public Group Group { get; set; } = group;
         public TabItem Item { get; } = new();
+        public ProxyCheckerView? ProxyChecker => Item.Content as ProxyCheckerView;
+        public bool IsTransient => ProxyChecker is not null || Log?.IsConsole == true;
         public string? CustomTitle { get; set; }
         public TextBlock LineCountLabel { get; } = new()
         {

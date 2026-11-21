@@ -66,6 +66,7 @@ public partial class MainWindow
                 Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),
                 Command("История выпусков…", () => Run(ShowReleaseHistoryAsync))),
             Command("Найти окно процесса…", () => Run(ShowWindowFinderAsync)),
+            Command("Прокси-чекер…", ShowProxyChecker),
             new Separator(),
             Command("Настройки…", () => Run(ShowSettingsAsync))));
         TopMenu.Items.Add(MenuGroup("_Поиск",

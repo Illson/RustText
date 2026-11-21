@@ -586,7 +586,8 @@ public partial class MainWindow : Window
         }
 
         UpdateStatus(tab);
-        RefreshSearchForActiveTab();
+        if (tab.ProxyChecker is not null && PanelHost.IsVisible) CloseSearchPanel();
+        else RefreshSearchForActiveTab();
     }
 
     private void OnWindowDragOver(object? sender, DragEventArgs e)
@@ -774,6 +775,7 @@ public partial class MainWindow : Window
     private void ReleaseTabContents(WorkTab tab)
     {
         tab.LoadCancellation?.Cancel();
+        tab.ProxyChecker?.Dispose();
         tab.Log?.Close();
         tab.Log = null;
         DetachEditor(tab);
