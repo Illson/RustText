@@ -1,7 +1,11 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
+using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Headless;
 using Avalonia.Interactivity;
 using Avalonia.Media;
+using Avalonia.VisualTree;
 using RustText.Demo;
 using Xunit;
 
@@ -114,6 +118,131 @@ public sealed class ThemeMenuTests
         finally { await CloseAsync(reopened); }
     });
 
+    [Fact]
+    public Task GlassPreviewsChromeAndPersistsAcrossWindowsAndRestarts() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenForTesting(profile);
+        await File.WriteAllTextAsync(Path.Combine(storage.RootDirectory, "settings.json"),
+            "{\"theme\":\"vice_city\"}");
+        var first = await ShowWindowAsync();
+        MainWindow? second = null;
+        try
+        {
+            typeof(MainWindow).GetMethod("NewTab", Private)!.Invoke(first, ["Тестовый документ"]);
+            typeof(MainWindow).GetMethod("NewTab", Private)!.Invoke(first, ["Вторая вкладка"]);
+            var active = typeof(MainWindow).GetProperty("ActiveTab", Private)!.GetValue(first)!;
+            typeof(MainWindow).GetMethod("OpenTabWindow", Private)!.Invoke(first, [active, null]);
+            second = Assert.IsType<MainWindow>(first.FindOtherWindow());
+            await HeadlessTests.WaitForAsync(() => ReadFlag(second, "_restoreFinished"));
+
+            var toggle = ThemeCommand(first, "Liquid Glass");
+            var secondToggle = ThemeCommand(second, "Liquid Glass");
+            Assert.False(toggle.IsChecked);
+            var off = WindowPixels(first);
+            Assert.Equal(255, FocusTheme.TabBar.GradientStops[0].Color.A);
+
+            var (dialog, slider) = await OpenGlassSliderAsync(first);
+            Assert.Equal(0, slider.Value);
+            slider.Value = 37;
+            var soft = WindowPixels(first);
+            Assert.NotEqual(off.Title, soft.Title);
+            Assert.NotEqual(off.Tabs, soft.Tabs);
+            Assert.NotEqual(off.Status, soft.Status);
+            Assert.Equal(off.Editor, soft.Editor);
+            slider.Value = 100;
+            var strong = WindowPixels(first);
+            Assert.NotEqual(soft.Title, strong.Title);
+            Assert.Equal(off.Editor, strong.Editor);
+            ClickDialogButton(dialog, "Отмена");
+            await HeadlessTests.WaitForAsync(() => toggle.IsEnabled);
+            Assert.False(toggle.IsChecked);
+            Assert.Equal(off, WindowPixels(first));
+
+            (dialog, slider) = await OpenGlassSliderAsync(first);
+            slider.Value = 37;
+            ClickDialogButton(dialog, "Применить");
+            await HeadlessTests.WaitForAsync(() => toggle.IsEnabled && secondToggle.IsChecked);
+            Assert.Equal(37, (await storage.LoadSettingsAsync()).GlassIntensity);
+            Assert.Equal(soft, WindowPixels(first));
+            AssertSelected(first, "Vice City");
+
+            (dialog, slider) = await OpenGlassSliderAsync(first);
+            slider.Value = 0;
+            ClickDialogButton(dialog, "Применить");
+            await HeadlessTests.WaitForAsync(() => toggle.IsEnabled && !secondToggle.IsChecked);
+            Assert.False((await storage.LoadSettingsAsync()).GlassEnabled);
+            Assert.Equal(off, WindowPixels(first));
+
+            toggle.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => toggle.IsChecked && secondToggle.IsChecked);
+            Assert.Equal(soft, WindowPixels(first));
+        }
+        finally
+        {
+            foreach (var dialog in first.OwnedWindows.ToArray()) dialog.Close();
+            if (second is not null) await CloseAsync(second);
+            await CloseAsync(first);
+        }
+
+        var reopened = await ShowWindowAsync();
+        try
+        {
+            var toggle = ThemeCommand(reopened, "Liquid Glass");
+            Assert.True(toggle.IsChecked);
+            var (dialog, slider) = await OpenGlassSliderAsync(reopened);
+            Assert.Equal(37, slider.Value);
+            ClickDialogButton(dialog, "Отмена");
+            await HeadlessTests.WaitForAsync(() => toggle.IsEnabled);
+            toggle.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => !toggle.IsChecked);
+            Assert.False((await storage.LoadSettingsAsync()).GlassEnabled);
+        }
+        finally
+        {
+            foreach (var dialog in reopened.OwnedWindows.ToArray()) dialog.Close();
+            await CloseAsync(reopened);
+        }
+    });
+
+    private static async Task<(Window Dialog, Slider Slider)> OpenGlassSliderAsync(MainWindow window)
+    {
+        ThemeCommand(window, "Интенсивность стекла…").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+        await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
+        var dialog = Assert.Single(window.OwnedWindows);
+        return (dialog, Assert.Single(dialog.GetVisualDescendants().OfType<Slider>()));
+    }
+
+    private static MenuItem ThemeCommand(MainWindow window, string header) =>
+        Options(window).Single(item => Equals(item.Header, header));
+
+    private static void ClickDialogButton(Window dialog, string label) =>
+        dialog.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, label))
+            .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+    private static (int Title, int Tabs, int Status, int Editor) WindowPixels(MainWindow window)
+    {
+        window.UpdateLayout();
+        var tabs = Assert.Single(window.GetVisualDescendants().OfType<Border>(), border => border.Name == "TabBar");
+        using var frame = window.CaptureRenderedFrame();
+        Assert.NotNull(frame);
+        var buffer = Marshal.AllocHGlobal(4);
+        try
+        {
+            int Read(Control control, double y)
+            {
+                var point = control.TranslatePoint(new Point(control.Bounds.Width * .7, y), window)!.Value;
+                var x = (int)(point.X * window.RenderScaling);
+                var row = (int)(point.Y * window.RenderScaling);
+                frame.CopyPixels(new PixelRect(x, row, 1, 1), buffer, 4, 4);
+                return Marshal.ReadInt32(buffer);
+            }
+
+            return (Read(window.FindControl<Border>("TitleBar")!, 12), Read(tabs, 12),
+                Read(window.FindControl<Border>("StatusBar")!, 10), Read(window, 180));
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
     private static Task SwitchWorkspaceAsync(MainWindow window, string id) =>
         (Task)typeof(MainWindow).GetMethod("SwitchWorkspaceAsync", Private)!.Invoke(window, [id])!;
 
@@ -149,7 +278,7 @@ public sealed class ThemeMenuTests
             .Single(item => Equals(item.Header, "_Тема")).Items.OfType<MenuItem>();
 
     private static void AssertSelected(MainWindow window, string label) =>
-        Assert.Equal(label, Assert.Single(Options(window), item => item.IsChecked).Header);
+        Assert.Equal(label, Assert.Single(Options(window), item => item.ToggleType == MenuItemToggleType.Radio && item.IsChecked).Header);
 
     private static Color Background(MainWindow window) => Assert.IsAssignableFrom<ISolidColorBrush>(window.Background).Color;
 

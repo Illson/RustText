@@ -83,6 +83,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         InitializeWindowSizeTracking();
         PropertyChanged += CaptionStateChanged;
+        PropertyChanged += GlassTransparencyChanged;
         Activated += (_, _) =>
         {
             if (_restoreFinished) FocusTheme.Apply(SelectedTheme);
@@ -92,6 +93,7 @@ public partial class MainWindow : Window
         ToolTip.SetTip(CaptionClose, "Закрыть окно");
         _root = _active = MakeGroup();
         BuildMenus();
+        ApplyGlassToWindow(CurrentGlassIntensity);
         BuildSearchPanel();
         _checkpoint = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _checkpoint.Tick += (_, _) =>
@@ -474,6 +476,7 @@ public partial class MainWindow : Window
         _refreshHome = null;
         _refreshHomeTimes = null;
         _home = false;
+        WorkspaceHost.Background = null;
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids)
         {

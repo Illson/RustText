@@ -100,8 +100,8 @@
             <Setter Property="VerticalContentAlignment" Value="Stretch" />
             <Setter Property="Template">
                 <ControlTemplate>
-                    <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
-                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,2,8,0">
+                    <Grid RowDefinitions="Auto,*">
+                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.TabBar}" Padding="8,2,8,0">
                             <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
                                 <Grid.Styles>
                                     <Style Selector="Track#TabScrollPosition[Maximum=0]">
@@ -131,7 +131,7 @@
                                 </Track>
                             </Grid>
                         </Border>
-                        <Panel Grid.Row="1" ClipToBounds="True">
+                        <Panel Grid.Row="1" ClipToBounds="True" Background="{x:Static local:FocusTheme.Editor}">
                             <ContentPresenter Name="PART_SelectedContentHost2" IsVisible="False"
                                               HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                                               VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
