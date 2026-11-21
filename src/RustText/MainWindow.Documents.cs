@@ -1333,6 +1333,7 @@ public partial class MainWindow
 
     private static bool ShouldCheckJson(TextDocument document, string? path)
     {
+        if (TextOperations.IsCfgPath(path)) return false;
         if (TextOperations.IsJsonPath(path)) return true;
         if (LogLevels.IsLogPath(path)) return MightBeJsonLogLinesPrefix(document);
 
