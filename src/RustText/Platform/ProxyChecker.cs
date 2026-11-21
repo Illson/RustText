@@ -99,8 +99,7 @@ internal static class ProxyChecker
         if (authority.AsSpan().IndexOfAny("/\\?#") >= 0 || authority.Any(character => char.IsWhiteSpace(character) || char.IsControl(character)))
             return null;
 
-        var userSeparator = authority.IndexOf('@');
-        var endpoint = authority[(userSeparator + 1)..];
+        var (endpoint, userInfo) = SplitAuthority(authority);
         var portSeparator = endpoint.LastIndexOf(':');
         var scheme = ProtocolScheme(protocol.Value);
         if (portSeparator <= 0
@@ -112,10 +111,9 @@ internal static class ProxyChecker
             return null;
 
         NetworkCredential? credentials = null;
-        if (userSeparator >= 0)
+        if (userInfo is not null)
         {
             detail = "Ожидаются данные авторизации в формате логин:пароль";
-            var userInfo = authority[..userSeparator];
             var passwordSeparator = userInfo.IndexOf(':');
             if (passwordSeparator <= 0) return null;
 
@@ -125,7 +123,22 @@ internal static class ProxyChecker
             credentials = new NetworkCredential(username, password);
         }
 
-        return new ParsedProxy(proxyUri, credentials, protocol.Value, $"{proxyUri.Host}:{port}", $"{scheme}://{authority}");
+        var copyValue = userInfo is null ? $"{scheme}://{endpoint}" : $"{scheme}://{userInfo}@{endpoint}";
+        return new ParsedProxy(proxyUri, credentials, protocol.Value, $"{proxyUri.Host}:{port}", copyValue);
+    }
+
+    private static (string Endpoint, string? UserInfo) SplitAuthority(string authority)
+    {
+        var at = authority.IndexOf('@');
+        if (at >= 0) return (authority[(at + 1)..], authority[..at]);
+
+        // In host:port:login:password, skip the colons inside a bracketed IPv6 host.
+        var afterHostLiteral = authority.StartsWith('[') ? authority.IndexOf(']') + 1 : 0;
+        var portSeparator = authority.IndexOf(':', afterHostLiteral);
+        var credentialsSeparator = portSeparator < 0 ? -1 : authority.IndexOf(':', portSeparator + 1);
+        return credentialsSeparator < 0
+            ? (authority, null)
+            : (authority[..credentialsSeparator], authority[(credentialsSeparator + 1)..]);
     }
 
     private static ProxyProtocol? ParseProtocol(string scheme) => scheme.ToLowerInvariant() switch

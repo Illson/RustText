@@ -54,6 +54,9 @@ public sealed class ProxyCheckerTests
     [InlineData("user:secret@192.0.2.18:not-a-port")]
     [InlineData("user:secret@unexpected@192.0.2.18:80")]
     [InlineData("user%00:secret@192.0.2.18:80")]
+    [InlineData("proxy.example:3000:login")]
+    [InlineData("proxy.example:3000::secret")]
+    [InlineData("proxy.example:65536:login:secret")]
     public async Task ReportsMalformedAddressesWithoutProbingOrReturningTheirContents(string input)
     {
         var results = new ConcurrentBag<ProxyCheckResult>();
@@ -85,6 +88,31 @@ public sealed class ProxyCheckerTests
         var result = Assert.Single(results);
         Assert.Equal("192.0.2.18:443", result.Address);
         Assert.Equal("https://user:secret@192.0.2.18:443", result.CopyValue);
+    }
+
+    [Theory]
+    [InlineData("192.0.2.18:3000", "https", "192.0.2.18")]
+    [InlineData("socks5://[2001:db8::1]:3000", "socks5", "[2001:db8::1]")]
+    public async Task AcceptsCredentialsAfterThePort(string endpoint, string scheme, string host)
+    {
+        const string login = "test-region-Random-sid-example-t-5";
+        var results = new ConcurrentBag<ProxyCheckResult>();
+        await ProxyChecker.CheckAsync($"{endpoint}:{login}:p%40ss", ProxyProtocol.Https,
+            TimeSpan.FromSeconds(5), 1, results.Add, CancellationToken.None, (uri, credentials, _) =>
+            {
+                Assert.Equal(scheme, uri.Scheme);
+                Assert.Equal(host, uri.Host);
+                Assert.Equal(3000, uri.Port);
+                Assert.Empty(uri.UserInfo);
+                Assert.Equal(login, credentials?.UserName);
+                Assert.Equal("p@ss", credentials?.Password);
+                return Task.FromResult(HttpStatusCode.NoContent);
+            });
+
+        var result = Assert.Single(results);
+        Assert.Equal(ProxyCheckStatus.Working, result.Status);
+        Assert.Equal($"{host}:3000", result.Address);
+        Assert.Equal($"{scheme}://{login}:p%40ss@{host}:3000", result.CopyValue);
     }
 
     [Fact]
