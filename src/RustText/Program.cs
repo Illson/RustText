@@ -14,6 +14,14 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        if (args is [CmdInputHost.Argument, var page] && uint.TryParse(page, out var codePage))
+            return CmdInputHost.Run(codePage);
+
+        if (ElevatedShellCommand.TryRunWorker(args) is { } elevatedExit)
+        {
+            return elevatedExit;
+        }
+
         if (ConsoleCapture.TryRunWorker(args) is { } consoleExit)
         {
             return consoleExit;

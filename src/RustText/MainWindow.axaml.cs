@@ -83,6 +83,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         InitializeWindowSizeTracking();
         PropertyChanged += CaptionStateChanged;
+        PropertyChanged += GlassTransparencyChanged;
         Activated += (_, _) =>
         {
             if (_restoreFinished) FocusTheme.Apply(SelectedTheme);
@@ -92,6 +93,7 @@ public partial class MainWindow : Window
         ToolTip.SetTip(CaptionClose, "Закрыть окно");
         _root = _active = MakeGroup();
         BuildMenus();
+        ApplyGlassToWindow(EffectiveGlassIntensity);
         BuildSearchPanel();
         _checkpoint = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _checkpoint.Tick += (_, _) =>
@@ -331,7 +333,7 @@ public partial class MainWindow : Window
         };
         context.Opening += (_, _) =>
         {
-            var console = tab.Log?.IsConsole == true;
+            var console = tab.IsTransient;
             reveal.IsVisible = copyPath.IsVisible = moveWindow.IsVisible = logMode.IsVisible = !console;
             logMode.IsChecked = tab.OpensAsLog || tab.Deferred?.DraftLogMode == true
                 || tab.Recovery is not null && tab.Log?.FileLength <= DocumentFiles.MaximumDocumentBytes;
@@ -474,6 +476,7 @@ public partial class MainWindow : Window
         _refreshHome = null;
         _refreshHomeTimes = null;
         _home = false;
+        WorkspaceHost.Background = null;
         WorkspaceHost.Content = null;
         foreach (var grid in _splitGrids)
         {
@@ -586,7 +589,8 @@ public partial class MainWindow : Window
         }
 
         UpdateStatus(tab);
-        RefreshSearchForActiveTab();
+        if (tab.ProxyChecker is not null && PanelHost.IsVisible) CloseSearchPanel();
+        else RefreshSearchForActiveTab();
     }
 
     private void OnWindowDragOver(object? sender, DragEventArgs e)
@@ -675,6 +679,8 @@ public partial class MainWindow : Window
         var priorHistory = new List<(int Index, SessionTab Tab)>();
         try
         {
+            _themeMenu.IsSubMenuOpen = false;
+            await _glassMenuSave;
             foreach (var tab in _tabs.Values.Where(tab => tab.Log?.HasPendingEdit == true).ToArray())
             {
                 if (!await ResolvePendingPageAsync(tab))
@@ -774,8 +780,11 @@ public partial class MainWindow : Window
     private void ReleaseTabContents(WorkTab tab)
     {
         tab.LoadCancellation?.Cancel();
+        tab.ProxyChecker?.Dispose();
         tab.Log?.Close();
         tab.Log = null;
+        tab.Shell?.Dispose();
+        tab.Shell = null;
         DetachEditor(tab);
         tab.Item.Content = null;
     }

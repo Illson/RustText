@@ -38,6 +38,8 @@ public sealed class JsonTextTests
     [InlineData("{broken", null, true)]
     [InlineData("[1,]", null, true)]
     [InlineData("[not valid JSON]", null, true)]
+    [InlineData("\uFEFF\r\n[restApi_autostart]\r\nenabled=true", "Settings.cfg", false)]
+    [InlineData("[1]", "Settings.CFG", false)]
     [InlineData("not JSON", "events.json", true)]
     [InlineData("not JSON", "events.jsonl", true)]
     [InlineData("not JSON", "events.ndjson", true)]
@@ -60,11 +62,13 @@ public sealed class JsonTextTests
         Assert.False(TextOperations.LooksLikeJson(first + "\r\n{worker} request-42", "events.log"));
     }
 
-    [Fact]
-    public Task DemoLogDoesNotStartJsonValidationOrShowItsBanner() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData("demo.log", "[INFO] request-42 failed: { \"detail\": \"bad\" }\r\n[404] GET /health")]
+    [InlineData("Settings.cfg", "\r\n[restApi_autostart]\r\nenabled=true\r\n")]
+    public Task PlainTextFileDoesNotStartJsonValidationOrShowItsBanner(string fileName, string text) => HeadlessTests.RunAsync(async profile =>
     {
-        var path = Path.Combine(profile, "demo.log");
-        await File.WriteAllTextAsync(path, "[INFO] request-42 failed: { \"detail\": \"bad\" }\r\n[404] GET /health");
+        var path = Path.Combine(profile, fileName);
+        await File.WriteAllTextAsync(path, text);
         var window = new MainWindow([]);
         window.Show();
         try
@@ -73,8 +77,8 @@ public sealed class JsonTextTests
             var open = typeof(MainWindow).GetMethod("OpenPathAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
             await (Task)open.Invoke(window, [path, false, null])!;
             var tab = ((IDictionary)Read<object>(window, "_tabs")).Values.Cast<object>().Single();
-            await Task.Delay(400);
             Assert.Null(Value(tab, "JsonCancellation"));
+            await Task.Delay(400);
             Assert.Null(Value(tab, "JsonError"));
             Assert.NotNull(Read<Border>(tab, "JsonBanner"));
             Assert.False(Read<Border>(tab, "JsonBanner").IsVisible);

@@ -68,6 +68,7 @@ internal static class FocusTheme
     {
         public event Action? Changed;
         public AppTheme? AppliedTheme { get; set; }
+        public int GlassIntensity { get; set; }
 
         public SolidColorBrush Chrome { get; } = Brush(Focus.Chrome);
         public SolidColorBrush Deep { get; } = Brush(Focus.Deep);
@@ -113,7 +114,14 @@ internal static class FocusTheme
         public SolidColorBrush DocumentMinimapInk { get; } = Brush(Focus.DocumentMinimapInk);
         public SolidColorBrush LogMinimapInk { get; } = Brush(Focus.LogMinimapInk);
         public SolidColorBrush TitleMotif { get; } = Brush(Focus.TitleMotif);
-        public LinearGradientBrush TitleBar { get; } = new()
+        public LinearGradientBrush TitleBar { get; } = HeaderGradient(Focus.TitleGlow);
+        public LinearGradientBrush TabBar { get; } = HeaderGradient(Focus.Chrome);
+        public LinearGradientBrush StatusBar { get; } = GlassGradient(Focus.Deep);
+        public SolidColorBrush GlassHighlight { get; } = new(Colors.Transparent);
+        public SolidColorBrush InactiveTab { get; } = Brush(Focus.Panel);
+        public SolidColorBrush ActiveTab { get; } = Brush(Focus.Editor);
+
+        private static LinearGradientBrush HeaderGradient(string glow) => new()
         {
             StartPoint = new RelativePoint(0, .5, RelativeUnit.Relative),
             EndPoint = new RelativePoint(1, .5, RelativeUnit.Relative),
@@ -121,7 +129,7 @@ internal static class FocusTheme
             {
                 new(Color.Parse(Focus.Chrome), 0),
                 new(Color.Parse(Focus.Chrome), .42),
-                new(Color.Parse(Focus.TitleGlow), .80),
+                new(Color.Parse(glow), .80),
                 new(Color.Parse(Focus.Chrome), 1)
             }
         };
@@ -174,13 +182,51 @@ internal static class FocusTheme
             Set(DocumentMinimapInk, palette.DocumentMinimapInk);
             Set(LogMinimapInk, palette.LogMinimapInk);
             Set(TitleMotif, palette.TitleMotif);
-            // Keep the brush and stops bound by XAML when switching themes.
-            var chrome = Color.Parse(palette.Chrome);
-            TitleBar.GradientStops[0].Color = chrome;
-            TitleBar.GradientStops[1].Color = chrome;
-            TitleBar.GradientStops[2].Color = Color.Parse(palette.TitleGlow);
-            TitleBar.GradientStops[3].Color = chrome;
+            ApplyChrome(palette);
         }
+
+        public void ApplyChrome(Palette palette)
+        {
+            var strength = GlassIntensity / 100d;
+            var chrome = Color.Parse(palette.Chrome);
+            var deep = Color.Parse(palette.Deep);
+            var accent = Color.Parse(palette.Accent);
+            var glow = Color.Parse(palette.TitleGlow);
+
+            TitleBar.GradientStops[0].Color = Tint(chrome, accent, .16 * strength, strength);
+            TitleBar.GradientStops[1].Color = Tint(chrome, accent, .06 * strength, strength);
+            TitleBar.GradientStops[2].Color = Tint(glow, accent, .30 * strength, strength);
+            TitleBar.GradientStops[3].Color = Tint(chrome, accent, .14 * strength, strength);
+            for (var index = 0; index < TitleBar.GradientStops.Count; index++)
+                TabBar.GradientStops[index].Color = strength > 0 ? TitleBar.GradientStops[index].Color : chrome;
+            InactiveTab.Color = TranslucentTab(palette.Panel, 110 * strength);
+            ActiveTab.Color = TranslucentTab(palette.Editor, 65 * strength);
+            StatusBar.GradientStops[0].Color = Tint(deep, accent, .06 * strength, strength);
+            StatusBar.GradientStops[1].Color = Tint(deep, accent, .17 * strength, strength);
+            GlassHighlight.Color = Color.FromArgb((byte)Math.Round(100 * strength), accent.R, accent.G, accent.B);
+        }
+
+        private static Color TranslucentTab(string fill, double transparency)
+        {
+            var color = Color.Parse(fill);
+            return Color.FromArgb((byte)Math.Round(255 - transparency), color.R, color.G, color.B);
+        }
+
+        private static LinearGradientBrush GlassGradient(string background) => new()
+        {
+            StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+            EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
+            GradientStops = new GradientStops { new(Color.Parse(background), 0), new(Color.Parse(background), 1) }
+        };
+
+        private static Color Tint(Color background, Color accent, double mix, double strength) =>
+            Color.FromArgb((byte)Math.Round(255 - 56 * strength),
+                Interpolate(background.R, accent.R, mix),
+                Interpolate(background.G, accent.G, mix),
+                Interpolate(background.B, accent.B, mix));
+
+        private static byte Interpolate(byte background, byte accent, double mix) =>
+            (byte)Math.Round(background + (accent - background) * mix);
     }
 
     private static readonly IReadOnlyDictionary<AppTheme, Palette> Palettes = new Dictionary<AppTheme, Palette>
@@ -296,6 +342,11 @@ internal static class FocusTheme
     public static SolidColorBrush LogMinimapInk => State.LogMinimapInk;
     public static SolidColorBrush TitleMotif => State.TitleMotif;
     public static LinearGradientBrush TitleBar => State.TitleBar;
+    public static LinearGradientBrush TabBar => State.TabBar;
+    public static SolidColorBrush InactiveTab => State.InactiveTab;
+    public static SolidColorBrush ActiveTab => State.ActiveTab;
+    public static LinearGradientBrush StatusBar => State.StatusBar;
+    public static SolidColorBrush GlassHighlight => State.GlassHighlight;
 
     public static Color AccentColor => Accent.Color;
     public static Color ChromeColor => Chrome.Color;
@@ -316,6 +367,14 @@ internal static class FocusTheme
         RefreshFluentPalette(palette);
         state.AppliedTheme = theme;
         state.RaiseChanged();
+    }
+
+    public static void ApplyGlass(int intensity)
+    {
+        var state = State;
+        if (state.GlassIntensity == intensity) return;
+        state.GlassIntensity = intensity;
+        state.ApplyChrome(Palettes.GetValueOrDefault(state.AppliedTheme ?? AppTheme.Focus, Focus));
     }
 
     private static void RefreshFluentPalette(Palette palette)

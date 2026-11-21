@@ -11,12 +11,14 @@ internal sealed class WorkspaceTabs : TabControl
     private const double WheelScrollStep = 96;
 
     public ScrollViewer? HeaderViewport { get; private set; }
+    public Border? HeaderBar { get; private set; }
 
     protected override void OnApplyTemplate(TemplateAppliedEventArgs e)
     {
         base.OnApplyTemplate(e);
         HeaderViewport?.RemoveHandler(PointerWheelChangedEvent, OnHeaderWheelChanged);
         HeaderViewport = e.NameScope.Find<ScrollViewer>("TabHeaderScroll");
+        HeaderBar = e.NameScope.Find<Border>("TabBar");
         HeaderViewport?.AddHandler(PointerWheelChangedEvent, OnHeaderWheelChanged, RoutingStrategies.Tunnel);
     }
 

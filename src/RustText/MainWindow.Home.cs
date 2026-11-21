@@ -15,6 +15,7 @@ public partial class MainWindow
     private async Task ShowHomeAsync()
     {
         _home = true;
+        WorkspaceHost.Background = FocusTheme.Editor;
         SetCaption(null);
         _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
         _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);

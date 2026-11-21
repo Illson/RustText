@@ -44,6 +44,9 @@ public partial class MainWindow
             Command("Настроить открытие файлов в Windows…", () => Run(RegisterAssociationsAsync)),
             Command("Выход", Close)));
         TopMenu.Items.Add(MenuGroup("_Инструменты",
+            MenuGroup("Терминал",
+                Command("CMD", () => Run(() => OpenShellAsync(ShellKind.Cmd))),
+                Command("PowerShell", () => Run(() => OpenShellAsync(ShellKind.PowerShell)))),
             MenuGroup("Редактор и просмотр",
                 Command("Перейти к строке…   Ctrl+G", () => Run(GoToLineAsync)),
                 Command("Перенос строк", ToggleWrap),
@@ -66,6 +69,7 @@ public partial class MainWindow
                 Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),
                 Command("История выпусков…", () => Run(ShowReleaseHistoryAsync))),
             Command("Найти окно процесса…", () => Run(ShowWindowFinderAsync)),
+            Command("Прокси-чекер…", ShowProxyChecker),
             new Separator(),
             Command("Настройки…", () => Run(ShowSettingsAsync))));
         TopMenu.Items.Add(MenuGroup("_Поиск",
@@ -428,6 +432,8 @@ public partial class MainWindow
             }
             if (settings.Theme != previous.Theme)
                 ApplyWorkspaceTheme();
+            else if (settings.GlassIntensity != previous.GlassIntensity)
+                ApplyWorkspaceGlass();
         }
         finally { _workspace.SettingsGate.Release(); }
     }

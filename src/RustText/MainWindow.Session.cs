@@ -304,9 +304,9 @@ public partial class MainWindow
                 First: CaptureLayout(group.First!, tabs), Second: CaptureLayout(group.Second!, tabs))
             : new WorkspaceLayout(group.Id, group.Tabs.Items.OfType<TabItem>()
                 .Select(item => tabs.Values.First(tab => ReferenceEquals(tab.Item, item)))
-                .Where(tab => tab.Log?.IsConsole != true).Select(tab => tab.Id).ToArray(),
+                .Where(tab => !tab.IsTransient).Select(tab => tab.Id).ToArray(),
                 group.Tabs.SelectedItem is TabItem selected
-                    ? tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, selected) && tab.Log?.IsConsole != true)?.Id : null);
+                    ? tabs.Values.FirstOrDefault(tab => ReferenceEquals(tab.Item, selected) && !tab.IsTransient)?.Id : null);
     }
 
     private SessionTab CaptureTab(WorkTab tab)
@@ -520,7 +520,7 @@ public partial class MainWindow
         {
             var byItem = pair.View.Tabs.Values.ToDictionary(tab => tab.Item);
             return pair.Owner.Groups(pair.View.Root).SelectMany(group => group.Tabs.Items.OfType<TabItem>())
-                .Select(item => (pair.Owner, Tab: byItem[item])).Where(entry => entry.Tab.Log?.IsConsole != true);
+                .Select(item => (pair.Owner, Tab: byItem[item])).Where(entry => !entry.Tab.IsTransient);
         }).ToArray();
         var tabs = entries.Select(entry => entry.Tab).ToArray();
         var recoveries = tabs.Select(tab => tab.Recovery).ToArray();
@@ -902,7 +902,7 @@ public partial class MainWindow
         bool preserveUnsavedText = false,
         bool deferHistoryLimit = false)
     {
-        if (tab.Log?.IsConsole == true) return;
+        if (tab.IsTransient) return;
         await _workspace.SaveGate.WaitAsync(_lifetime.Token);
         try
         {

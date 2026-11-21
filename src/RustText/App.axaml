@@ -9,7 +9,7 @@
              x:Class="RustText.Demo.App" RequestedThemeVariant="Dark">
     <Application.Resources>
         <ControlTheme x:Key="FocusDocumentTab" TargetType="TabItem">
-            <Setter Property="Background" Value="{x:Static local:FocusTheme.Panel}" />
+            <Setter Property="Background" Value="{x:Static local:FocusTheme.InactiveTab}" />
             <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Muted}" />
             <Setter Property="Margin" Value="0,0,3,0" />
             <Setter Property="Padding" Value="9,0,3,0" />
@@ -18,13 +18,18 @@
             <Setter Property="FontSize" Value="13" />
             <Setter Property="Template">
                 <ControlTemplate>
-                    <Border Name="TabSurface"
-                            Background="{TemplateBinding Background}"
-                            CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}">
-                        <ContentPresenter Name="PART_ContentPresenter" Content="{TemplateBinding Header}"
-                                          ContentTemplate="{TemplateBinding HeaderTemplate}"
-                                          HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center" />
-                    </Border>
+                    <Grid>
+                        <Border Name="TabSurface"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter Name="PART_ContentPresenter" Content="{TemplateBinding Header}"
+                                              ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                              HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center" />
+                        </Border>
+                        <Border Name="SelectedUnderline" Height="2" Margin="4,0"
+                                VerticalAlignment="Bottom" Background="{x:Static local:FocusTheme.Accent}"
+                                IsHitTestVisible="False" IsVisible="False" />
+                    </Grid>
                 </ControlTemplate>
             </Setter>
             <Style Selector="^:not(:selected):pointerover">
@@ -32,8 +37,11 @@
                 <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
             </Style>
             <Style Selector="^:selected">
-                <Setter Property="Background" Value="{x:Static local:FocusTheme.Editor}" />
+                <Setter Property="Background" Value="{x:Static local:FocusTheme.ActiveTab}" />
                 <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            </Style>
+            <Style Selector="^:selected /template/ Border#SelectedUnderline">
+                <Setter Property="IsVisible" Value="True" />
             </Style>
             <Style Selector="^:disabled">
                 <Setter Property="Opacity" Value="0.55" />
@@ -100,8 +108,8 @@
             <Setter Property="VerticalContentAlignment" Value="Stretch" />
             <Setter Property="Template">
                 <ControlTemplate>
-                    <Grid RowDefinitions="Auto,*" Background="{x:Static local:FocusTheme.Editor}">
-                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.Chrome}" Padding="8,2,8,0">
+                    <Grid RowDefinitions="Auto,*">
+                        <Border Name="TabBar" Background="{x:Static local:FocusTheme.TabBar}" Padding="8,2,8,0">
                             <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
                                 <Grid.Styles>
                                     <Style Selector="Track#TabScrollPosition[Maximum=0]">
@@ -131,7 +139,7 @@
                                 </Track>
                             </Grid>
                         </Border>
-                        <Panel Grid.Row="1" ClipToBounds="True">
+                        <Panel Grid.Row="1" ClipToBounds="True" Background="{x:Static local:FocusTheme.Editor}">
                             <ContentPresenter Name="PART_SelectedContentHost2" IsVisible="False"
                                               HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                                               VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />

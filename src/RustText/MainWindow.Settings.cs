@@ -176,7 +176,6 @@ public partial class MainWindow
         dialog.Opened += (_, _) => sections.Focus();
 
         if (await dialog.ShowDialog<UserSettings?>(this) is not { } edited) return;
-
         var previous = Settings;
         await SaveWorkspaceSettingsAsync(current =>
         {
