@@ -60,7 +60,7 @@ public sealed class HistoryMenuTests
                     MenuLabels(dataGroup));
                 var historyGroup = toolsGroups.Single(item => MenuHeader(item) == "История и черновики");
                 Assert.Contains(historyGroup.Items, item => ReferenceEquals(item, closedDrafts));
-                Assert.Equal(new[] { "Версии файла…", "Призрачные вкладки", "Архив черновиков…" }, MenuLabels(historyGroup));
+                Assert.Equal(new[] { "Версии файла…", "Призрачные вкладки", "Показывать архивные записи", "Архив черновиков…" }, MenuLabels(historyGroup));
                 var updatesGroup = toolsGroups.Single(item => MenuHeader(item) == "Обновления");
                 Assert.Equal(new[] { "Проверить обновления…", "История выпусков…" }, MenuLabels(updatesGroup));
 

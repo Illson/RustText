@@ -300,6 +300,7 @@ public partial class MainWindow
         _startEmpty = enteringEmpty;
         ApplyWorkspaceTheme();
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
+        await LoadArchivedHistoryAsync();
         _closedTabs.RemoveAll(tab => IsKnownEmptyUntitledDraft(tab, SessionStorage));
 
         if (cachedView is { } view)

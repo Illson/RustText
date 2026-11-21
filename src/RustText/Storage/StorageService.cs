@@ -57,6 +57,7 @@ internal sealed class StorageService
 
     private DraftArchiveService? _draftArchive;
     public DraftArchiveService DraftArchive => _draftArchive ??= new(_root);
+    public IReadOnlyList<DraftArchiveEntry> ArchivedHistory => _draftArchive?.HistoryEntries ?? [];
     internal static StorageService OpenWorkspace(string profileBaseDirectory, string workspaceId, string windowId)
     {
         var catalog = new WorkspaceCatalogStore(profileBaseDirectory);

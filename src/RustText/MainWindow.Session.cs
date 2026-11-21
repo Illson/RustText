@@ -19,6 +19,7 @@ public partial class MainWindow
     private MenuItem? _recentMenu;
     private MenuItem? _closedFilesMenu;
     private MenuItem? _closedDraftsMenu;
+    private MenuItem? _showArchivedDrafts;
     private Action? _refreshHome;
     private Action? _refreshHomeTimes;
     private DateTimeOffset _lastHomeRefresh;
@@ -78,6 +79,7 @@ public partial class MainWindow
         }
         ApplyWorkspaceTheme();
         _closedTabs = _workspace.GetClosedTabs(SessionStorage);
+        await LoadArchivedHistoryAsync();
 
         var restore = _startEmpty
             ? SessionStorage.LoadSessionAsync(_lifetime.Token)
@@ -1123,6 +1125,7 @@ public partial class MainWindow
 
     private void RefreshHistoryMenusLocal()
     {
+        if (_showArchivedDrafts is { } toggle) toggle.IsChecked = Settings.ShowArchivedDrafts;
         if (_recentMenu is { } recent)
         {
             recent.Items.Clear();
@@ -1149,11 +1152,11 @@ public partial class MainWindow
         if (_closedDraftsMenu is { } closedDrafts)
         {
             closedDrafts.Items.Clear();
-            foreach (var item in _closedTabs.Where(item => item.Path is null))
+            var storage = SessionStorage;
+            foreach (var item in DraftHistory(storage))
             {
-                var name = ClosedTabDisplayName(item);
-                closedDrafts.Items.Add(Command(name + DescribeWork(Settings.ShowDraftLineCount ? item.LineCount : null, item.LastWorkedMs),
-                    () => Run(() => RestoreClosedAsync(item))));
+                closedDrafts.Items.Add(Command(item.Label + DescribeWork(Settings.ShowDraftLineCount ? item.Tab.LineCount : null, item.Tab.LastWorkedMs),
+                    () => Run(() => item.Archive is { } entry ? RestoreArchivedDraftAsync(storage, entry) : RestoreClosedAsync(item.Tab))));
             }
         }
     }

@@ -69,6 +69,81 @@ public sealed class HomeHistoryTests
     });
 
     [Fact]
+    public Task ArchivedGhostStaysSearchableAndRestorableAcrossRestart() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string title = "Старая заметка";
+        const string text = title + "\nВторая строка";
+        const string label = "📦 " + title + " · архив";
+        var storage = StorageService.OpenForTesting(profile);
+        var saved = await storage.SaveClosedDraftAsync(new SessionTab(41, null, TextEncodingKind.Utf8)
+        {
+            CustomTitle = title, ClosedAtMs = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeMilliseconds()
+        }, text);
+        await storage.SaveSessionAsync(new SessionState([], [saved]));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => HasButton(window, title));
+            await CallAsync(window, "ArchiveClosedDraftsAsync");
+            await HeadlessTests.WaitForAsync(() => HasButton(window, label));
+            Assert.False(HasButton(window, title));
+            Assert.False(File.Exists(storage.GetDraftPath(saved)));
+            var search = window.GetVisualDescendants().OfType<TextBox>().Single(box => box.PlaceholderText == "Поиск по имени или пути");
+            search.Text = "нет совпадений";
+            await HeadlessTests.WaitForAsync(() => !HasButton(window, label));
+            search.Text = "заметка";
+            await HeadlessTests.WaitForAsync(() => HasButton(window, label));
+
+            void Toggle() => ((MenuItem)Field(window, "_showArchivedDrafts")!).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Toggle();
+            await HeadlessTests.WaitForAsync(() => !HasButton(window, label));
+            Assert.Single(await storage.DraftArchive.GetEntriesAsync());
+            await CloseAsync(window);
+            window = await OpenWorkspaceAsync();
+            Assert.False(((MenuItem)Field(window, "_showArchivedDrafts")!).IsChecked);
+            Assert.False(HasButton(window, label));
+            Toggle();
+            await HeadlessTests.WaitForAsync(() => HasButton(window, label));
+            var menu = (MenuItem)Field(window, "_closedDraftsMenu")!;
+            Assert.Contains(menu.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.StartsWith(label) == true);
+            Click(FindButton(window, label));
+            await HeadlessTests.WaitForAsync(() => Property(window, "ActiveTab") is { } tab && Property(tab, "Editor") is TextEditor { Text: text });
+            await HeadlessTests.WaitForAsync(() => !menu.Items.OfType<MenuItem>().Any(item => item.Header?.ToString()?.StartsWith(label) == true));
+            Assert.Empty(await storage.DraftArchive.GetEntriesAsync());
+        }
+        finally { if (window.IsVisible) await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ArchivedRowDeletionRequiresConfirmationAndLeavesLiveDraftAlone() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenForTesting(profile);
+        var tab = await storage.SaveClosedDraftAsync(new SessionTab(7, null, TextEncodingKind.Utf8) { CustomTitle = "Архивный" }, "архив");
+        await storage.DraftArchive.ArchiveAsync(tab, storage.GetDraftPath(tab)!);
+        var live = await storage.SaveClosedDraftAsync(new SessionTab(8, null, TextEncodingKind.Utf8) { CustomTitle = "Свежий" }, "текст");
+        await storage.SaveSessionAsync(new SessionState([], [live]));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            const string remove = "Удалить из архива: 📦 Архивный · архив";
+            foreach (var choice in new[] { "Отмена", "Удалить" })
+            {
+                await HeadlessTests.WaitForAsync(() => HasButton(window, remove));
+                Click(FindButton(window, remove));
+                await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
+                var dialog = window.OwnedWindows.Single();
+                Click(dialog.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, choice)));
+                await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 0);
+                if (choice == "Отмена") Assert.Single(await storage.DraftArchive.GetEntriesAsync());
+            }
+            await HeadlessTests.WaitForAsync(() => !HasButton(window, remove));
+            Assert.Empty(await storage.DraftArchive.GetEntriesAsync());
+            Assert.True(HasButton(window, "Свежий"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task HistoryCanCollapseAndRemoveEntriesWithoutDeletingAnOrdinaryFile() => HeadlessTests.RunAsync(async profile =>
     {
         var storage = StorageService.OpenForTesting(profile);
