@@ -1,6 +1,8 @@
+using System.Collections.Specialized;
 using System.Reflection;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using RustText.Demo;
@@ -12,6 +14,47 @@ namespace RustText.Tests;
 public sealed class ProxyCheckerTabTests
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    [Fact]
+    public Task LargeResultBacklogYieldsToInputBeforeEnablingAnotherRun() => HeadlessTests.RunAsync(async _ =>
+    {
+        using var view = new ProxyCheckerView();
+        var window = new Window { Content = view };
+        window.Show();
+        try
+        {
+            window.UpdateLayout();
+            var input = Assert.Single(view.GetVisualDescendants().OfType<TextEditor>());
+            var list = Assert.Single(view.GetVisualDescendants().OfType<ListBox>());
+            var start = Assert.Single(view.GetVisualDescendants().OfType<Button>(), b => Equals(b.Content, "Проверить"));
+            const int count = 10_000;
+            input.Text = string.Join('\n', Enumerable.Repeat("invalid", count));
+            var processedAtInput = -1;
+            var canRestartAtInput = false;
+            ((INotifyCollectionChanged)list.ItemsSource!).CollectionChanged += OnFirstResult;
+            start.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => start.IsEnabled && processedAtInput != -1);
+            Assert.InRange(processedAtInput, 1, count - 1);
+            Assert.False(canRestartAtInput);
+            Assert.Equal(count, list.Items.Count);
+            input.Text = "invalid";
+            start.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => start.IsEnabled);
+            Assert.Single(list.Items);
+
+            void OnFirstResult(object? sender, NotifyCollectionChangedEventArgs e)
+            {
+                if (e.Action != NotifyCollectionChangedAction.Add) return;
+                ((INotifyCollectionChanged)sender!).CollectionChanged -= OnFirstResult;
+                Dispatcher.UIThread.Post(() =>
+                {
+                    processedAtInput = list.Items.Count;
+                    canRestartAtInput = start.IsEnabled;
+                }, DispatcherPriority.Input);
+            }
+        }
+        finally { window.Close(); }
+    });
 
     [Fact]
     public Task MenuSelectsOneTransientTabAndClosingReturnsToTheDocument() => HeadlessTests.RunAsync(async profile =>

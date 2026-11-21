@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using Avalonia;
 using Avalonia.Controls;
@@ -36,6 +37,7 @@ internal sealed class ShellTab : Grid, IDisposable
         RowSpacing = 6;
         _output.FontFamily = _input.FontFamily = new FontFamily("Consolas");
         _output.FontSize = _input.FontSize = fontSize;
+        _output.Document.UndoStack.SizeLimit = 0;
         Children.Add(_output);
         var commandRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 6 };
         commandRow.Children.Add(_input);
@@ -58,9 +60,9 @@ internal sealed class ShellTab : Grid, IDisposable
 
     internal static Process Start(ShellKind shell, string workingDirectory)
     {
-        var system = Environment.SystemDirectory;
-        var encoding = shell == ShellKind.Cmd
-            ? CodePagesEncodingProvider.Instance.GetEncoding(CultureInfo.CurrentCulture.TextInfo.OEMCodePage)!
+        var codePage = CultureInfo.CurrentCulture.TextInfo.OEMCodePage;
+        var encoding = shell == ShellKind.Cmd && codePage != Encoding.UTF8.CodePage
+            ? CodePagesEncodingProvider.Instance.GetEncoding(codePage)!
             : new UTF8Encoding(false);
         var info = new ProcessStartInfo
         {
@@ -71,13 +73,21 @@ internal sealed class ShellTab : Grid, IDisposable
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardInputEncoding = encoding,
+            StandardInputEncoding = new UTF8Encoding(false),
             StandardOutputEncoding = encoding,
             StandardErrorEncoding = encoding
         };
         if (shell == ShellKind.Cmd)
         {
-            info.Arguments = $"/D /Q /S /K \"\"{Path.Combine(system, "chcp.com")}\" {encoding.CodePage} >nul\"";
+            // A portable copy can be renamed. An external host (e.g. headless tests) uses the apphost.
+            info.FileName = Assembly.GetEntryAssembly() == typeof(Program).Assembly
+                ? Environment.ProcessPath ?? throw new IOException("Путь RustText недоступен.")
+                : Path.Combine(AppContext.BaseDirectory, "rusttext.exe");
+            if (Path.GetFileNameWithoutExtension(info.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                info.ArgumentList.Add(Path.GetFullPath(Environment.GetCommandLineArgs()[0]));
+            info.WindowStyle = ProcessWindowStyle.Hidden;
+            info.ArgumentList.Add(CmdInputHost.Argument);
+            info.ArgumentList.Add(encoding.CodePage.ToString(CultureInfo.InvariantCulture));
         }
         else
         {
@@ -110,10 +120,10 @@ internal sealed class ShellTab : Grid, IDisposable
         if (_sending || _elevating || _disposed || !_input.IsEnabled) return;
 
         var command = _input.Text ?? "";
-        _input.Text = "";
         _sending = true;
         try
         {
+            _input.Text = "";
             Append(command + Environment.NewLine);
             await _process.StandardInput.WriteLineAsync(command.AsMemory(), _lifetime.Token);
         }

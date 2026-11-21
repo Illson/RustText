@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
@@ -20,6 +21,7 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
 {
     private static readonly FontFamily AddressFont = new("Cascadia Mono, Consolas, monospace");
     private static readonly ProxyProtocol[] Protocols = [ProxyProtocol.Http, ProxyProtocol.Https, ProxyProtocol.Socks5];
+    private static readonly TimeSpan ResultBatchBudget = TimeSpan.FromMilliseconds(6);
 
     private readonly TextEditor _input = new()
     {
@@ -242,6 +244,7 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
         UpdateResults();
         _refresh.Start();
 
+        var interrupted = false;
         try
         {
             await Task.Run(() => ProxyChecker.CheckAsync(
@@ -252,23 +255,23 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
         }
         catch (Exception)
         {
-            if (!_disposed)
-            {
-                ReceiveResults();
-                _progress.Text = $"Проверка прервана · {_results.Count} из {_total}";
-            }
+            interrupted = true;
         }
         finally
         {
             _refresh.Stop();
+            while (!_disposed && !_pending.IsEmpty)
+            {
+                ReceiveResults();
+                if (!_pending.IsEmpty) await Dispatcher.Yield(DispatcherPriority.Background);
+            }
             _run = null;
             if (!_disposed)
             {
-                ReceiveResults();
                 if (cancellation.IsCancellationRequested)
-                {
                     _progress.Text = $"Остановлено · {_results.Count} из {_total}";
-                }
+                else if (interrupted)
+                    _progress.Text = $"Проверка прервана · {_results.Count} из {_total}";
                 UpdateControls();
             }
         }
@@ -290,15 +293,17 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
 
     private void ReceiveResults()
     {
-        var changed = false;
-        while (_pending.TryDequeue(out var result))
+        var started = Stopwatch.GetTimestamp();
+        var received = 0;
+        while (received < 512 && _pending.TryDequeue(out var result))
         {
-            changed = true;
+            received++;
             _results.Add(result);
             if (result.Status == ProxyCheckStatus.Working) _working++;
             if (MatchesFilter(result)) AddVisible(result);
+            if (Stopwatch.GetElapsedTime(started) >= ResultBatchBudget) break;
         }
-        if (changed) UpdateResults();
+        if (received != 0) UpdateResults();
     }
 
     private void AddVisible(ProxyCheckResult result)
