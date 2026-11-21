@@ -36,6 +36,7 @@ internal sealed class ShellTab : Grid, IDisposable
         RowSpacing = 6;
         _output.FontFamily = _input.FontFamily = new FontFamily("Consolas");
         _output.FontSize = _input.FontSize = fontSize;
+        _output.Document.UndoStack.SizeLimit = 0;
         Children.Add(_output);
         var commandRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 6 };
         commandRow.Children.Add(_input);
@@ -59,8 +60,9 @@ internal sealed class ShellTab : Grid, IDisposable
     internal static Process Start(ShellKind shell, string workingDirectory)
     {
         var system = Environment.SystemDirectory;
-        var encoding = shell == ShellKind.Cmd
-            ? CodePagesEncodingProvider.Instance.GetEncoding(CultureInfo.CurrentCulture.TextInfo.OEMCodePage)!
+        var codePage = CultureInfo.CurrentCulture.TextInfo.OEMCodePage;
+        var encoding = shell == ShellKind.Cmd && codePage != Encoding.UTF8.CodePage
+            ? CodePagesEncodingProvider.Instance.GetEncoding(codePage)!
             : new UTF8Encoding(false);
         var info = new ProcessStartInfo
         {
@@ -110,10 +112,21 @@ internal sealed class ShellTab : Grid, IDisposable
         if (_sending || _elevating || _disposed || !_input.IsEnabled) return;
 
         var command = _input.Text ?? "";
-        _input.Text = "";
         _sending = true;
         try
         {
+            if (_shell == ShellKind.Cmd)
+            {
+                var encoding = _process.StandardInput.Encoding;
+                var bytes = encoding.GetBytes(command);
+                // CMD reads redirected interactive input one byte at a time, including on DBCS pages.
+                if (bytes.Length != command.Length || encoding.GetString(bytes) != command)
+                {
+                    AppendNotice($"CMD не может передать эти символы без искажения (кодовая страница {encoding.CodePage}). Используйте PowerShell.");
+                    return;
+                }
+            }
+            _input.Text = "";
             Append(command + Environment.NewLine);
             await _process.StandardInput.WriteLineAsync(command.AsMemory(), _lifetime.Token);
         }

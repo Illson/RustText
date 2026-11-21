@@ -11,6 +11,11 @@ public partial class MainWindow
     private Task OpenShellAsync(ShellKind shell)
     {
         if (_closing || _closed || _workspaceSwitchPending) return Task.CompletedTask;
+        if (!_restoreFinished)
+        {
+            SetStatus("Дождитесь открытия рабочего пространства.");
+            return Task.CompletedTask;
+        }
         if (!OperatingSystem.IsWindows())
             throw new InvalidOperationException("Терминал доступен в Windows.");
 
