@@ -18,13 +18,18 @@
             <Setter Property="FontSize" Value="13" />
             <Setter Property="Template">
                 <ControlTemplate>
-                    <Border Name="TabSurface"
-                            Background="{TemplateBinding Background}"
-                            CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}">
-                        <ContentPresenter Name="PART_ContentPresenter" Content="{TemplateBinding Header}"
-                                          ContentTemplate="{TemplateBinding HeaderTemplate}"
-                                          HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center" />
-                    </Border>
+                    <Grid>
+                        <Border Name="TabSurface"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter Name="PART_ContentPresenter" Content="{TemplateBinding Header}"
+                                              ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                              HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center" />
+                        </Border>
+                        <Border Name="SelectedUnderline" Height="2" Margin="4,0"
+                                VerticalAlignment="Bottom" Background="{x:Static local:FocusTheme.Accent}"
+                                IsHitTestVisible="False" IsVisible="False" />
+                    </Grid>
                 </ControlTemplate>
             </Setter>
             <Style Selector="^:not(:selected):pointerover">
@@ -34,6 +39,9 @@
             <Style Selector="^:selected">
                 <Setter Property="Background" Value="{x:Static local:FocusTheme.Editor}" />
                 <Setter Property="Foreground" Value="{x:Static local:FocusTheme.Text}" />
+            </Style>
+            <Style Selector="^:selected /template/ Border#SelectedUnderline">
+                <Setter Property="IsVisible" Value="True" />
             </Style>
             <Style Selector="^:disabled">
                 <Setter Property="Opacity" Value="0.55" />
