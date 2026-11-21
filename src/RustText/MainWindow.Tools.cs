@@ -44,6 +44,9 @@ public partial class MainWindow
             Command("Настроить открытие файлов в Windows…", () => Run(RegisterAssociationsAsync)),
             Command("Выход", Close)));
         TopMenu.Items.Add(MenuGroup("_Инструменты",
+            MenuGroup("Терминал",
+                Command("CMD", () => Run(() => OpenShellAsync(ShellKind.Cmd))),
+                Command("PowerShell", () => Run(() => OpenShellAsync(ShellKind.PowerShell)))),
             MenuGroup("Редактор и просмотр",
                 Command("Перейти к строке…   Ctrl+G", () => Run(GoToLineAsync)),
                 Command("Перенос строк", ToggleWrap),

@@ -8,6 +8,28 @@ namespace RustText.Demo;
 
 public partial class MainWindow
 {
+    private Task OpenShellAsync(ShellKind shell)
+    {
+        if (_closing || _closed || _workspaceSwitchPending) return Task.CompletedTask;
+        if (!OperatingSystem.IsWindows())
+            throw new InvalidOperationException("Терминал доступен в Windows.");
+
+        var folder = ActiveTab?.Path is { } path ? Path.GetDirectoryName(path) : null;
+        if (!Directory.Exists(folder)) folder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var terminal = new ShellTab(shell, folder!, _fontSize);
+        var tab = AddTab(select: false);
+        tab.Shell = terminal;
+        tab.CustomTitle = shell == ShellKind.Cmd ? "CMD" : "PowerShell";
+        tab.Item.Content = terminal;
+        UpdateTab(tab);
+        Select(tab);
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (ReferenceEquals(ActiveTab, tab)) terminal.FocusInput();
+        });
+        return Task.CompletedTask;
+    }
+
     private async Task OpenConsoleAsync()
     {
         if (!OperatingSystem.IsWindows())

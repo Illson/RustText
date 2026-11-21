@@ -331,7 +331,7 @@ public partial class MainWindow : Window
         };
         context.Opening += (_, _) =>
         {
-            var console = tab.Log?.IsConsole == true;
+            var console = tab.IsTransient;
             reveal.IsVisible = copyPath.IsVisible = moveWindow.IsVisible = logMode.IsVisible = !console;
             logMode.IsChecked = tab.OpensAsLog || tab.Deferred?.DraftLogMode == true
                 || tab.Recovery is not null && tab.Log?.FileLength <= DocumentFiles.MaximumDocumentBytes;
@@ -776,6 +776,8 @@ public partial class MainWindow : Window
         tab.LoadCancellation?.Cancel();
         tab.Log?.Close();
         tab.Log = null;
+        tab.Shell?.Dispose();
+        tab.Shell = null;
         DetachEditor(tab);
         tab.Item.Content = null;
     }

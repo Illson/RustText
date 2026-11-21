@@ -1072,12 +1072,8 @@ public partial class MainWindow
     private void RemoveTab(WorkTab tab)
     {
         ForgetSearchTab(tab);
-        tab.LoadCancellation?.Cancel();
         tab.JsonCancellation?.Cancel();
-        tab.Log?.Close();
-        tab.Log = null;
-        _ = DetachEditor(tab);
-        tab.Item.Content = null;
+        ReleaseTabContents(tab);
         _tabs.Remove(tab.Id);
         tab.Group.Tabs.Items.Remove(tab.Item);
         if (ReferenceEquals(_active, tab.Group) && SelectedIn(_active) is { } next)
@@ -1378,6 +1374,8 @@ public partial class MainWindow
         public EditorLogFilter? EditorLogFilter { get; set; }
         public MultiCaretEditing? MultiCaret { get; set; }
         public LogView? Log { get; set; }
+        public ShellTab? Shell { get; set; }
+        public bool IsTransient => Shell is not null || Log?.IsConsole == true;
         public bool IsLog => PendingFileOpenMode is FileOpenMode.PagedEditor or FileOpenMode.Log
             || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
         public bool OpensAsLog => IsLog && !(Log?.EditsPagesByDefault
