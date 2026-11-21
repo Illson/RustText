@@ -165,8 +165,7 @@ internal static partial class ElevatedShellCommand
     private static async Task<int> ExecuteAsync(ShellKind shell, string command, StreamWriter output)
     {
         var system = Environment.SystemDirectory;
-
-        var info = new ProcessStartInfo(ShellTab.GetExecutablePath(shell))
+        var info = new ProcessStartInfo(ShellTab.GetExecutablePath(ShellKind.PowerShell))
         {
             WorkingDirectory = system,
             UseShellExecute = false,
@@ -177,22 +176,16 @@ internal static partial class ElevatedShellCommand
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
-        if (shell == ShellKind.Cmd)
-        {
-            info.Arguments = $"/D /S /C \"\"{Path.Combine(system, "chcp.com")}\" 65001 >nul & {command}\"";
-        }
-        else
-        {
-            const string setup = """
-                [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-                $OutputEncoding = [Console]::OutputEncoding
-                $ProgressPreference = 'SilentlyContinue'
-                """;
-            var script = setup + "\n& {\n" + command + "\n}";
-            string[] arguments = ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
-                Convert.ToBase64String(Encoding.Unicode.GetBytes(script))];
-            foreach (var argument in arguments) info.ArgumentList.Add(argument);
-        }
+        const string setup = """
+            [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+            $OutputEncoding = [Console]::OutputEncoding
+            $ProgressPreference = 'SilentlyContinue'
+            """;
+        var commandScript = shell == ShellKind.Cmd ? CreateCmdScript(command) : "& {\n" + command + "\n}";
+        var script = setup + "\n" + commandScript;
+        string[] arguments = ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
+            Convert.ToBase64String(Encoding.Unicode.GetBytes(script))];
+        foreach (var argument in arguments) info.ArgumentList.Add(argument);
 
         using var process = Process.Start(info) ?? throw new IOException("Не удалось запустить оболочку.");
         process.StandardInput.Close();
@@ -215,6 +208,26 @@ internal static partial class ElevatedShellCommand
                 finally { writeLock.Release(); }
             }
         }
+    }
+
+    private static string CreateCmdScript(string command)
+    {
+        // Start CMD after setting its inherited console code page. CMD can cache the code page
+        // for redirected output, so changing it inside the same /C command loses characters.
+        var arguments = Convert.ToBase64String(Encoding.Unicode.GetBytes($"/D /S /C \"{command}\""));
+        return $$"""
+            $ErrorActionPreference = 'Stop'
+            $start = [Diagnostics.ProcessStartInfo]::new([IO.Path]::Combine([Environment]::SystemDirectory, 'cmd.exe'))
+            $start.Arguments = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{{arguments}}'))
+            $start.UseShellExecute = $false
+            $start.RedirectStandardInput = $true
+            $child = [Diagnostics.Process]::Start($start)
+            try {
+                $child.StandardInput.Close()
+                $child.WaitForExit()
+                exit $child.ExitCode
+            } finally { $child.Dispose() }
+            """;
     }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
