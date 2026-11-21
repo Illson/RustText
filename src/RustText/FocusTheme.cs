@@ -118,7 +118,6 @@ internal static class FocusTheme
         public LinearGradientBrush TabBar { get; } = HeaderGradient(Focus.Chrome);
         public LinearGradientBrush StatusBar { get; } = GlassGradient(Focus.Deep);
         public SolidColorBrush GlassHighlight { get; } = new(Colors.Transparent);
-        public SolidColorBrush TitleMotifExtension { get; } = new(Colors.Transparent);
         public SolidColorBrush InactiveTab { get; } = Brush(Focus.Panel);
         public SolidColorBrush ActiveTab { get; } = Brush(Focus.Editor);
 
@@ -205,9 +204,6 @@ internal static class FocusTheme
             StatusBar.GradientStops[0].Color = Tint(deep, accent, .06 * strength, strength);
             StatusBar.GradientStops[1].Color = Tint(deep, accent, .17 * strength, strength);
             GlassHighlight.Color = Color.FromArgb((byte)Math.Round(100 * strength), accent.R, accent.G, accent.B);
-            var motif = TitleMotif.Color;
-            TitleMotifExtension.Color = Color.FromArgb((byte)Math.Round(motif.A * Math.Min(1, 4 * strength)),
-                motif.R, motif.G, motif.B);
         }
 
         private static Color TranslucentTab(string fill, double transparency)
@@ -351,7 +347,6 @@ internal static class FocusTheme
     public static SolidColorBrush ActiveTab => State.ActiveTab;
     public static LinearGradientBrush StatusBar => State.StatusBar;
     public static SolidColorBrush GlassHighlight => State.GlassHighlight;
-    public static SolidColorBrush TitleMotifExtension => State.TitleMotifExtension;
 
     public static Color AccentColor => Accent.Color;
     public static Color ChromeColor => Chrome.Color;

@@ -7,13 +7,17 @@ namespace RustText.Demo;
 public partial class MainWindow
 {
     private bool _glassRequested;
+    private int EffectiveGlassIntensity => _workspace.GlassPreviewIntensity ?? Settings.GlassIntensity;
 
     private void ApplyWorkspaceGlass()
     {
-        var intensity = _workspace.GlassPreviewIntensity ?? Settings.GlassIntensity;
+        var intensity = EffectiveGlassIntensity;
         FocusTheme.ApplyGlass(intensity);
         foreach (var window in _workspace.Windows)
+        {
             window.ApplyGlassToWindow(intensity);
+            window.RefreshGlassMenu(intensity);
+        }
     }
 
     private void ApplyGlassToWindow(int intensity)
