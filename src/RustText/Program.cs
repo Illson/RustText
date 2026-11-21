@@ -14,6 +14,11 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        if (ElevatedShellCommand.TryRunWorker(args) is { } elevatedExit)
+        {
+            return elevatedExit;
+        }
+
         if (ConsoleCapture.TryRunWorker(args) is { } consoleExit)
         {
             return consoleExit;

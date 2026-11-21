@@ -34,6 +34,8 @@ public partial class MainWindow
             item.ToggleType = MenuItemToggleType.Radio;
             _themeMenu.Items.Add(item);
         }
+        _themeMenu.Items.Add(new Separator());
+        _themeMenu.Items.Add(Command("Настройки тем…", () => Run(() => ShowSettingsPageAsync(showThemes: true))));
         RefreshThemeMenu();
         return _themeMenu;
     }
@@ -64,6 +66,7 @@ public partial class MainWindow
     {
         var active = _workspace.Windows.FirstOrDefault(window => window.IsActive && !window._closed) ?? this;
         FocusTheme.Apply(active.SelectedTheme);
+        ApplyWorkspaceGlass();
         foreach (var window in _workspace.Windows)
         {
             window.RefreshThemeMenu();

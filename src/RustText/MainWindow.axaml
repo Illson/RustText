@@ -10,8 +10,10 @@
         Opened="WindowChromeOpened" Closed="WindowChromeClosed"
         Background="{x:Static local:FocusTheme.Editor}" Foreground="{x:Static local:FocusTheme.Text}" FontSize="13">
     <Grid RowDefinitions="Auto,*,Auto,Auto">
-        <Border x:Name="TitleBar" Background="{x:Static local:FocusTheme.TitleBar}" MinHeight="36">
+        <Border x:Name="TitleBar" ZIndex="1" Background="{x:Static local:FocusTheme.TitleBar}" MinHeight="36">
             <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="8,0,0,0">
+                <Border Grid.ColumnSpan="5" Margin="-8,0,0,0" Height="1" VerticalAlignment="Top"
+                        IsHitTestVisible="False" Background="{x:Static local:FocusTheme.GlassHighlight}" />
                 <StackPanel Orientation="Horizontal" Spacing="3" VerticalAlignment="Center">
                     <Menu Classes="focus-menu" VerticalAlignment="Center">
                         <MenuItem x:Name="WorkspaceMenuButton" Padding="2" IsEnabled="False"
@@ -32,9 +34,11 @@
                     </Button>
                 </StackPanel>
                 <Menu Grid.Column="1" x:Name="TopMenu" Classes="focus-menu" Margin="6,0,0,0" VerticalAlignment="Center" />
-                <Border Grid.Column="2" x:Name="TitleDragArea" Background="Transparent" ClipToBounds="True" PointerPressed="WindowDragPressed">
-                    <Path x:Name="TitlePalm" Width="58" Height="36" Margin="0,0,64,0" HorizontalAlignment="Right"
-                          IsHitTestVisible="False" Fill="{x:Static local:FocusTheme.TitleMotif}"
+                <Border Grid.Column="2" x:Name="TitleDragArea" Background="Transparent" PointerPressed="WindowDragPressed">
+                    <Canvas Width="58" Height="36" Margin="0,0,64,0" HorizontalAlignment="Right"
+                            IsHitTestVisible="False">
+                      <Path x:Name="TitlePalm" Width="58" Height="36"
+                            IsHitTestVisible="False" Fill="{x:Static local:FocusTheme.TitleMotif}"
                           Data="M 14,36 C 17,29 18,20 22,10 L 25,10 C 23,18 21,28 20,36 Z
                                 M 23,10 C 26,1 35,0 40,5 C 33,3 28,5 23,10 Z
                                 M 24,10 C 34,6 41,12 42,20 C 37,14 31,12 24,12 Z
@@ -48,6 +52,11 @@
                                 M 42,19 C 38,12 31,13 28,17 C 34,15 38,17 42,19 Z
                                 M 42,19 C 35,17 30,22 30,27 C 34,23 38,21 42,20 Z
                                 M 42,19 C 45,21 47,26 45,30 C 44,25 43,22 41,20 Z" />
+                      <Path x:Name="TitlePalmExtension" Canvas.Top="36" Width="58" Height="34"
+                            Fill="{x:Static local:FocusTheme.TitleMotifExtension}"
+                            Data="M 14,0 C 12,8 10,19 8,34 L 15,34 C 16,21 18,9 20,0 Z
+                                  M 34,0 C 31,7 29,16 27,25 L 33,25 C 35,15 37,7 39,0 Z" />
+                    </Canvas>
                 </Border>
                 <Border Grid.Column="3" x:Name="UpdateNotice" IsVisible="False" Margin="6,0,9,0"
                         VerticalAlignment="Center" CornerRadius="5" BorderThickness="1"
@@ -93,7 +102,7 @@
         <ContentControl Grid.Row="2" x:Name="PanelHost" IsVisible="False"
                         HorizontalContentAlignment="Stretch" />
         <Border Grid.Row="3" x:Name="StatusBar" Padding="12,3" MinHeight="26" BorderBrush="{x:Static local:FocusTheme.StatusBorder}"
-                BorderThickness="0,1,0,0" Background="{x:Static local:FocusTheme.Deep}">
+                BorderThickness="0,1,0,0" Background="{x:Static local:FocusTheme.StatusBar}">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                 <TextBlock x:Name="StatusText" TextTrimming="CharacterEllipsis" FontSize="12"
                            VerticalAlignment="Center" Foreground="{x:Static local:FocusTheme.Muted}" />

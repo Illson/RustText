@@ -25,6 +25,9 @@ internal sealed record SessionState(List<SessionTab> Tabs, List<SessionTab>? Clo
 public sealed record UserSettings(int UntitledTabLimit = 10, int RecentFileLimit = 100, int VersionFileLimitBytes = 5 * 1024 * 1024, long VersionTotalLimitBytes = 100L * 1024 * 1024)
 {
     public string Theme { get; init; } = "focus";
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? GlassEnabled { get; init; }
+    public int GlassIntensity { get; init; }
     public bool ShowDraftLineCount { get; init; } = true;
     public bool AutoCheckUpdates { get; init; } = true;
     public bool AutoCheckUpdatesChoiceMade { get; init; }

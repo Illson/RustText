@@ -43,9 +43,12 @@ public sealed class HistoryMenuTests
                 var toolsGroups = toolsMenu.Items.OfType<MenuItem>().ToArray();
                 Assert.Equal(new[]
                 {
-                    "Редактор и просмотр", "Форматирование и данные", "История и черновики", "Обновления",
-                    "Найти окно процесса…", "Настройки…"
+                    "Терминал", "Редактор и просмотр", "Форматирование и данные", "История и черновики", "Обновления",
+                    "Найти окно процесса…", "Прокси-чекер…", "Настройки…"
                 }, toolsGroups.Select(MenuHeader));
+
+                var terminalGroup = toolsGroups.Single(item => MenuHeader(item) == "Терминал");
+                Assert.Equal(new[] { "CMD", "PowerShell" }, MenuLabels(terminalGroup));
 
                 var editorGroup = toolsGroups.Single(item => MenuHeader(item) == "Редактор и просмотр");
                 Assert.Equal(new[] { "Перейти к строке…   Ctrl+G", "Перенос строк", "Масштаб текста" }, MenuLabels(editorGroup));

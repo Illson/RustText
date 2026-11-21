@@ -165,8 +165,12 @@ internal static class TextOperations
     public static bool IsJsonPath(string? path) =>
         string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase) || IsJsonLinesPath(path);
 
+    internal static bool IsCfgPath(string? path) =>
+        string.Equals(Path.GetExtension(path), ".cfg", StringComparison.OrdinalIgnoreCase);
+
     public static bool LooksLikeJson(string text, string? path)
     {
+        if (IsCfgPath(path)) return false;
         if (IsJsonPath(path)) return true;
         if (!LogLevels.IsLogPath(path))
             return text.AsSpan().TrimStart().TrimStart('\uFEFF').TrimStart() is ['{' or '[', ..];
