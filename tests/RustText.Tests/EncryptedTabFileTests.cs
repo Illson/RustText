@@ -162,7 +162,6 @@ public sealed class EncryptedTabDialogTests
             await opening;
             Assert.Equal(other.Path, Assert.Single(await storage.GetRecentFilesAsync()).Path);
             AssertNoEncryptedHistory(await storage.LoadSessionAsync(), source, target, saved.Id);
-
         }
         finally
         {
@@ -274,10 +273,14 @@ public sealed class EncryptedTabDialogTests
         const string secret = "текущий черновик ~417c4e";
         const string earlier = "прежняя правка того же черновика ~8c5343";
         const string other = "соседний черновик ~da1662";
+        const string unrelatedArchive = "независимый архив с повторно использованным номером вкладки";
         var target = Path.Combine(profile, "untitled.rte");
         var storage = StorageService.OpenDefault();
         var closed = await storage.SaveClosedDraftAsync(new(3, null, TextEncodingKind.Utf8), earlier);
         var neighbour = await storage.SaveClosedDraftAsync(new(4, null, TextEncodingKind.Utf8), other);
+        var unrelated = await storage.SaveClosedDraftAsync(new SessionTab(3, null, TextEncodingKind.Utf8)
+            { ClosedAtMs = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeMilliseconds() }, unrelatedArchive);
+        var unrelatedEntry = await storage.DraftArchive.ArchiveAsync(unrelated, storage.GetDraftPath(unrelated)!);
         await storage.DraftArchive.ArchiveAsync(closed, storage.GetDraftPath(closed)!);
         var window = new MainWindow([]);
         await storage.SaveSessionAsync(new([closed], [neighbour]));
@@ -306,7 +309,7 @@ public sealed class EncryptedTabDialogTests
             Assert.Equal("already taken", await File.ReadAllTextAsync(target));
             Assert.Equal(secret, document.Text);
             Assert.Equal(secret, await storage.LoadDraftAsync(Assert.Single((await storage.LoadSessionAsync())!.Tabs)));
-            Assert.Single(await storage.DraftArchive.GetEntriesAsync());
+            Assert.Equal(2, (await storage.DraftArchive.GetEntriesAsync()).Count);
             File.Delete(target);
 
             var saved = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
@@ -314,7 +317,9 @@ public sealed class EncryptedTabDialogTests
             await saved;
             Assert.Empty(document.Text);
             Assert.Empty(window.GetVisualDescendants().OfType<TextEditor>());
-            Assert.Empty(await storage.DraftArchive.GetEntriesAsync());
+            Assert.Equal(unrelatedEntry.Id, Assert.Single(await storage.DraftArchive.GetEntriesAsync()).Id);
+            var restoredArchive = await storage.DraftArchive.RestoreAsync(unrelatedEntry);
+            Assert.Equal(unrelatedArchive, await storage.LoadDraftAsync(restoredArchive));
             foreach (var state in new[] { await storage.LoadSessionAsync(), await ReadCheckpointAsync(storage, "previous") })
             {
                 Assert.Empty(state!.Tabs);
@@ -332,7 +337,6 @@ public sealed class EncryptedTabDialogTests
         {
             await CloseAsync(window);
         }
-
     });
 
     [Fact]
