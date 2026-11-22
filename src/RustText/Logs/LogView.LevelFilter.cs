@@ -120,6 +120,8 @@ internal sealed partial class LogView
         var generation = ++_filterGeneration;
         _filterCurrent = cursor;
         _filterNext = null;
+        // A re-entrant click must not see enabled navigation while the old text is being cleared.
+        RefreshButtons();
         _filteredLogText.Text = string.Empty;
         _filteredSourceLineNumbers = [];
         _filteredPage = null;

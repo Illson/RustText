@@ -538,16 +538,30 @@ public sealed class LogUiTests
             var filtered = (TextBox)Field(log, "_filteredLogText");
             var minimap = (LogView.LogMinimap)Field(log, "_minimap");
             var previous = (Button)Field(log, "_previousButton");
+            var next = (Button)Field(log, "_nextButton");
+            var status = (TextBlock)Field(log, "_filterStatus");
             await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true
-                && minimap.Bounds.Height > 100);
+                && minimap.Bounds.Height > 100 && next.IsEnabled);
+            next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-0100", StringComparison.Ordinal) == true
+                && previous.IsEnabled);
+
+            bool? backEnabledWhileClearing = null;
+            filtered.PropertyChanged += (_, change) =>
+            {
+                if (change.Property == TextBox.TextProperty && string.IsNullOrEmpty(filtered.Text))
+                    backEnabledWhileClearing ??= previous.IsEnabled;
+            };
             var origin = minimap.TranslatePoint(new Point(0, 0), window) ?? throw new InvalidOperationException("Minimap is not attached.");
             var target = origin + new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height * .9);
             window.MouseDown(target, MouseButton.Left);
             window.MouseUp(target, MouseButton.Left);
-            await HeadlessTests.WaitForAsync(() => filtered.Text?.Length == 0 && previous.IsEnabled);
+            await HeadlessTests.WaitForAsync(() => status.Text == "Совпадений нет" && previous.IsEnabled);
+            Assert.False(backEnabledWhileClearing);
+            Assert.Empty(filtered.Text ?? string.Empty);
 
             previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true);
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-0100", StringComparison.Ordinal) == true);
         }
         finally { await CloseLogAsync(window, log); }
     });
