@@ -74,11 +74,36 @@ public partial class MainWindow
         UpdateNoticePresent(ShouldPresentBackgroundUpdate(release, _workspace.DismissedUpdateVersion) ? release : null);
     }
 
-    private Task RegisterAssociationsAsync()
+    private async Task RegisterAssociationsAsync()
     {
-        FileAssociations.RegisterAndOpenDefaultAppsSettings(ExecutablePath);
-        SetStatus("Типы файлов зарегистрированы. Выберите RustText в параметрах Windows.");
-        return Task.CompletedTask;
+        if (!OperatingSystem.IsWindows()) return;
+
+        var extensions = await ChooseFileAssociationsAsync(this, FileAssociations.ReadSelectedExtensions());
+        if (extensions is null) return;
+        FileAssociations.RegisterAndOpenDefaultAppsSettings(ExecutablePath, extensions);
+        SetStatus("Выберите приложение по умолчанию в параметрах Windows.");
+    }
+
+    internal static async Task<IReadOnlySet<string>?> ChooseFileAssociationsAsync(Window owner, IReadOnlySet<string> selected)
+    {
+        var choices = FileAssociations.SupportedExtensions.Select(extension =>
+            (Extension: extension, Control: new CheckBox { Content = extension, IsChecked = selected.Contains(extension) })).ToArray();
+        var list = new WrapPanel { ItemSpacing = 12 };
+        foreach (var (_, control) in choices) list.Children.Add(control);
+        var body = DialogPanel(new TextBlock
+        {
+            Text = "Отметьте форматы, для которых хотите назначить RustText. Подтвердите выбор в параметрах Windows. "
+                + "Снятие галочки не меняет уже назначенное приложение; RustText остаётся в меню «Открыть с помощью».",
+            TextWrapping = TextWrapping.Wrap
+        }, list);
+        var dialog = Dialog("Открытие файлов в Windows", body, 490);
+        body.Children.Add(Row(FocusButton(Button("Отмена", () => dialog.Close(false))),
+            FocusButton(Button("Сохранить и открыть параметры", () => dialog.Close(true)), primary: true)));
+
+        return await dialog.ShowDialog<bool>(owner)
+            ? choices.Where(choice => choice.Control.IsChecked == true).Select(choice => choice.Extension)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : null;
     }
 
     private void RevealTab(WorkTab tab)
