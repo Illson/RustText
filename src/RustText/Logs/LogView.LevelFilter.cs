@@ -240,7 +240,7 @@ internal sealed partial class LogView
         if (_levelFilterViewport?.IsVisible != true) return;
         var scrollViewer = _filteredLogText.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
         AttachFilteredScrollViewer(scrollViewer);
-        SyncFilteredGutterScroll();
+        SyncFilteredViewport();
     }
 
     private void AttachFilteredScrollViewer(ScrollViewer? scrollViewer)
@@ -254,16 +254,17 @@ internal sealed partial class LogView
     private void OnFilteredScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         _filteredLevelBands?.InvalidateVisual();
-        SyncFilteredGutterScroll();
+        SyncFilteredViewport();
     }
 
-    private void SyncFilteredGutterScroll()
+    private void SyncFilteredViewport()
     {
         if (_levelFilterViewport?.IsVisible == true && _filteredLogScrollViewer is { Viewport.Height: > 0 } scrollViewer)
         {
             _lineGutterScrollViewer.Height = scrollViewer.Viewport.Height;
             _lineGutterText.MinHeight = scrollViewer.Extent.Height;
             _lineGutterScrollViewer.Offset = new Vector(0, scrollViewer.Offset.Y);
+            if (_filteredPage is { Rows.Count: > 0 } page) UpdateFilteredMinimap(page);
         }
     }
 
@@ -278,9 +279,9 @@ internal sealed partial class LogView
             _minimap.UpdateViewport(markerStart, Math.Min(1, markerStart + 1d / range));
             return;
         }
-        var start = Math.Max(0, page.Rows[0].StartOffset - _hiddenOffset);
-        var end = Math.Max(start, page.Rows[^1].EndOffset - _hiddenOffset);
-        _minimap.UpdateViewport(start / (double)range, end / (double)range);
+        var visible = _filteredLogScrollViewer is { } scroll ? _filteredLevelBands?.VisibleFilteredOffsets(scroll) : null;
+        var (start, end) = visible ?? (page.Rows[0].StartOffset, page.Rows[^1].EndOffset);
+        _minimap.UpdateViewport((start - _hiddenOffset) / (double)range, (end - _hiddenOffset) / (double)range);
     }
 
     private async Task NavigateFilteredMinimapAsync(double ratio, LogDataReader reader, long request, CancellationToken token)
