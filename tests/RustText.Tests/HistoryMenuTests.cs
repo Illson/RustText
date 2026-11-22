@@ -44,14 +44,13 @@ public sealed class HistoryMenuTests
                 Assert.DoesNotContain(fileMenu.Items, item => ReferenceEquals(item, closedDrafts));
                 var fileCommands = fileMenu.Items.OfType<MenuItem>().ToArray();
                 Assert.DoesNotContain(fileCommands, item => MenuHeader(item) == "Шифрование");
-                Assert.Equal(new[] { "Выбрать файл…", "Выбрать папку…" },
-                    MenuLabels(Assert.Single(fileCommands, item => MenuHeader(item) == "Удалить с диска")));
+                Assert.DoesNotContain(fileCommands, item => MenuHeader(item) == "Удалить с диска");
                 Assert.Single(fileCommands, item => MenuHeader(item) == "Настроить открытие файлов в Windows…");
 
                 var toolsGroups = toolsMenu.Items.OfType<MenuItem>().ToArray();
                 Assert.Equal(new[]
                 {
-                    "Терминал", "Редактор и просмотр", "Форматирование и данные", "Шифрование", "История и черновики", "Обновления",
+                    "Терминал", "Редактор и просмотр", "Форматирование и данные", "Шифрование", "История и черновики", "Удалить с диска", "Обновления",
                     "Найти окно процесса…", "Прокси-чекер…", "Настройки…"
                 }, toolsGroups.Select(MenuHeader));
 
@@ -72,6 +71,8 @@ public sealed class HistoryMenuTests
                 Assert.Contains(historyGroup.Items, item => ReferenceEquals(item, closedDrafts));
                 Assert.Equal(new[] { "Версии файла…", "Призрачные вкладки", "Показывать архивные записи", "Архив черновиков…" }, MenuLabels(historyGroup));
                 var updatesGroup = toolsGroups.Single(item => MenuHeader(item) == "Обновления");
+                var deletionGroup = toolsGroups.Single(item => MenuHeader(item) == "Удалить с диска");
+                Assert.Equal(new[] { "Выбрать файл…", "Выбрать папку…" }, MenuLabels(deletionGroup));
                 Assert.Equal(new[] { "Проверить обновления…", "История выпусков…" }, MenuLabels(updatesGroup));
 
                 var finderCommand = toolsGroups.Single(item => MenuHeader(item) == "Найти окно процесса…");
