@@ -31,8 +31,20 @@ public partial class MainWindow
         // A checkpoint can still contain the live draft if committing its transfer failed.
         var present = live.Select(tab => (tab.Id, tab.ClosedAtMs)).ToHashSet();
         return rows.Concat(storage.ArchivedHistory.Where(entry => !present.Contains((entry.Tab.Id, entry.ClosedAtMs)))
-                .Select(entry => new DraftHistoryItem(entry.Tab, entry.Tab.CustomTitle ?? entry.DisplayName, entry)))
+                .Select(entry => new DraftHistoryItem(ArchiveHistoryTab(entry.Tab), ArchivedDraftDisplayName(entry), entry)))
             .OrderByDescending(row => row.Archive?.ClosedAtMs ?? row.Tab.ClosedAtMs ?? long.MaxValue);
+    }
+
+    private string ArchivedDraftDisplayName(DraftArchiveEntry entry) =>
+        entry.Tab.CustomTitle is { Length: > 0 } title ? title
+            : LimitUntitledHistoryName(string.IsNullOrWhiteSpace(entry.DisplayName) ? entry.Tab.UntitledName : entry.DisplayName.Trim());
+
+    private static SessionTab ArchiveHistoryTab(SessionTab tab)
+    {
+        if (tab.LastWorkedMs is { } timestamp && (timestamp < DateTimeOffset.MinValue.ToUnixTimeMilliseconds()
+            || timestamp > DateTimeOffset.MaxValue.ToUnixTimeMilliseconds()))
+            return tab with { LastWorkedMs = null };
+        return tab;
     }
 
     private async Task ArchiveClosedDraftsAsync()
@@ -163,7 +175,7 @@ public partial class MainWindow
                     await RemoveArchivedDraftAsync(storage, entry);
                     await RefreshAsync();
                 })));
-                var title = new TextBlock { Text = entry.Tab.CustomTitle ?? entry.DisplayName, FontWeight = FontWeight.SemiBold,
+                var title = new TextBlock { Text = ArchivedDraftDisplayName(entry), FontWeight = FontWeight.SemiBold,
                     TextTrimming = TextTrimming.CharacterEllipsis };
                 var description = new TextBlock
                 {
@@ -200,7 +212,7 @@ public partial class MainWindow
             SessionTab? restored = null;
             try
             {
-                restored = (await storage.DraftArchive.RestoreAsync(entry, _lifetime.Token)) with { Id = NextId() };
+                restored = ArchiveHistoryTab(await storage.DraftArchive.RestoreAsync(entry, _lifetime.Token)) with { Id = NextId() };
                 _closedTabs.Insert(0, restored);
                 await RestoreClosedWhileHoldingWorkspaceSwitchGateAsync(restored);
                 if (_closedTabs.Any(tab => tab.Id == restored.Id)) return;

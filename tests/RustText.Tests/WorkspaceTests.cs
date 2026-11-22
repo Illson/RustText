@@ -2465,6 +2465,7 @@ public sealed class WorkspaceTests
             await HeadlessTests.WaitForAsync(() => Property(ActiveTab(final), "Editor") is TextEditor editor && editor.Text == recentText);
 
             var closedMenu = (MenuItem)Field(final, "_closedDraftsMenu");
+            closedMenu.IsSubMenuOpen = true;
             var older = Assert.Single(closedMenu.Items.OfType<MenuItem>(), item =>
                 item.Header is string title && title.StartsWith("ранний", StringComparison.Ordinal));
             older.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));

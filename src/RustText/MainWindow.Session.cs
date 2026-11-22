@@ -19,6 +19,7 @@ public partial class MainWindow
     private MenuItem? _recentMenu;
     private MenuItem? _closedFilesMenu;
     private MenuItem? _closedDraftsMenu;
+    private const int ClosedDraftsMenuLimit = 16;
     private MenuItem? _showArchivedDrafts;
     private Action? _refreshHome;
     private Action? _refreshHomeTimes;
@@ -1149,16 +1150,26 @@ public partial class MainWindow
             }
         }
 
-        if (_closedDraftsMenu is { } closedDrafts)
+        if (_closedDraftsMenu is { IsSubMenuOpen: true } closedDrafts)
+            PopulateClosedDraftsMenu(closedDrafts);
+    }
+
+    private void PopulateClosedDraftsMenu(MenuItem menu)
+    {
+        var storage = SessionStorage;
+        ResetClosedDraftsMenu(menu);
+        var index = 0;
+        foreach (var item in DraftHistory(storage).Take(ClosedDraftsMenuLimit))
         {
-            closedDrafts.Items.Clear();
-            var storage = SessionStorage;
-            foreach (var item in DraftHistory(storage))
-            {
-                closedDrafts.Items.Add(Command(item.Label + DescribeWork(Settings.ShowDraftLineCount ? item.Tab.LineCount : null, item.Tab.LastWorkedMs),
-                    () => Run(() => item.Archive is { } entry ? RestoreArchivedDraftAsync(storage, entry) : RestoreClosedAsync(item.Tab))));
-            }
+            menu.Items.Insert(index++, Command(item.Label + DescribeWork(Settings.ShowDraftLineCount ? item.Tab.LineCount : null, item.Tab.LastWorkedMs),
+                () => Run(() => item.Archive is { } entry ? RestoreArchivedDraftAsync(storage, entry) : RestoreClosedAsync(item.Tab))));
         }
+    }
+
+    private void ResetClosedDraftsMenu(MenuItem menu)
+    {
+        menu.Items.Clear();
+        menu.Items.Add(Command("Вся история", () => Run(ShowHomeAsync)));
     }
 
     private string ClosedTabDisplayName(SessionTab tab)
@@ -1184,6 +1195,11 @@ public partial class MainWindow
             }
         }
 
+        return LimitUntitledHistoryName(line);
+    }
+
+    private string LimitUntitledHistoryName(string? line)
+    {
         if (string.IsNullOrWhiteSpace(line))
         {
             return "Без имени";

@@ -18,7 +18,14 @@ public partial class MainWindow
     {
         _recentMenu = new MenuItem { Header = "Недавние файлы" };
         _closedFilesMenu = new MenuItem { Header = "Закрытые файлы" };
-        _closedDraftsMenu = new MenuItem { Header = "Призрачные вкладки" };
+        var draftsMenu = _closedDraftsMenu = new MenuItem { Header = "Призрачные вкладки" };
+        ResetClosedDraftsMenu(draftsMenu);
+        draftsMenu.PropertyChanged += (_, change) =>
+        {
+            if (change.Property != MenuItem.IsSubMenuOpenProperty) return;
+            if (draftsMenu.IsSubMenuOpen) PopulateClosedDraftsMenu(draftsMenu);
+            else ResetClosedDraftsMenu(draftsMenu);
+        };
         _showArchivedDrafts = Command("Показывать архивные записи", () => Run(async () =>
         {
             try { await SaveWorkspaceSettingsAsync(settings => settings with { ShowArchivedDrafts = !settings.ShowArchivedDrafts }); }

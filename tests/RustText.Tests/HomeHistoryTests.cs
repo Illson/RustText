@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
@@ -105,6 +106,7 @@ public sealed class HomeHistoryTests
             Toggle();
             await HeadlessTests.WaitForAsync(() => HasButton(window, label));
             var menu = (MenuItem)Field(window, "_closedDraftsMenu")!;
+            menu.IsSubMenuOpen = true;
             Assert.Contains(menu.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.StartsWith(label) == true);
             Click(FindButton(window, label));
             await HeadlessTests.WaitForAsync(() => Property(window, "ActiveTab") is { } tab && Property(tab, "Editor") is TextEditor { Text: text });
@@ -112,6 +114,101 @@ public sealed class HomeHistoryTests
             Assert.Empty(await storage.DraftArchive.GetEntriesAsync());
         }
         finally { if (window.IsVisible) await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ArchiveTitlesRespectTheLimitBeforeAndAfterRestart() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string text = "АБ🌿Гприватное-продолжение";
+        const string title = "АБ🌿Г";
+        const string label = "📦 " + title + " · архив";
+        var storage = StorageService.OpenForTesting(profile);
+        await storage.SaveSettingsAsync(new UserSettings(UntitledTabLimit: 4));
+        var saved = await storage.SaveClosedDraftAsync(new SessionTab(51, null, TextEncodingKind.Utf8)
+        {
+            ClosedAtMs = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeMilliseconds()
+        }, text);
+        await storage.SaveSessionAsync(new SessionState([], [saved]));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => HasButton(window, title));
+            await CallAsync(window, "ArchiveClosedDraftsAsync");
+            await HeadlessTests.WaitForAsync(() => HasButton(window, label));
+            await CloseAsync(window);
+            window = await OpenWorkspaceAsync();
+            await HeadlessTests.WaitForAsync(() => HasButton(window, label));
+            var menu = (MenuItem)Field(window, "_closedDraftsMenu")!;
+            menu.IsSubMenuOpen = true;
+            Assert.Contains(menu.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.StartsWith(label) == true);
+            Assert.DoesNotContain(menu.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.Contains("приватное") == true);
+            menu.IsSubMenuOpen = false;
+            var search = window.GetVisualDescendants().OfType<TextBox>().Single(box => box.PlaceholderText == "Поиск по имени или пути");
+            search.Text = "приватное";
+            await HeadlessTests.WaitForAsync(() => !HasButton(window, label));
+        }
+        finally { if (window.IsVisible) await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task MissingArchiveDisplayNameDoesNotBreakHistoryOrRestoringEitherEntry() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenForTesting(profile);
+        const string text = "архивный текст без метаданных";
+        var draft = await storage.SaveClosedDraftAsync(new SessionTab(61, null, TextEncodingKind.Utf8), text);
+        var entry = await storage.DraftArchive.ArchiveAsync(draft, storage.GetDraftPath(draft)!);
+        var second = await storage.SaveClosedDraftAsync(new SessionTab(62, null, TextEncodingKind.Utf8) { CustomTitle = "Соседний" }, "другой");
+        var neighbor = await storage.DraftArchive.ArchiveAsync(second, storage.GetDraftPath(second)!);
+        var index = new DraftArchiveIndex([entry with
+        {
+            DisplayName = null!,
+            Tab = entry.Tab with { UntitledName = null, LastWorkedMs = long.MaxValue }
+        }, neighbor]);
+        await File.WriteAllBytesAsync(Path.Combine(storage.RootDirectory, "drafts-archive", "index.json"),
+            JsonSerializer.SerializeToUtf8Bytes(index, StorageJsonContext.Default.DraftArchiveIndex));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => HasButton(window, "📦 Без имени · архив") && HasButton(window, "📦 Соседний · архив"));
+            Click(FindButton(window, "📦 Без имени · архив"));
+            await HeadlessTests.WaitForAsync(() => Property(window, "ActiveTab") is { } tab && Property(tab, "Editor") is TextEditor { Text: text });
+            Assert.Contains(await storage.DraftArchive.GetEntriesAsync(), archived => archived.Id == neighbor.Id);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task LargeArchiveDoesNotBuildMenuItemsUntilOpeningAndOlderEntriesStaySearchable() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenForTesting(profile);
+        await storage.SaveSettingsAsync(new UserSettings { ArchivedDraftRetentionDays = 0 });
+        var stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var entries = Enumerable.Range(1, 6000).Select(i => new DraftArchiveEntry(Guid.NewGuid().ToString("N"),
+            new SessionTab(i, null, TextEncodingKind.Utf8) { CustomTitle = $"archive-{i:D4}" },
+            stamp - i, 4, new string('0', 64), "unused prefix", stamp)).ToList();
+        _ = storage.DraftArchive; // Creates the index directory.
+        await File.WriteAllBytesAsync(Path.Combine(storage.RootDirectory, "drafts-archive", "index.json"),
+            JsonSerializer.SerializeToUtf8Bytes(new DraftArchiveIndex(entries), StorageJsonContext.Default.DraftArchiveIndex));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            var menu = (MenuItem)Field(window, "_closedDraftsMenu")!;
+            var placeholder = Assert.Single(menu.Items);
+            Assert.False(menu.IsSubMenuOpen);
+            Invoke(window, "RefreshHistoryMenus");
+            Assert.Same(placeholder, Assert.Single(menu.Items));
+            menu.IsSubMenuOpen = true;
+            Assert.Equal(17, menu.Items.Count);
+            Assert.Contains("archive-0001", ((MenuItem)menu.Items[0]!).Header?.ToString());
+            Assert.DoesNotContain(menu.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.Contains("archive-6000") == true);
+            Assert.Equal("Вся история", ((MenuItem)menu.Items[^1]!).Header);
+            menu.IsSubMenuOpen = false;
+            Assert.Single(menu.Items);
+            var search = window.GetVisualDescendants().OfType<TextBox>().Single(box => box.PlaceholderText == "Поиск по имени или пути");
+            search.Text = "archive-6000";
+            await HeadlessTests.WaitForAsync(() => HasButton(window, "📦 archive-6000 · архив"));
+        }
+        finally { await CloseAsync(window); }
     });
 
     [Fact]
