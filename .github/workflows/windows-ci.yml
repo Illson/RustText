@@ -82,6 +82,7 @@ jobs:
 
       - name: Validate performance harness without GUI or timing thresholds
         run: |
+          ./tests/windows/performance_readiness.ps1
           $run = Join-Path $env:RUNNER_TEMP 'rusttext-performance'
           ./tools/Measure-RustTextPerformance.ps1 -BaselineRef HEAD -CoreOnly -Smoke -Iterations 2 -OutputDirectory $run
           $rendered = Join-Path $run 'rendered.md'

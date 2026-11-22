@@ -50,6 +50,20 @@ function Write-PerformanceReport($Data, [string]$Path, [string]$RawLink = 'raw.j
     if ($Data.guiRuns.Count -ne $expectedGui -or $Data.coreRuns.Count -ne $coreScenarios.Count * $iterations * 2) {
         throw 'Incomplete or unexpected set of performance scenarios.'
     }
+    if ($Data.guiReadiness -ceq 'isolated-recent-files-v1') {
+        foreach ($sample in $Data.guiRuns) {
+            $mode = switch -CaseSensitive ($sample.scenario) {
+                'text' { 'editor' }
+                'json' { 'editor' }
+                'log' { 'log' }
+            }
+            if ($null -eq $sample.readyMs -or $null -eq $sample.memorySampleMs -or
+                $sample.readyMs -gt $sample.memorySampleMs -or $sample.openedMode -cne $mode -or
+                (($mode -eq 'log') -ne ($null -ne $sample.logMarkerMs))) {
+                throw "Missing or inconsistent GUI readiness for $($sample.scenario), $($sample.app), iteration $($sample.iteration)."
+            }
+        }
+    }
 
     $table = '| Сценарий | Метрика | База | Кандидат | Кандидат / база |'
     $divider = '| --- | --- | ---: | ---: | ---: |'
@@ -71,11 +85,12 @@ function Write-PerformanceReport($Data, [string]$Path, [string]$RawLink = 'raw.j
             '## Окно',
             '',
             "Размер EXE: $($Data.binaries.baseline.bytes) / $($Data.binaries.candidate.bytes) байт (база / кандидат); извлечённые DLL: $($Data.binaries.baseline.extractedDllBytes) / $($Data.binaries.candidate.extractedDllBytes) байт.",
-            "Видимое окно и ответ на ``WM_NULL`` измерены снаружи; срез памяти — в возрасте около $($Data.memorySampleTargetMs) мс. Cold означает пустой кэш DLL приложения, а не кэш ОС.",
-            '',
-            $table,
-            $divider
+            "Видимое окно и ответ на ``WM_NULL`` измерены снаружи; срез памяти — в возрасте около $($Data.memorySampleTargetMs) мс. Cold означает пустой кэш DLL приложения, а не кэш ОС."
         ))
+        if ($Data.guiReadiness -ceq 'isolated-recent-files-v1') {
+            $lines.Add('До среза памяти путь и режим файла подтверждены записью истории тестового профиля, для лога — также маркером первого кадра.')
+        }
+        $lines.AddRange([string[]]@('', $table, $divider))
         foreach ($scenario in $guiScenarios) {
             $rows = @($Data.guiRuns | Where-Object scenario -ceq $scenario)
             foreach ($metric in 'windowMs', 'responsiveMs', 'workingSetBytes', 'privateBytes', 'peakWorkingSetBytes') {
