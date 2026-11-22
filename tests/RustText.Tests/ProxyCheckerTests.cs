@@ -228,6 +228,24 @@ public sealed class ProxyCheckerTests
     }
 
     [Fact]
+    public async Task InvalidRegionUnicodeKeepsTheProxyWorkingAndDoesNotAbortTheBatch()
+    {
+        var results = new List<ProxyCheckResult>();
+        await ProxyChecker.CheckAsync("192.0.2.18:80\n192.0.2.19:80", ProxyProtocol.Http, TimeSpan.FromSeconds(5), 1,
+            results.Add, CancellationToken.None, (_, _, _) => Task.FromResult(HttpStatusCode.NoContent),
+            (uri, _, _) => Task.FromResult(ProxyChecker.ParseRegion(uri.Host == "192.0.2.18"
+                ? """{"success":true,"country_code":"DE","region":"\uD800"}"""u8.ToArray()
+                : """{"success":true,"country_code":"DE","region":"Berlin"}"""u8.ToArray())));
+
+        Assert.Equal(new[] { ProxyChecker.RegionUnavailable, "DE · Berlin" }, results.Select(result => result.Region));
+        Assert.All(results, result =>
+        {
+            Assert.Equal(ProxyCheckStatus.Working, result.Status);
+            Assert.NotNull(result.CopyValue);
+        });
+    }
+
+    [Fact]
     public async Task CanStopWhileLookingUpTheRegion()
     {
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

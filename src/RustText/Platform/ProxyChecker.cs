@@ -253,19 +253,27 @@ internal static class ProxyChecker
 
     internal static string? ParseRegion(ReadOnlyMemory<byte> body)
     {
-        using var json = JsonDocument.Parse(body);
-        var root = json.RootElement;
-        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("success", out var success)
-            || success.ValueKind != JsonValueKind.True
-            || ReadString("country_code") is not { Length: 2 } country || !country.All(char.IsAsciiLetter))
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            var root = json.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("success", out var success)
+                || success.ValueKind != JsonValueKind.True
+                || ReadString(root, "country_code") is not { Length: 2 } country || !country.All(char.IsAsciiLetter))
+                return null;
+
+            var region = ReadString(root, "region");
+            return region is { Length: > 0 and <= 80 } && !region.Any(char.IsControl)
+                ? $"{country.ToUpperInvariant()} · {region}"
+                : country.ToUpperInvariant();
+        }
+        catch (Exception error) when (error is JsonException or InvalidOperationException)
+        {
+            // JsonDocument can parse a string whose invalid Unicode is only detected by GetString().
             return null;
+        }
 
-        var region = ReadString("region");
-        return region is { Length: > 0 and <= 80 } && !region.Any(char.IsControl)
-            ? $"{country.ToUpperInvariant()} · {region}"
-            : country.ToUpperInvariant();
-
-        string? ReadString(string property) =>
+        static string? ReadString(JsonElement root, string property) =>
             root.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
                 ? value.GetString()?.Trim() : null;
     }
