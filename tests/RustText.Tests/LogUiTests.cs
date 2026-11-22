@@ -414,6 +414,44 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task FilteredMinimapMarksVisibleSourceRowsWhenScrollingWithinOnePage(bool wrap) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "uneven-levels.log");
+        var body = wrap ? new string('x', 240) + " " : "";
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(0, 1000).Select(row =>
+            $"{(row < 42 || row >= 945 ? "Error" : "Info ")} {body}row-{row:D4}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            log.WordWrap = wrap;
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("row-0999", StringComparison.Ordinal) == true);
+            var scroll = Assert.Single(filtered.GetVisualDescendants().OfType<ScrollViewer>());
+            await HeadlessTests.WaitForAsync(() => minimap.Bounds.Height > 100 && scroll.ScrollBarMaximum.Y > 200);
+            window.UpdateLayout();
+            if (wrap)
+                Assert.True(Assert.Single(filtered.GetVisualDescendants().OfType<TextPresenter>()).TextLayout.TextLines.Count > 97);
+            var text = filtered.Text;
+
+            Assert.InRange(minimap.ViewportMarker.Bottom / minimap.Bounds.Height, 0.01, 0.2);
+            scroll.Offset = new Vector(0, scroll.ScrollBarMaximum.Y);
+            window.UpdateLayout();
+            Assert.InRange(minimap.ViewportMarker.Y / minimap.Bounds.Height, 0.85, 1);
+            Assert.Equal(text, filtered.Text); // No new filter page was loaded.
+
+            scroll.Offset = default;
+            window.UpdateLayout();
+            Assert.InRange(minimap.ViewportMarker.Bottom / minimap.Bounds.Height, 0.01, 0.2);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Fact]
     public Task InlineLevelFilterCannotOpenWhilePageHasPendingEdits() => HeadlessTests.RunAsync(async profile =>
     {

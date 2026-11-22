@@ -2844,6 +2844,33 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task TextMinimapShowsTheViewportOutlineWhenAllTextFits() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "short.txt");
+        await File.WriteAllTextAsync(path, "a single line");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = Assert.Single(editor.GetVisualDescendants().OfType<ScrollViewer>());
+            await HeadlessTests.WaitForAsync(() => minimap.Bounds.Height > 100 && scroll.Viewport.Height > 0
+                && scroll.ScrollBarMaximum.Y == 0);
+
+            var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+            using var bitmap = new RenderTargetBitmap(size);
+            using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+            using var frame = pixels.Lock();
+            bitmap.Render(minimap);
+            bitmap.CopyPixels(frame);
+            var edge = frame.Address + 5 * frame.RowBytes;
+            var outline = Color.FromRgb(Marshal.ReadByte(edge, 2), Marshal.ReadByte(edge, 1), Marshal.ReadByte(edge));
+            Assert.Equal(FocusTheme.Accent.Color, outline);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task TextMinimapRendersCompactJsonWithIndentationAndNavigatesWithinPreview() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "minimap.json");
