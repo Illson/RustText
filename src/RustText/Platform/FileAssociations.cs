@@ -88,15 +88,13 @@ public static class FileAssociations
     {
         using var capabilities = userRoot.CreateSubKey(CapabilitiesPath, writable: true)
             ?? throw new IOException("Could not create the application capabilities.");
+        // Upgrade the registration of the working copy, not the path Windows already opens.
+        if (onlyIfChanged && ReadRegisteredExecutable(userRoot) is { } incumbent
+            && !string.Equals(incumbent, fullPath, StringComparison.OrdinalIgnoreCase) && File.Exists(incumbent))
+            fullPath = incumbent;
         var stamp = $"1|{fullPath}|{string.Join(',', SupportedExtensions)}";
-        if (onlyIfChanged)
-        {
-            if (string.Equals(capabilities.GetValue(RegistrationStamp) as string, stamp, StringComparison.Ordinal))
-                return false;
-            if (ReadRegisteredExecutable(userRoot) is { } incumbent
-                && !string.Equals(incumbent, fullPath, StringComparison.OrdinalIgnoreCase) && File.Exists(incumbent))
-                return false;
-        }
+        if (onlyIfChanged && string.Equals(capabilities.GetValue(RegistrationStamp) as string, stamp, StringComparison.OrdinalIgnoreCase))
+            return false;
 
         selected ??= ReadSelectedExtensions(userRoot);
         // An interrupted registration must be retried on the next ordinary startup.
