@@ -120,6 +120,7 @@ function Remove-PerformanceDirectory([string]$Path) {
 $data = [ordered]@{
     schema = 'rusttext-performance-v1'; status = 'running'; startedUtc = [datetime]::UtcNow.ToString('o')
     smoke = [bool]$Smoke; coreOnly = [bool]$CoreOnly; iterations = $Iterations
+    guiReadiness = $(if (-not $CoreOnly) { 'isolated-recent-files-v1' })
     memorySampleTargetMs = $MemorySampleMs; orderSeed = $OrderSeed; revisions = $revisions
     environment = $null; harness = @(); binaries = [ordered]@{}; guiFixtures = @(); coreFixtures = @()
     guiRuns = [Collections.Generic.List[object]]::new(); coreRuns = [Collections.Generic.List[object]]::new()
