@@ -6,6 +6,53 @@ namespace RustText.Tests;
 
 public sealed class FileAssociationsTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StartupKeepsAWorkingRegistrationAndRepairsItOnlyWhenItDisappears(bool legacy)
+    {
+        using var temp = new TempDirectory();
+        var stable = MakeCopy("Основная копия");
+        var preview = MakeCopy("Preview");
+        var key = $@"Software\RustText.FileAssociations.Tests.{Guid.NewGuid():N}";
+        try
+        {
+            using var root = Registry.CurrentUser.CreateSubKey(key);
+            using var choice = root.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.txt\UserChoice");
+            choice.SetValue("ProgId", "RustText.Text");
+            using var command = root.CreateSubKey(@"Software\Classes\RustText.Text\shell\open\command");
+            if (legacy)
+                command.SetValue(null, $"\"{stable}\" \"%1\"");
+            else
+                Assert.True(FileAssociations.WriteRegistration(root, stable, new HashSet<string> { ".txt" }));
+
+            Assert.False(FileAssociations.WriteRegistration(root, preview, onlyIfChanged: true));
+            Assert.Equal($"\"{stable}\" \"%1\"", command.GetValue(null));
+            Assert.True(FileAssociations.WriteRegistration(root, preview, selected: new HashSet<string> { ".jsonl" }));
+            Assert.Equal($"\"{preview}\" \"%1\"", command.GetValue(null));
+            Assert.False(FileAssociations.WriteRegistration(root, stable, onlyIfChanged: true));
+            Assert.Equal($"\"{preview}\" \"%1\"", command.GetValue(null));
+
+            File.Delete(preview);
+            Assert.True(FileAssociations.WriteRegistration(root, stable, onlyIfChanged: true));
+            Assert.Equal($"\"{stable}\" \"%1\"", command.GetValue(null));
+            Assert.Equal(".jsonl", Assert.Single(FileAssociations.ReadSelectedExtensions(root)));
+            Assert.Equal("RustText.Text", choice.GetValue("ProgId"));
+        }
+        finally
+        {
+            Registry.CurrentUser.DeleteSubKeyTree(key, throwOnMissingSubKey: false);
+        }
+
+        string MakeCopy(string name)
+        {
+            var directory = Directory.CreateDirectory(Path.Combine(temp.Path, name));
+            var path = Path.Combine(directory.FullName, "rusttext.exe");
+            File.WriteAllText(path, "Невыполняемый тестовый файл");
+            return path;
+        }
+    }
+
     [Fact]
     public void StartsRegistrationOnlyForTheApplicationOutsideAnIsolatedProfile()
     {

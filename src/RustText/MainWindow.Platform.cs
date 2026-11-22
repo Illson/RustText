@@ -93,6 +93,7 @@ public partial class MainWindow
         var body = DialogPanel(new TextBlock
         {
             Text = "Отметьте форматы, для которых хотите назначить RustText. Подтвердите выбор в параметрах Windows. "
+                + "Эта команда регистрирует запущенную копию RustText. Если RustText уже назначен, Windows будет открывать файлы в этой копии. "
                 + "Снятие галочки не меняет уже назначенное приложение; RustText остаётся в меню «Открыть с помощью».",
             TextWrapping = TextWrapping.Wrap
         }, list);

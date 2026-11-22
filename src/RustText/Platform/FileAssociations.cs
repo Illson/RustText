@@ -89,8 +89,14 @@ public static class FileAssociations
         using var capabilities = userRoot.CreateSubKey(CapabilitiesPath, writable: true)
             ?? throw new IOException("Could not create the application capabilities.");
         var stamp = $"1|{fullPath}|{string.Join(',', SupportedExtensions)}";
-        if (onlyIfChanged && string.Equals(capabilities.GetValue(RegistrationStamp) as string, stamp, StringComparison.Ordinal))
-            return false;
+        if (onlyIfChanged)
+        {
+            if (string.Equals(capabilities.GetValue(RegistrationStamp) as string, stamp, StringComparison.Ordinal))
+                return false;
+            if (ReadRegisteredExecutable(userRoot) is { } incumbent
+                && !string.Equals(incumbent, fullPath, StringComparison.OrdinalIgnoreCase) && File.Exists(incumbent))
+                return false;
+        }
 
         selected ??= ReadSelectedExtensions(userRoot);
         // An interrupted registration must be retried on the next ordinary startup.
@@ -166,6 +172,15 @@ public static class FileAssociations
         registered.SetValue(ApplicationName, CapabilitiesPath, RegistryValueKind.String);
         capabilities.SetValue(RegistrationStamp, stamp, RegistryValueKind.String);
         return true;
+    }
+
+    private static string? ReadRegisteredExecutable(RegistryKey userRoot)
+    {
+        // Read the existing ProgID command rather than the stamp so older registrations are protected, too.
+        using var open = userRoot.OpenSubKey(@"Software\Classes\RustText.Text\shell\open\command");
+        if (open?.GetValue(null) is not string command || !command.StartsWith('"')) return null;
+        var quote = command.IndexOf('"', 1);
+        return quote > 1 && Path.IsPathFullyQualified(command[1..quote]) ? command[1..quote] : null;
     }
 
     /// <summary>Registers RustText and opens Windows default-app settings for the user to choose associations.</summary>
