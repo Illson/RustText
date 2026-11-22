@@ -41,6 +41,9 @@ public partial class MainWindow
             _recentMenu,
             _closedFilesMenu,
             new Separator(),
+            MenuGroup("Удалить с диска",
+                Command("Выбрать файл…", () => Run(() => RecycleFromPickerAsync(folder: false))),
+                Command("Выбрать папку…", () => Run(() => RecycleFromPickerAsync(folder: true)))),
             Command("Настроить открытие файлов в Windows…", () => Run(RegisterAssociationsAsync)),
             Command("Выход", Close)));
         TopMenu.Items.Add(MenuGroup("_Инструменты",
