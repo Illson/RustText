@@ -42,3 +42,5 @@
 - **JSON и JSON Lines:** подсветка, форматирование и переход к ошибке. Для JSON Lines каждая запись проверяется отдельно.
 
 [Руководство пользователя](docs/user-guide.md) · [Выпуски](https://github.com/Illson/RustText/releases) · [Сообщить о проблеме](https://github.com/Illson/RustText/issues)
+
+Для разработки: [проверки](docs/verification.md) · [парные замеры производительности](docs/performance.md).

@@ -1,0 +1,20 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <SourceDir>$(RustTextSource)/src/RustText</SourceDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)CoreAdapter.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)EditorCaretStub.cs" />
+    <Compile Include="$(SourceDir)/Logs/LogDataReader.cs" />
+    <Compile Include="$(SourceDir)/Storage/DocumentFiles.cs" />
+    <Compile Include="$(SourceDir)/Editor/TextOperations.cs" />
+    <Compile Include="$(SourceDir)/Editor/ReplacementLineEndings.cs" />
+  </ItemGroup>
+  <Target Name="CheckRustTextSources" BeforeTargets="CoreCompile">
+    <Error Condition="'$(RustTextSource)' == '' Or !Exists('$(SourceDir)/Logs/LogDataReader.cs')"
+           Text="Pass both BaselineSource and CandidateSource pointing to compatible RustText source trees." />
+  </Target>
+</Project>
