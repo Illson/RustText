@@ -863,8 +863,7 @@ public partial class MainWindow : Window
 
     internal async Task ReceivePathsAsync(IReadOnlyList<string> paths, bool activate)
     {
-        await GuardAsync(() => OpenPathsAsync(paths));
-        if (activate)
+        if (activate && !_closed && !_closing)
         {
             if (WindowState == WindowState.Minimized)
             {
@@ -873,6 +872,7 @@ public partial class MainWindow : Window
 
             Activate();
         }
+        await GuardAsync(() => OpenPathsAsync(paths));
     }
 
     private sealed class Group(long id)

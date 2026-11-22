@@ -230,7 +230,7 @@ internal sealed class DraftArchiveService
         }
     }
 
-    public async Task RemoveAsync(DraftArchiveEntry entry, CancellationToken token = default)
+    public async Task RemoveAsync(DraftArchiveEntry entry, CancellationToken token = default, bool requireDeletion = false)
     {
         await _gate.WaitAsync(token).ConfigureAwait(false);
         string? tombstone = null;
@@ -250,7 +250,11 @@ internal sealed class DraftArchiveService
                 if (tombstone is not null && File.Exists(tombstone)) File.Move(tombstone, archivePath, overwrite: true);
                 throw;
             }
-            if (tombstone is not null) TryDelete(tombstone);
+            if (tombstone is not null)
+            {
+                if (requireDeletion) File.Delete(tombstone);
+                else TryDelete(tombstone);
+            }
         }
         finally { _gate.Release(); }
     }

@@ -589,6 +589,51 @@ internal sealed class StorageService
         if (_cachedSessionWasLatest) CacheSession(_cachedSession, isLatest: true);
     }
 
+    // Encryption has already committed the text elsewhere. Do not rotate an old plaintext
+    // checkpoint into the fallback, and do not touch the other tabs' drafts.
+    public async Task RemoveTabHistoryAsync(IReadOnlySet<long> tabIds, Predicate<SessionTab> removeClosed,
+        CancellationToken token)
+    {
+        using var writerLock = AcquireSessionLock();
+        var latest = Path.Combine(_checkpoints, "latest.json");
+        var previous = Path.Combine(_checkpoints, "previous.json");
+        _hasCachedSession = _cachedSessionWasLatest = false;
+        foreach (var pointer in new[] { latest, previous })
+        {
+            if (!File.Exists(pointer)) continue;
+            var manifest = await FindCheckpointManifestAsync(pointer, token).ConfigureAwait(false)
+                ?? throw new InvalidDataException("Не удалось найти контрольную точку для очистки истории.");
+            EnsureNoReparsePoints(manifest, Path.GetFullPath(_checkpoints));
+            var state = await ReadSessionManifestAsync(manifest, token).ConfigureAwait(false)
+                ?? throw new InvalidDataException("Не удалось прочитать контрольную точку для очистки истории.");
+            var tabs = state.Tabs.FindAll(tab => !tabIds.Contains(tab.Id));
+            var closed = state.ClosedTabs?.FindAll(tab => !removeClosed(tab));
+            var detached = state.DetachedDrafts?.Where(pair => !tabIds.Contains(pair.Key)).ToDictionary();
+            if (tabs.Count == state.Tabs.Count && closed?.Count == state.ClosedTabs?.Count
+                && detached?.Count == state.DetachedDrafts?.Count) continue;
+
+            var active = state.Active - state.Tabs.Take(state.Active).Count(tab => tabIds.Contains(tab.Id));
+            var cleaned = state with
+            {
+                Tabs = tabs,
+                ClosedTabs = closed,
+                Active = Math.Clamp(active, 0, Math.Max(0, tabs.Count - 1)),
+                Layout = ForgetLayoutTabs(state.Layout),
+                DetachedDrafts = detached
+            };
+            await WriteJsonAsync(manifest, cleaned, StorageJsonContext.Default.SessionState, token).ConfigureAwait(false);
+        }
+        await PruneUnreferencedDraftsAsync(latest, previous, token, tabIds).ConfigureAwait(false);
+
+        WorkspaceLayout? ForgetLayoutTabs(WorkspaceLayout? layout) => layout is null ? null : layout with
+        {
+            Tabs = layout.Tabs?.Where(id => !tabIds.Contains(id)).ToArray(),
+            ActiveTab = layout.ActiveTab is { } id && !tabIds.Contains(id) ? id : null,
+            First = ForgetLayoutTabs(layout.First),
+            Second = ForgetLayoutTabs(layout.Second)
+        };
+    }
+
     private static bool IsInvalidCheckpointException(Exception error) =>
         error is IOException or InvalidDataException or JsonException or InvalidOperationException or FormatException or ArgumentException
             or UnauthorizedAccessException or System.Security.SecurityException or NotSupportedException;
@@ -712,7 +757,8 @@ internal sealed class StorageService
         return Task.FromResult(("standalone/" + name, hash));
     }
 
-    private async Task PruneUnreferencedDraftsAsync(string latest, string previous, CancellationToken token)
+    private async Task PruneUnreferencedDraftsAsync(string latest, string previous, CancellationToken token,
+        IReadOnlySet<long>? tabIds = null)
     {
         var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var pointer in new[] { latest, previous })
@@ -742,12 +788,20 @@ internal sealed class StorageService
         foreach (var file in new DirectoryInfo(_drafts).EnumerateFiles())
         {
             token.ThrowIfCancellationRequested();
-            if (!file.Name.StartsWith("session-", StringComparison.Ordinal)
-                && !file.Name.StartsWith("closed-", StringComparison.Ordinal)) continue;
+            var prefix = file.Name.StartsWith("session-", StringComparison.Ordinal) ? "session-"
+                : file.Name.StartsWith("closed-", StringComparison.Ordinal) ? "closed-" : null;
+            if (prefix is null) continue;
+            if (tabIds is not null)
+            {
+                var suffix = file.Name.AsSpan(prefix.Length);
+                var separator = suffix.IndexOf('-');
+                if (separator < 0 || !long.TryParse(suffix[..separator], out var id) || !tabIds.Contains(id)) continue;
+                EnsureNoReparsePoints(file.FullName, Path.GetFullPath(_drafts));
+            }
             var fullPath = Path.GetFullPath(file.FullName);
             if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase) || referenced.Contains(fullPath)) continue;
             try { file.Delete(); _verifiedBackupFiles.Remove(fullPath); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            catch (Exception error) when (tabIds is null && error is (IOException or UnauthorizedAccessException)) { }
         }
     }
 

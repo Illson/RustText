@@ -1,6 +1,10 @@
 using System.Text;
+using System.Text.Json;
+using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using RustText.Demo;
@@ -103,6 +107,11 @@ public sealed class EncryptedTabDialogTests
         var password = new string('я', passwordLength);
         const string hint = "Подсказка про растение";
         await File.WriteAllTextAsync(source, original);
+        var storage = StorageService.OpenDefault();
+        var oldBookmark = new SessionTab(12, source, TextEncodingKind.Utf8);
+        var other = new SessionTab(13, Path.Combine(profile, "other.txt"), TextEncodingKind.Utf8);
+        await storage.AddRecentAsync(new(other.Path!, TextEncodingKind.Utf8));
+        await storage.SaveSessionAsync(new([], [oldBookmark, other]));
         var window = new MainWindow([source]);
         window.Show();
         try
@@ -111,13 +120,16 @@ public sealed class EncryptedTabDialogTests
                 .OfType<TextEditor>().Any(editor => editor.Text == original));
             var document = Assert.Single(window.GetVisualDescendants().OfType<TextEditor>(), editor => editor.Text == original);
             document.Text = changed;
+            await SaveSessionAsync(window);
+            var saved = Assert.Single((await storage.LoadSessionAsync())!.Tabs);
+            var draft = storage.GetDraftPath(saved);
+            Assert.True(File.Exists(draft));
 
             var saving = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
-            var create = await FindDialogAsync("Зашифровать копию вкладки");
+            var create = await WaitForDialogAsync(window, "Зашифровать копию вкладки");
             Assert.Contains(create.GetVisualDescendants().OfType<TextBlock>(), label =>
-                label.Text is { } warning && warning.Contains("только новая копия .rte", StringComparison.Ordinal)
-                && warning.Contains("черновиках без шифрования", StringComparison.Ordinal)
-                && warning.Contains("ещё нет файла", StringComparison.Ordinal));
+                label.Text is { } warning && warning.Contains("вкладка закроется", StringComparison.Ordinal)
+                && warning.Contains("Исходный файл на диске не изменится", StringComparison.Ordinal));
             Click(create, "Зашифровать");
             Assert.Contains(create.GetVisualDescendants().OfType<TextBlock>(), label => label.Text == "Введите пароль для шифрования.");
             Assert.False(File.Exists(target));
@@ -127,43 +139,200 @@ public sealed class EncryptedTabDialogTests
             Click(create, "Зашифровать");
             await saving;
             Assert.Equal(original, await File.ReadAllTextAsync(source));
-            Assert.Equal(changed, document.Text);
+            Assert.Empty(document.Text);
+            Assert.Empty(window.GetVisualDescendants().OfType<TextEditor>());
+            Assert.False(File.Exists(draft));
+            Assert.Equal(other.Path, Assert.Single(await storage.GetRecentFilesAsync()).Path);
+            AssertNoEncryptedHistory(await storage.LoadSessionAsync(), source, target, saved.Id);
+            AssertNoEncryptedHistory(await ReadCheckpointAsync(storage, "previous"), source, target, saved.Id);
 
-            var opening = window.DecryptTabPathAsync(target);
-            var unlock = await FindDialogAsync("Расшифровать файл");
+            var opening = window.ReceivePathsAsync([target], activate: false);
+            var unlock = await WaitForDialogAsync(window, "Расшифровать файл");
             Assert.Contains(unlock.GetVisualDescendants().OfType<TextBlock>(), label => label.Text?.Contains(hint) == true);
             Field(unlock, "Пароль").Text = "wrong password";
             Click(unlock, "Расшифровать");
-            var retry = await FindDialogAsync("Расшифровать файл");
+            var retry = await WaitForDialogAsync(window, "Расшифровать файл");
             Assert.NotSame(unlock, retry);
             Assert.Contains(retry.GetVisualDescendants().OfType<TextBlock>(), label => label.Text?.Contains("Неверный пароль") == true);
             Field(retry, "Пароль").Text = password;
             Click(retry, "Расшифровать");
-            var result = await FindDialogAsync("Расшифрованный текст");
+            var result = await WaitForDialogAsync(window, "Расшифрованный текст");
             Assert.Equal(changed, Assert.Single(result.GetVisualDescendants().OfType<TextEditor>()).Text);
             result.Close();
             await opening;
+            Assert.Equal(other.Path, Assert.Single(await storage.GetRecentFilesAsync()).Path);
+            AssertNoEncryptedHistory(await storage.LoadSessionAsync(), source, target, saved.Id);
 
-            async Task<Window> FindDialogAsync(string title)
-            {
-                await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any(dialog => dialog.Title == title));
-                var dialog = Assert.Single(window.OwnedWindows, dialog => dialog.Title == title);
-                dialog.UpdateLayout();
-                return dialog;
-            }
         }
         finally
         {
-            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
-            window.Close();
-            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_closed"));
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
+    public Task StartupWithAnEncryptedPathPromptsAndCancellationDoesNotCreateHistory() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "startup.RTE");
+        await EncryptedTabFile.WriteNewAsync(path, EncryptedTabFile.Encrypt("не открывать без пароля", "1", "подсказка запуска"), CancellationToken.None);
+        var storage = StorageService.OpenDefault();
+        await storage.AddRecentAsync(new(path, TextEncodingKind.Utf8));
+        var window = new MainWindow([path]);
+        window.Show();
+        try
+        {
+            var prompt = await WaitForDialogAsync(window, "Расшифровать файл");
+            Assert.Contains(prompt.GetVisualDescendants().OfType<TextBlock>(), label => label.Text?.Contains("подсказка запуска") == true);
+            Click(prompt, "Отмена");
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished"));
+            Assert.Empty(window.GetVisualDescendants().OfType<TextEditor>());
+            Assert.Empty(await storage.GetRecentFilesAsync());
+        }
+        finally
+        {
+            await CloseAsync(window);
+        }
+        var state = await storage.LoadSessionAsync();
+        Assert.Empty(state?.Tabs ?? []);
+        Assert.Empty(state?.ClosedTabs ?? []);
+    });
+
+    [Fact]
+    public Task ALockedPlaintextDraftDoesNotHideTheCleanupFailureOrUndoTheEncryptedCopy() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string secret = "недоступный для удаления черновик";
+        var storage = StorageService.OpenDefault();
+        var target = Path.Combine(profile, "locked-draft.rte");
+        var draft = await storage.SaveClosedDraftAsync(new(3, null, TextEncodingKind.Utf8), secret);
+        await storage.SaveSessionAsync(new([draft]));
+        var window = new MainWindow([]);
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished") && window.GetVisualDescendants()
+                .OfType<TextEditor>().Any(editor => editor.Text == secret));
+            await using var held = new FileStream(storage.GetDraftPath(draft)!, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var saving = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
+            SubmitTestPassword(GetCreateDialog(window));
+            await saving;
+            Assert.Empty(window.GetVisualDescendants().OfType<TextEditor>());
+            Assert.Empty((await storage.LoadSessionAsync())!.Tabs);
+            Assert.Contains(window.GetVisualDescendants().OfType<TextBlock>(),
+                label => label.Text?.Contains("не удалось полностью очистить историю", StringComparison.Ordinal) == true);
+            Assert.Equal(secret, EncryptedTabFile.Decrypt(await EncryptedTabFile.ReadAsync(target, CancellationToken.None), "1"));
+        }
+        finally
+        {
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
+    public Task DroppingAnEncryptedPathStillOpensTheOtherFilesAndNeverAddsTheContainerToHistory() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "dropped.rte");
+        var plain = Path.Combine(profile, "note.txt");
+        const string text = "обычный документ";
+        await EncryptedTabFile.WriteNewAsync(path, EncryptedTabFile.Encrypt("private", "1", ""), CancellationToken.None);
+        await File.WriteAllTextAsync(plain, text);
+        var window = new MainWindow([]);
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished"));
+            var encryptedItem = await window.StorageProvider.TryGetFileFromPathAsync(path);
+            var plainItem = await window.StorageProvider.TryGetFileFromPathAsync(plain);
+            Assert.NotNull(encryptedItem);
+            Assert.NotNull(plainItem);
+            using var transfer = new DataTransfer();
+            transfer.Add(DataTransferItem.CreateFile(encryptedItem));
+            transfer.Add(DataTransferItem.CreateFile(plainItem));
+            var drop = new DragEventArgs(DragDrop.DropEvent, transfer, window, default, KeyModifiers.None);
+            window.RaiseEvent(drop);
+            Assert.True(drop.Handled);
+            Click(await WaitForDialogAsync(window, "Расшифровать файл"), "Отмена");
+            await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<TextEditor>().Any(editor => editor.Text == text));
+
+            await File.WriteAllTextAsync(path, "damaged .rte");
+            await window.ReceivePathsAsync([path], activate: false);
+            Assert.Empty(window.OwnedWindows);
+            Assert.Single(window.GetVisualDescendants().OfType<TextEditor>(), editor => editor.Text == text);
+            await SaveSessionAsync(window);
+            var storage = StorageService.OpenDefault();
+            Assert.Equal(plain, Assert.Single(await storage.GetRecentFilesAsync()).Path);
+            Assert.Equal(plain, Assert.Single((await storage.LoadSessionAsync())!.Tabs).Path);
+        }
+        finally
+        {
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
+    public Task UntitledTabSurvivesCancellationAndFailedWriteButIsForgottenAfterSuccess() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string secret = "текущий черновик ~417c4e";
+        const string earlier = "прежняя правка того же черновика ~8c5343";
+        const string other = "соседний черновик ~da1662";
+        var target = Path.Combine(profile, "untitled.rte");
+        var storage = StorageService.OpenDefault();
+        var closed = await storage.SaveClosedDraftAsync(new(3, null, TextEncodingKind.Utf8), earlier);
+        var neighbour = await storage.SaveClosedDraftAsync(new(4, null, TextEncodingKind.Utf8), other);
+        await storage.DraftArchive.ArchiveAsync(closed, storage.GetDraftPath(closed)!);
+        var window = new MainWindow([]);
+        await storage.SaveSessionAsync(new([closed], [neighbour]));
+        window.Show();
+
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished") && window.GetVisualDescendants()
+                .OfType<TextEditor>().Any(editor => editor.Text == earlier));
+            var document = Assert.Single(window.GetVisualDescendants().OfType<TextEditor>());
+            document.Text = secret;
+            await SaveSessionAsync(window);
+
+            var cancelled = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
+            var create = GetCreateDialog(window);
+            Click(create, "Отмена");
+            await cancelled;
+            Assert.Equal(secret, document.Text);
+            Assert.False(File.Exists(target));
+
+            var collision = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
+            create = GetCreateDialog(window);
+            await File.WriteAllTextAsync(target, "already taken");
+            SubmitTestPassword(create);
+            await Assert.ThrowsAnyAsync<IOException>(() => collision);
+            Assert.Equal("already taken", await File.ReadAllTextAsync(target));
+            Assert.Equal(secret, document.Text);
+            Assert.Equal(secret, await storage.LoadDraftAsync(Assert.Single((await storage.LoadSessionAsync())!.Tabs)));
+            Assert.Single(await storage.DraftArchive.GetEntriesAsync());
+            File.Delete(target);
+
+            var saved = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
+            SubmitTestPassword(GetCreateDialog(window));
+            await saved;
+            Assert.Empty(document.Text);
+            Assert.Empty(window.GetVisualDescendants().OfType<TextEditor>());
+            Assert.Empty(await storage.DraftArchive.GetEntriesAsync());
+            foreach (var state in new[] { await storage.LoadSessionAsync(), await ReadCheckpointAsync(storage, "previous") })
+            {
+                Assert.Empty(state!.Tabs);
+                Assert.Equal(other, await storage.LoadDraftAsync(Assert.Single(state.ClosedTabs!)));
+            }
+            foreach (var path in Directory.EnumerateFiles(storage.RootDirectory, "*", SearchOption.AllDirectories))
+            {
+                var data = Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path));
+                Assert.DoesNotContain(secret, data, StringComparison.Ordinal);
+                Assert.DoesNotContain(earlier, data, StringComparison.Ordinal);
+            }
+            Assert.Equal(secret, EncryptedTabFile.Decrypt(await EncryptedTabFile.ReadAsync(target, CancellationToken.None), "1"));
+        }
+        finally
+        {
+            await CloseAsync(window);
         }
 
-        static TextBox Field(Window dialog, string placeholder) =>
-            Assert.Single(dialog.GetVisualDescendants().OfType<TextBox>(), box => Equals(box.PlaceholderText, placeholder));
-        static void Click(Window dialog, string label) =>
-            Assert.Single(dialog.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, label))
-                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
     });
 
     [Fact]
@@ -195,4 +364,58 @@ public sealed class EncryptedTabDialogTests
         foreach (var path in Directory.EnumerateFiles(profile, "*", SearchOption.AllDirectories))
             Assert.DoesNotContain(secret, Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path)), StringComparison.Ordinal);
     });
+
+    private static Task SaveSessionAsync(MainWindow window) =>
+        (Task)typeof(MainWindow).GetMethod("SaveSessionAsync", Private)!.Invoke(window, null)!;
+
+    private static async Task<SessionState?> ReadCheckpointAsync(StorageService storage, string pointer)
+    {
+        var checkpoints = Path.Combine(storage.RootDirectory, "session");
+        var name = (await File.ReadAllTextAsync(Path.Combine(checkpoints, pointer + ".json"))).Trim();
+        return JsonSerializer.Deserialize(await File.ReadAllTextAsync(Path.Combine(checkpoints, name, "manifest.json")),
+            StorageJsonContext.Default.SessionState);
+    }
+
+    private static void AssertNoEncryptedHistory(SessionState? checkpoint, string source, string target, long id)
+    {
+        Assert.NotNull(checkpoint);
+        Assert.DoesNotContain(checkpoint.Tabs.Concat(checkpoint.ClosedTabs ?? []),
+            tab => tab.Id == id || tab.Path == source || tab.Path == target);
+    }
+
+    private static async Task<Window> WaitForDialogAsync(MainWindow window, string title)
+    {
+        await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any(dialog => dialog.Title == title));
+        return GetDialog(window, title);
+    }
+
+    private static Window GetCreateDialog(MainWindow window) => GetDialog(window, "Зашифровать копию вкладки");
+
+    private static void SubmitTestPassword(Window create)
+    {
+        Field(create, "Пароль").Text = "1";
+        Field(create, "Повторите пароль").Text = "1";
+        Click(create, "Зашифровать");
+    }
+
+    private static Window GetDialog(MainWindow window, string title)
+    {
+        var dialog = Assert.Single(window.OwnedWindows, item => item.Title == title);
+        dialog.UpdateLayout();
+        return dialog;
+    }
+
+    private static TextBox Field(Window dialog, string placeholder) =>
+        Assert.Single(dialog.GetVisualDescendants().OfType<TextBox>(), box => Equals(box.PlaceholderText, placeholder));
+
+    private static void Click(Window dialog, string label) =>
+        Assert.Single(dialog.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, label))
+            .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+    private static async Task CloseAsync(MainWindow window)
+    {
+        foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+        window.Close();
+        await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_closed"));
+    }
 }

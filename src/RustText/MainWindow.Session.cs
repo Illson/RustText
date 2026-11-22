@@ -670,6 +670,13 @@ public partial class MainWindow
         {
             return;
         }
+        if (saved is { Path: { } encryptedPath, DraftRef: null } && EncryptedTabFile.HasExtension(encryptedPath))
+        {
+            RemoveTab(tab);
+            if (_restoreFinished && _tabs.Count == 0) await ShowHomeAsync();
+            await DecryptTabPathAsync(encryptedPath);
+            return;
+        }
 
         var storage = SessionStorage;
         var workspaceId = _workspaceId;
@@ -954,7 +961,12 @@ public partial class MainWindow
         _closedTabRestoreOperations++;
         try
         {
-            await RestoreClosedCoreAsync(saved);
+            if (saved is { Path: { } encryptedPath, DraftRef: null } && EncryptedTabFile.HasExtension(encryptedPath))
+            {
+                RemoveClosedEntry(saved);
+                await DecryptTabPathAsync(encryptedPath);
+            }
+            else await RestoreClosedCoreAsync(saved);
         }
         finally
         {

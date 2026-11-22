@@ -23,6 +23,8 @@ internal static class EncryptedTabFile
     private static readonly UTF8Encoding Utf8 = new(false, throwOnInvalidBytes: true);
     private static ReadOnlySpan<byte> Magic => "RUSTENC1"u8;
 
+    public static bool HasExtension(string path) => string.Equals(Path.GetExtension(path), Extension, StringComparison.OrdinalIgnoreCase);
+
     public static byte[] Encrypt(string text, string password, string hint)
     {
         if (password.Length == 0)
@@ -125,7 +127,7 @@ internal static class EncryptedTabFile
         {
             token.ThrowIfCancellationRequested();
             await using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                bufferSize: 4096, useAsync: true))
+                bufferSize: 4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
                 created = true;
                 await file.WriteAsync(container, token);
