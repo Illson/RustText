@@ -18,7 +18,20 @@ public partial class MainWindow
     {
         _recentMenu = new MenuItem { Header = "Недавние файлы" };
         _closedFilesMenu = new MenuItem { Header = "Закрытые файлы" };
-        _closedDraftsMenu = new MenuItem { Header = "Призрачные вкладки" };
+        var draftsMenu = _closedDraftsMenu = new MenuItem { Header = "Призрачные вкладки" };
+        ResetClosedDraftsMenu(draftsMenu);
+        draftsMenu.PropertyChanged += (_, change) =>
+        {
+            if (change.Property != MenuItem.IsSubMenuOpenProperty) return;
+            if (draftsMenu.IsSubMenuOpen) PopulateClosedDraftsMenu(draftsMenu);
+            else ResetClosedDraftsMenu(draftsMenu);
+        };
+        _showArchivedDrafts = Command("Показывать архивные записи", () => Run(async () =>
+        {
+            try { await SaveWorkspaceSettingsAsync(settings => settings with { ShowArchivedDrafts = !settings.ShowArchivedDrafts }); }
+            finally { RefreshHistoryMenus(); }
+        }));
+        _showArchivedDrafts.ToggleType = MenuItemToggleType.CheckBox;
         TopMenu.Items.Add(MenuGroup("_Файл",
             Command("Новая вкладка   Ctrl+N", () => NewTab()),
             Command("Новое окно", () => Run(() => OpenWorkspaceWindowAsync(_workspaceId))),
@@ -41,6 +54,9 @@ public partial class MainWindow
             _recentMenu,
             _closedFilesMenu,
             new Separator(),
+            MenuGroup("Шифрование",
+                Command("Зашифровать копию вкладки…", () => Run(EncryptActiveTabAsync)),
+                Command("Расшифровать файл…", () => Run(DecryptTabFileAsync))),
             Command("Настроить открытие файлов в Windows…", () => Run(RegisterAssociationsAsync)),
             Command("Выход", Close)));
         TopMenu.Items.Add(MenuGroup("_Инструменты",
@@ -64,6 +80,7 @@ public partial class MainWindow
                 Command("Версии файла…", () => Run(ShowVersionsAsync)),
                 new Separator(),
                 _closedDraftsMenu,
+                _showArchivedDrafts,
                 Command("Архив черновиков…", () => Run(ShowDraftArchiveAsync))),
             MenuGroup("Обновления",
                 Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),

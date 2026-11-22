@@ -31,8 +31,11 @@ public sealed class HistoryMenuTests
                 var closedDrafts = Field<MenuItem>(window, "_closedDraftsMenu");
                 Assert.Contains(closedFiles.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.StartsWith("report.txt", StringComparison.Ordinal) == true);
                 Assert.DoesNotContain(closedFiles.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.Contains("ghost", StringComparison.Ordinal) == true);
-                Assert.Single(closedDrafts.Items.OfType<MenuItem>());
-                Assert.StartsWith("ghost", closedDrafts.Items.OfType<MenuItem>().Single().Header?.ToString());
+                Assert.Equal("Вся история", Assert.IsType<MenuItem>(Assert.Single(closedDrafts.Items)).Header);
+                closedDrafts.IsSubMenuOpen = true;
+                Assert.Equal(2, closedDrafts.Items.Count);
+                Assert.StartsWith("ghost", Assert.IsType<MenuItem>(closedDrafts.Items[0]).Header?.ToString());
+                closedDrafts.IsSubMenuOpen = false;
 
                 var topMenu = window.FindControl<Menu>("TopMenu")!;
                 var fileMenu = topMenu.Items.OfType<MenuItem>().Single(item => MenuHeader(item).Contains("Файл", StringComparison.Ordinal));
@@ -60,7 +63,7 @@ public sealed class HistoryMenuTests
                     MenuLabels(dataGroup));
                 var historyGroup = toolsGroups.Single(item => MenuHeader(item) == "История и черновики");
                 Assert.Contains(historyGroup.Items, item => ReferenceEquals(item, closedDrafts));
-                Assert.Equal(new[] { "Версии файла…", "Призрачные вкладки", "Архив черновиков…" }, MenuLabels(historyGroup));
+                Assert.Equal(new[] { "Версии файла…", "Призрачные вкладки", "Показывать архивные записи", "Архив черновиков…" }, MenuLabels(historyGroup));
                 var updatesGroup = toolsGroups.Single(item => MenuHeader(item) == "Обновления");
                 Assert.Equal(new[] { "Проверить обновления…", "История выпусков…" }, MenuLabels(updatesGroup));
 

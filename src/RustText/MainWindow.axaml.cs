@@ -127,6 +127,7 @@ public partial class MainWindow : Window
         EnsureIdleUnloadTimer();
         if (!_restoreWorkspace)
         {
+            RefreshHistoryMenusLocal();
             _restoreFinished = true;
             RefreshWorkspaceButton();
             _checkpoint.Start();

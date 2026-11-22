@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using RustText.Demo.Platform;
 using Xunit;
 
@@ -157,6 +158,126 @@ public sealed class ProxyCheckerTests
     }
 
     [Fact]
+    public async Task SupportsMoreThan32SimultaneousChecksAndCancelsThem()
+    {
+        const int parallelism = 64;
+        var allStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var started = 0;
+        var input = string.Join('\n', Enumerable.Repeat("192.0.2.18:80", parallelism + 1));
+        var check = ProxyChecker.CheckAsync(input, ProxyProtocol.Http, TimeSpan.FromSeconds(30), parallelism,
+            _ => throw new InvalidOperationException("A cancelled check should not report results"), stop.Token,
+            async (_, _, token) =>
+            {
+                if (Interlocked.Increment(ref started) == parallelism) allStarted.SetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return HttpStatusCode.NoContent;
+            });
+
+        await allStarted.Task.WaitAsync(stop.Token);
+        stop.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => check);
+        Assert.Equal(parallelism, started);
+    }
+
+    [Fact]
+    public async Task LooksUpTheRegionThroughTheWorkingProxyWithoutChangingItsHealth()
+    {
+        var results = new ConcurrentDictionary<int, ProxyCheckResult>();
+        var lookedUp = new ConcurrentBag<string>();
+        await ProxyChecker.CheckAsync(
+            "user:secret@192.0.2.18:80\n192.0.2.19:80\n192.0.2.20:80",
+            ProxyProtocol.Http, TimeSpan.FromSeconds(5), 3, result => results[result.LineNumber] = result,
+            CancellationToken.None, (uri, _, _) => Task.FromResult(
+                uri.Host == "192.0.2.20" ? HttpStatusCode.BadGateway : HttpStatusCode.NoContent),
+            (uri, credentials, _) =>
+            {
+                lookedUp.Add(uri.Host);
+                if (uri.Host == "192.0.2.19") throw new HttpRequestException("Provider unavailable");
+                Assert.Equal("secret", credentials?.Password);
+                Assert.Empty(uri.UserInfo);
+                return Task.FromResult<string?>("US · California");
+            });
+
+        Assert.Equal(new[] { "192.0.2.18", "192.0.2.19" }, lookedUp.Order());
+        Assert.Equal("US · California", results[1].Region);
+        Assert.Equal(ProxyChecker.RegionUnavailable, results[2].Region);
+        Assert.Equal(ProxyCheckStatus.Working, results[1].Status);
+        Assert.Equal(ProxyCheckStatus.Working, results[2].Status);
+        Assert.NotNull(results[2].CopyValue);
+        Assert.Equal(ProxyCheckStatus.Failed, results[3].Status);
+        Assert.Null(results[3].Region);
+    }
+
+    [Fact]
+    public async Task RegionTimeoutKeepsTheProxyWorking()
+    {
+        var results = new ConcurrentBag<ProxyCheckResult>();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await ProxyChecker.CheckAsync("192.0.2.18:80", ProxyProtocol.Http, TimeSpan.FromMilliseconds(100), 1,
+            results.Add, stop.Token, (_, _, _) => Task.FromResult(HttpStatusCode.NoContent),
+            async (_, _, token) =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return null;
+            });
+
+        var result = Assert.Single(results);
+        Assert.Equal(ProxyCheckStatus.Working, result.Status);
+        Assert.Equal(ProxyChecker.RegionUnavailable, result.Region);
+    }
+
+    [Fact]
+    public async Task InvalidRegionUnicodeKeepsTheProxyWorkingAndDoesNotAbortTheBatch()
+    {
+        var results = new List<ProxyCheckResult>();
+        await ProxyChecker.CheckAsync("192.0.2.18:80\n192.0.2.19:80", ProxyProtocol.Http, TimeSpan.FromSeconds(5), 1,
+            results.Add, CancellationToken.None, (_, _, _) => Task.FromResult(HttpStatusCode.NoContent),
+            (uri, _, _) => Task.FromResult(ProxyChecker.ParseRegion(uri.Host == "192.0.2.18"
+                ? """{"success":true,"country_code":"DE","region":"\uD800"}"""u8.ToArray()
+                : """{"success":true,"country_code":"DE","region":"Berlin"}"""u8.ToArray())));
+
+        Assert.Equal(new[] { ProxyChecker.RegionUnavailable, "DE · Berlin" }, results.Select(result => result.Region));
+        Assert.All(results, result =>
+        {
+            Assert.Equal(ProxyCheckStatus.Working, result.Status);
+            Assert.NotNull(result.CopyValue);
+        });
+    }
+
+    [Fact]
+    public async Task CanStopWhileLookingUpTheRegion()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var check = ProxyChecker.CheckAsync("192.0.2.18:80", ProxyProtocol.Http, TimeSpan.FromSeconds(30), 1,
+            _ => throw new InvalidOperationException("A cancelled check should not report results"), stop.Token,
+            (_, _, _) => Task.FromResult(HttpStatusCode.NoContent),
+            async (_, _, token) =>
+            {
+                started.SetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return null;
+            });
+
+        await started.Task.WaitAsync(stop.Token);
+        stop.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => check);
+    }
+
+    [Theory]
+    [InlineData("""{"success":true,"country_code":"us","region":"California"}""", "US · California")]
+    [InlineData("""{"success":true,"country_code":"DE","region":null}""", "DE")]
+    [InlineData("""{"success":true,"country_code":"DE","region":"bad\nline"}""", "DE")]
+    [InlineData("""{"success":true,"country_code":"??","region":"Unknown"}""", null)]
+    [InlineData("""{"success":false,"message":"limit exceeded"}""", null)]
+    [InlineData("[]", null)]
+    public void ParsesOnlyExpectedRegionFields(string body, string? expected)
+    {
+        Assert.Equal(expected, ProxyChecker.ParseRegion(Encoding.UTF8.GetBytes(body)));
+    }
+
+    [Fact]
     public async Task SendsTheHttpsTunnelRequestToTheSuppliedHttpProxy()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -181,5 +302,26 @@ public sealed class ProxyCheckerTests
         var result = Assert.Single(results);
         Assert.Equal(ProxyCheckStatus.Failed, result.Status);
         Assert.Null(result.CopyValue);
+    }
+
+    [Fact]
+    public async Task SendsTheRegionLookupThroughTheSuppliedHttpProxy()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var endpoint = (IPEndPoint)listener.LocalEndpoint;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var lookup = ProxyChecker.FindRegionAsync(new Uri($"http://{endpoint}"), null, cancellation.Token);
+
+        using var socket = await listener.AcceptTcpClientAsync(cancellation.Token);
+        using var stream = socket.GetStream();
+        using var reader = new StreamReader(stream);
+        var requestLine = await reader.ReadLineAsync(cancellation.Token);
+        while (await reader.ReadLineAsync(cancellation.Token) is { Length: > 0 }) { }
+        await stream.WriteAsync("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(),
+            cancellation.Token);
+
+        Assert.Equal($"CONNECT {new Uri(ProxyChecker.RegionUrl).Host}:443 HTTP/1.1", requestLine);
+        await Assert.ThrowsAsync<HttpRequestException>(() => lookup);
     }
 }

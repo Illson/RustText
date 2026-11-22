@@ -8,16 +8,30 @@ public static class FileAssociations
 {
     private const string ApplicationName = "RustText";
     private const string CapabilitiesPath = @"Software\RustText\Capabilities";
+    private const string FileAssociationsPath = CapabilitiesPath + @"\FileAssociations";
+    private const string RegistrationStamp = "OpenWithRegistration";
+    private const string DefaultAppsUri = "ms-settings:defaultapps";
     private static readonly (string Extension, string ProgId, string Description)[] Associations =
     [
         (".log", "RustText.Log", "RustText log file"),
         (".txt", "RustText.Text", "RustText text file"),
         (".json", "RustText.Json", "RustText JSON file"),
-        (".xml", "RustText.Xml", "RustText XML file")
+        (".xml", "RustText.Xml", "RustText XML file"),
+        (".jsonl", "RustText.JsonLines", "RustText JSON Lines file"),
+        (".ndjson", "RustText.NdJson", "RustText NDJSON file"),
+        (".cfg", "RustText.Config", "RustText configuration file"),
+        (".ini", "RustText.Ini", "RustText INI file"),
+        (".csv", "RustText.Csv", "RustText CSV file"),
+        (".md", "RustText.Markdown", "RustText Markdown file")
     ];
 
+    internal static IReadOnlyList<string> SupportedExtensions { get; } =
+        Array.AsReadOnly(Associations.Select(association => association.Extension).ToArray());
+
     /// <summary>Registers the RustText ProgIDs and context-menu verbs in the current user's registry hive.</summary>
-    public static void RegisterCurrentUser(string executablePath)
+    public static void RegisterCurrentUser(string executablePath) => RegisterCurrentUser(executablePath, null, false);
+
+    private static void RegisterCurrentUser(string executablePath, IReadOnlySet<string>? selected, bool onlyIfChanged)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
         if (!OperatingSystem.IsWindows())
@@ -32,12 +46,61 @@ public static class FileAssociations
         }
 
         using var userRoot = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
-        WriteRegistration(userRoot, fullPath);
+        if (!WriteRegistration(userRoot, fullPath, selected, onlyIfChanged)) return;
         SHChangeNotify(0x08000000, 0x0000, IntPtr.Zero, IntPtr.Zero);
     }
 
-    internal static void WriteRegistration(RegistryKey userRoot, string fullPath)
+    internal static bool CanRegisterOnStartup(string? executablePath, string? profileOverride) =>
+        string.IsNullOrWhiteSpace(profileOverride)
+        && string.Equals(Path.GetFileName(executablePath), "rusttext.exe", StringComparison.OrdinalIgnoreCase);
+
+    internal static void TryRegisterOnStartup(string? executablePath, string? profileOverride)
     {
+        if (!OperatingSystem.IsWindows() || !CanRegisterOnStartup(executablePath, profileOverride)) return;
+
+        try
+        {
+            RegisterCurrentUser(executablePath!, null, true);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.ComponentModel.Win32Exception or ArgumentException or System.Security.SecurityException)
+        {
+            Debug.WriteLine($"Не удалось зарегистрировать RustText в Проводнике: {error.Message}");
+        }
+    }
+
+    internal static IReadOnlySet<string> ReadSelectedExtensions()
+    {
+        using var userRoot = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Default);
+        return ReadSelectedExtensions(userRoot);
+    }
+
+    internal static IReadOnlySet<string> ReadSelectedExtensions(RegistryKey userRoot)
+    {
+        using var registered = userRoot.OpenSubKey(FileAssociationsPath);
+        var extensions = registered?.GetValueNames() ?? [".log", ".txt", ".json", ".xml"];
+        return new HashSet<string>(extensions.Where(extension => SupportedExtensions.Contains(extension,
+            StringComparer.OrdinalIgnoreCase)), StringComparer.OrdinalIgnoreCase);
+    }
+
+    internal static bool WriteRegistration(RegistryKey userRoot, string fullPath,
+        IReadOnlySet<string>? selected = null, bool onlyIfChanged = false)
+    {
+        using var capabilities = userRoot.CreateSubKey(CapabilitiesPath, writable: true)
+            ?? throw new IOException("Could not create the application capabilities.");
+        var stamp = $"1|{fullPath}|{string.Join(',', SupportedExtensions)}";
+        if (onlyIfChanged)
+        {
+            if (string.Equals(capabilities.GetValue(RegistrationStamp) as string, stamp, StringComparison.Ordinal))
+                return false;
+            if (ReadRegisteredExecutable(userRoot) is { } incumbent
+                && !string.Equals(incumbent, fullPath, StringComparison.OrdinalIgnoreCase) && File.Exists(incumbent))
+                return false;
+        }
+
+        selected ??= ReadSelectedExtensions(userRoot);
+        // An interrupted registration must be retried on the next ordinary startup.
+        capabilities.DeleteValue(RegistrationStamp, throwOnMissingValue: false);
         var executableName = Path.GetFileName(fullPath);
         var openCommand = $"{QuoteWindowsArgument(fullPath)} \"%1\"";
         using var classes = userRoot.CreateSubKey(@"Software\Classes", writable: true)
@@ -46,6 +109,10 @@ public static class FileAssociations
         using (var application = classes.CreateSubKey($@"Applications\{executableName}", writable: true)
             ?? throw new IOException("Could not create the application registry key."))
         {
+            application.SetValue("FriendlyAppName", ApplicationName, RegistryValueKind.String);
+            using var icon = application.CreateSubKey("DefaultIcon", writable: true)
+                ?? throw new IOException("Could not create the application icon key.");
+            icon.SetValue(null, $"{QuoteWindowsArgument(fullPath)},0", RegistryValueKind.String);
             using var supportedTypes = application.CreateSubKey("SupportedTypes", writable: true)
                 ?? throw new IOException("Could not create the application SupportedTypes registry key.");
             foreach (var association in Associations)
@@ -85,36 +152,57 @@ public static class FileAssociations
             verbCommand.SetValue(null, openCommand, RegistryValueKind.String);
         }
 
-        using (var capabilities = userRoot.CreateSubKey(CapabilitiesPath, writable: true)
-            ?? throw new IOException("Could not create the application capabilities."))
+        capabilities.SetValue("ApplicationName", ApplicationName, RegistryValueKind.String);
+        capabilities.SetValue("ApplicationDescription", "Просмотрщик и редактор логов RustText", RegistryValueKind.String);
+        capabilities.SetValue("ApplicationIcon", $"{QuoteWindowsArgument(fullPath)},0", RegistryValueKind.String);
+        using (var fileAssociations = capabilities.CreateSubKey("FileAssociations", writable: true)
+            ?? throw new IOException("Could not create the file association capabilities."))
         {
-            capabilities.SetValue("ApplicationName", ApplicationName, RegistryValueKind.String);
-            capabilities.SetValue("ApplicationDescription", "Просмотрщик и редактор логов RustText", RegistryValueKind.String);
-            capabilities.SetValue("ApplicationIcon", $"{QuoteWindowsArgument(fullPath)},0", RegistryValueKind.String);
-            using var fileAssociations = capabilities.CreateSubKey("FileAssociations", writable: true)
-                ?? throw new IOException("Could not create the file association capabilities.");
             foreach (var association in Associations)
             {
-                fileAssociations.SetValue(association.Extension, association.ProgId, RegistryValueKind.String);
+                if (selected.Contains(association.Extension))
+                    fileAssociations.SetValue(association.Extension, association.ProgId, RegistryValueKind.String);
+                else
+                    fileAssociations.DeleteValue(association.Extension, throwOnMissingValue: false);
             }
         }
 
         using var registered = userRoot.CreateSubKey(@"Software\RegisteredApplications", writable: true)
             ?? throw new IOException("Could not create the registered applications key.");
         registered.SetValue(ApplicationName, CapabilitiesPath, RegistryValueKind.String);
+        capabilities.SetValue(RegistrationStamp, stamp, RegistryValueKind.String);
+        return true;
+    }
+
+    private static string? ReadRegisteredExecutable(RegistryKey userRoot)
+    {
+        // Read the existing ProgID command rather than the stamp so older registrations are protected, too.
+        using var open = userRoot.OpenSubKey(@"Software\Classes\RustText.Text\shell\open\command");
+        if (open?.GetValue(null) is not string command || !command.StartsWith('"')) return null;
+        var quote = command.IndexOf('"', 1);
+        return quote > 1 && Path.IsPathFullyQualified(command[1..quote]) ? command[1..quote] : null;
     }
 
     /// <summary>Registers RustText and opens Windows default-app settings for the user to choose associations.</summary>
-    public static void RegisterAndOpenDefaultAppsSettings(string executablePath)
+    internal static void RegisterAndOpenDefaultAppsSettings(string executablePath, IReadOnlySet<string> selected)
     {
-        RegisterCurrentUser(executablePath);
-        var start = new ProcessStartInfo("ms-settings:defaultapps?registeredAppUser=RustText")
+        RegisterCurrentUser(executablePath, selected, false);
+        if (TryOpenSettings(selected.Count == 0 ? DefaultAppsUri : $"{DefaultAppsUri}?registeredAppUser={ApplicationName}"))
+            return;
+        if (selected.Count != 0 && TryOpenSettings(DefaultAppsUri)) return;
+        throw new IOException("Не удалось открыть параметры приложений Windows.");
+    }
+
+    private static bool TryOpenSettings(string uri)
+    {
+        try
         {
-            UseShellExecute = true
-        };
-        if (Process.Start(start) is null)
+            using var process = Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
+            return true;
+        }
+        catch (System.ComponentModel.Win32Exception)
         {
-            throw new IOException("Windows did not open the default-app settings page.");
+            return false;
         }
     }
 

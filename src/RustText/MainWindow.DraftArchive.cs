@@ -12,6 +12,41 @@ public partial class MainWindow
     private static readonly ConcurrentDictionary<string, byte> ArchivedDraftOperations = new(StringComparer.Ordinal);
     private bool _archivingClosedDrafts;
 
+    private sealed record DraftHistoryItem(SessionTab Tab, string Name, DraftArchiveEntry? Archive)
+    {
+        public string Label => Archive is null ? Name : $"📦 {Name} · архив";
+    }
+
+    private async Task LoadArchivedHistoryAsync()
+    {
+        try { await SessionStorage.DraftArchive.GetEntriesAsync(_lifetime.Token); }
+        catch (Exception error) when (IsUserError(error)) { SetStatus($"Не удалось прочитать архив. {error.Message}"); }
+    }
+
+    private IEnumerable<DraftHistoryItem> DraftHistory(StorageService storage)
+    {
+        var live = _closedTabs.Where(tab => tab.Path is null);
+        var rows = live.Select(tab => new DraftHistoryItem(tab, ClosedTabDisplayName(tab), null));
+        if (!Settings.ShowArchivedDrafts || storage.ArchivedHistory.Count == 0) return rows;
+        // A checkpoint can still contain the live draft if committing its transfer failed.
+        var present = live.Select(tab => (tab.Id, tab.ClosedAtMs)).ToHashSet();
+        return rows.Concat(storage.ArchivedHistory.Where(entry => !present.Contains((entry.Tab.Id, entry.ClosedAtMs)))
+                .Select(entry => new DraftHistoryItem(ArchiveHistoryTab(entry.Tab), ArchivedDraftDisplayName(entry), entry)))
+            .OrderByDescending(row => row.Archive?.ClosedAtMs ?? row.Tab.ClosedAtMs ?? long.MaxValue);
+    }
+
+    private string ArchivedDraftDisplayName(DraftArchiveEntry entry) =>
+        entry.Tab.CustomTitle is { Length: > 0 } title ? title
+            : LimitUntitledHistoryName(string.IsNullOrWhiteSpace(entry.DisplayName) ? entry.Tab.UntitledName : entry.DisplayName.Trim());
+
+    private static SessionTab ArchiveHistoryTab(SessionTab tab)
+    {
+        if (tab.LastWorkedMs is { } timestamp && (timestamp < DateTimeOffset.MinValue.ToUnixTimeMilliseconds()
+            || timestamp > DateTimeOffset.MaxValue.ToUnixTimeMilliseconds()))
+            return tab with { LastWorkedMs = null };
+        return tab;
+    }
+
     private async Task ArchiveClosedDraftsAsync()
     {
         if (_closed || _closing || _archivingClosedDrafts) return;
@@ -40,7 +75,8 @@ public partial class MainWindow
     {
         var settings = Settings.Normalize();
         var token = _lifetime.Token;
-        await storage.DraftArchive.PruneExpiredAsync(settings.ArchivedDraftRetentionDays, token);
+        if (await storage.DraftArchive.PruneExpiredAsync(settings.ArchivedDraftRetentionDays, token) > 0 && active)
+            RefreshHistoryMenus();
         var now = DateTimeOffset.UtcNow;
         var changed = false;
         for (var index = 0; index < history.Count; index++)
@@ -131,47 +167,15 @@ public partial class MainWindow
             {
                 var restore = FocusButton(Button("Восстановить", () => Run(async () =>
                 {
-                    await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
-                    if (!ReferenceEquals(storage, SessionStorage) || !ArchivedDraftOperations.TryAdd(entry.Id, 0))
-                    {
-                        _workspace.WorkspaceSwitchGate.Release();
-                        return;
-                    }
-                    SessionTab? restoredTab = null;
-                    try
-                    {
-                        restoredTab = (await archive.RestoreAsync(entry, _lifetime.Token)) with { Id = NextId() };
-                        _closedTabs.Insert(0, restoredTab);
-                        await RestoreClosedWhileHoldingWorkspaceSwitchGateAsync(restoredTab);
-                        if (!_closedTabs.Any(tab => tab.Id == restoredTab.Id))
-                        {
-                            await SaveSessionAsync();
-                            if (!storage.HasCommittedDraft(restoredTab.Id, entry.Sha256))
-                            {
-                                SetStatus("Черновик открыт. Архивная копия сохранена до подтверждения записи сессии.");
-                                return;
-                            }
-                            await archive.RemoveAsync(entry, _lifetime.Token);
-                            await RefreshAsync();
-                        }
-                    }
-                    catch (Exception error) when (IsUserError(error))
-                    {
-                        if (restoredTab is not null) _closedTabs.RemoveAll(tab => tab.Id == restoredTab.Id);
-                        SetStatus($"Не удалось восстановить черновик. {error.Message}");
-                    }
-                    finally
-                    {
-                        ArchivedDraftOperations.TryRemove(entry.Id, out _);
-                        _workspace.WorkspaceSwitchGate.Release();
-                    }
+                    await RestoreArchivedDraftAsync(storage, entry);
+                    await RefreshAsync();
                 })), primary: true);
                 var remove = FocusButton(Button("Удалить", () => Run(async () =>
                 {
-                    await archive.RemoveAsync(entry, _lifetime.Token);
+                    await RemoveArchivedDraftAsync(storage, entry);
                     await RefreshAsync();
                 })));
-                var title = new TextBlock { Text = entry.Tab.CustomTitle ?? entry.DisplayName, FontWeight = FontWeight.SemiBold,
+                var title = new TextBlock { Text = ArchivedDraftDisplayName(entry), FontWeight = FontWeight.SemiBold,
                     TextTrimming = TextTrimming.CharacterEllipsis };
                 var description = new TextBlock
                 {
@@ -197,6 +201,53 @@ public partial class MainWindow
 
         await RefreshAsync();
         await dialog.ShowDialog(this);
+    }
+
+    private async Task RestoreArchivedDraftAsync(StorageService storage, DraftArchiveEntry entry)
+    {
+        await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
+        try
+        {
+            if (!ReferenceEquals(storage, SessionStorage) || !ArchivedDraftOperations.TryAdd(entry.Id, 0)) return;
+            SessionTab? restored = null;
+            try
+            {
+                restored = ArchiveHistoryTab(await storage.DraftArchive.RestoreAsync(entry, _lifetime.Token)) with { Id = NextId() };
+                _closedTabs.Insert(0, restored);
+                await RestoreClosedWhileHoldingWorkspaceSwitchGateAsync(restored);
+                if (_closedTabs.Any(tab => tab.Id == restored.Id)) return;
+                await SaveSessionAsync();
+                if (!storage.HasCommittedDraft(restored.Id, entry.Sha256))
+                {
+                    SetStatus("Черновик открыт. Архивная копия сохранена до подтверждения записи сессии.");
+                    return;
+                }
+                await storage.DraftArchive.RemoveAsync(entry, _lifetime.Token);
+            }
+            catch (Exception error) when (IsUserError(error))
+            {
+                if (restored is not null) _closedTabs.RemoveAll(tab => tab.Id == restored.Id);
+                SetStatus($"Не удалось восстановить черновик. {error.Message}");
+            }
+            finally
+            {
+                ArchivedDraftOperations.TryRemove(entry.Id, out _);
+                RefreshHistoryMenus();
+            }
+        }
+        finally { _workspace.WorkspaceSwitchGate.Release(); }
+    }
+
+    private async Task RemoveArchivedDraftAsync(StorageService storage, DraftArchiveEntry entry)
+    {
+        await _workspace.WorkspaceSwitchGate.WaitAsync(_lifetime.Token);
+        try
+        {
+            if (!ReferenceEquals(storage, SessionStorage)) return;
+            await storage.DraftArchive.RemoveAsync(entry, _lifetime.Token);
+            RefreshHistoryMenus();
+        }
+        finally { _workspace.WorkspaceSwitchGate.Release(); }
     }
 
     private static string FormatArchiveSize(long bytes)

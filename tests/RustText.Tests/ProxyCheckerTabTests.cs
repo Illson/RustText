@@ -84,6 +84,12 @@ public sealed class ProxyCheckerTabTests
             await HeadlessTests.WaitForAsync(() => view.GetVisualDescendants().OfType<TextEditor>().Any());
             var input = Assert.Single(view.GetVisualDescendants().OfType<TextEditor>());
             var protocol = Assert.Single(view.GetVisualDescendants().OfType<ComboBox>());
+            var region = Assert.Single(view.GetVisualDescendants().OfType<CheckBox>(), c => c.Name == "ProxyCheckerLookupRegion");
+            var parallelism = Assert.Single(view.GetVisualDescendants().OfType<NumericUpDown>(), c => c.Name == "ProxyCheckerParallelism");
+            Assert.Equal((decimal?)8, parallelism.Value);
+            parallelism.Value = 128;
+            Assert.Equal((decimal?)128, parallelism.Value);
+            Assert.False(region.IsChecked);
             Assert.Equal(new[] { "HTTP", "HTTPS", "SOCKS5" }, protocol.Items.Cast<string>().ToArray());
             Assert.Equal("HTTP", protocol.SelectedItem);
             const string proxyList = "192.0.2.10:1080\nhttp://192.0.2.20:3128";
