@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
@@ -9,6 +8,7 @@ using Xunit;
 
 namespace RustText.Tests;
 
+[Collection(HeadlessCollection.Name)]
 public sealed class LockedFileInspectionTests
 {
     [Fact]
@@ -17,8 +17,9 @@ public sealed class LockedFileInspectionTests
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "lock.txt");
         await File.WriteAllTextAsync(path, "test fixture");
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        using var holder = await StartOwnerAsync(path, timeout.Token);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        await using var fixture = await TestLockOwner.StartAsync(path, timeout.Token);
+        var holder = fixture.Process;
         try
         {
             var file = LockedFileInspection.Select(path);
@@ -47,14 +48,7 @@ public sealed class LockedFileInspectionTests
             Assert.Empty(LockedFileInspection.Inspect(directory, timeout.Token));
             Assert.Equal("test fixture", await File.ReadAllTextAsync(path));
         }
-        finally
-        {
-            if (!holder.HasExited)
-            {
-                await holder.StandardInput.WriteLineAsync();
-                await holder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            }
-        }
+        finally { await fixture.ReleaseAsync(); }
     }
 
     [Fact]
@@ -63,23 +57,13 @@ public sealed class LockedFileInspectionTests
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "ambiguous.txt");
         await File.WriteAllTextAsync(path, "test fixture");
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        using var first = await StartOwnerAsync(path, timeout.Token);
-        using var second = await StartOwnerAsync(path, timeout.Token);
-        try
-        {
-            var items = LockedFileInspection.Inspect(LockedFileInspection.Select(path), timeout.Token);
-            var owners = FileLockProcesses.Describe(items);
-            Assert.Equal(new[] { first.Id, second.Id }.Order(), owners.Select(owner => owner.Id));
-            Assert.All(owners, owner => Assert.False(owner.CanClose));
-        }
-        finally
-        {
-            await first.StandardInput.WriteLineAsync();
-            await second.StandardInput.WriteLineAsync();
-            await first.WaitForExitAsync(timeout.Token);
-            await second.WaitForExitAsync(timeout.Token);
-        }
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        await using var first = await TestLockOwner.StartAsync(path, timeout.Token);
+        await using var second = await TestLockOwner.StartAsync(path, timeout.Token);
+        var items = LockedFileInspection.Inspect(LockedFileInspection.Select(path), timeout.Token);
+        var owners = FileLockProcesses.Describe(items);
+        Assert.Equal(new[] { first.Process.Id, second.Process.Id }.Order(), owners.Select(owner => owner.Id));
+        Assert.All(owners, owner => Assert.False(owner.CanClose));
     }
 
     [Fact]
@@ -100,39 +84,61 @@ public sealed class LockedFileInspectionTests
         Assert.Equal("new", File.ReadAllText(path));
     }
 
-    internal static async Task<Process> StartOwnerAsync(string path, CancellationToken token)
+}
+
+internal sealed class TestLockOwner(Process process, TempDirectory communication) : IAsyncDisposable
+{
+    public Process Process { get; } = process;
+
+    public static async Task<TestLockOwner> StartAsync(string path, CancellationToken token)
     {
-        const string script = """
-            $ErrorActionPreference = 'Stop'
-            $stream = [IO.File]::Open($env:RUSTTEXT_TEST_LOCK, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-            try {
-                [Console]::WriteLine('ready')
-                [void][Console]::ReadLine()
-            } finally { $stream.Dispose() }
-            """;
-        var setup = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"))
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true
-        };
-        setup.ArgumentList.Add("-NoProfile");
-        setup.ArgumentList.Add("-NonInteractive");
-        setup.ArgumentList.Add("-EncodedCommand");
-        setup.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(script)));
-        setup.Environment["RUSTTEXT_TEST_LOCK"] = path;
-        var process = Process.Start(setup)!;
+        var communication = new TempDirectory();
+        TestLockOwner? owner = null;
         try
         {
-            Assert.Equal("ready", await process.StandardOutput.ReadLineAsync(token));
-            return process;
+            var ready = Path.Combine(communication.Path, "ready");
+            var setup = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            foreach (var argument in new[]
+            {
+                "exec", "--runtimeconfig", Path.Combine(AppContext.BaseDirectory, "RustText.Tests.runtimeconfig.json"),
+                typeof(LockFixture.Program).Assembly.Location, path, ready, Path.Combine(communication.Path, "stop")
+            })
+                setup.ArgumentList.Add(argument);
+
+            owner = new TestLockOwner(Process.Start(setup)!, communication);
+            while (!File.Exists(ready))
+            {
+                Assert.False(owner.Process.HasExited, "The test lock owner exited before opening the file.");
+                await Task.Delay(25, token);
+            }
+            return owner;
         }
         catch
         {
-            process.StandardInput.Close();
-            process.Dispose();
+            if (owner is null) communication.Dispose();
+            else await owner.DisposeAsync();
             throw;
+        }
+    }
+
+    public async Task ReleaseAsync()
+    {
+        if (Process.HasExited) return;
+        await File.WriteAllTextAsync(Path.Combine(communication.Path, "stop"), "");
+        await Process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try { await ReleaseAsync(); }
+        finally
+        {
+            Process.Dispose();
+            communication.Dispose();
         }
     }
 }
@@ -147,8 +153,9 @@ public sealed class RecycleDialogTests
             using var temp = new TempDirectory();
             var path = Path.Combine(temp.Path, "keep.txt");
             await File.WriteAllTextAsync(path, "fixture");
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            using var owner = await LockedFileInspectionTests.StartOwnerAsync(path, timeout.Token);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+            await using var fixture = await TestLockOwner.StartAsync(path, timeout.Token);
+            var owner = fixture.Process;
             var window = new MainWindow([]);
             window.Show();
             try
@@ -171,11 +178,7 @@ public sealed class RecycleDialogTests
             {
                 foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
                 window.Close();
-                if (!owner.HasExited)
-                {
-                    await owner.StandardInput.WriteLineAsync();
-                    await owner.WaitForExitAsync(timeout.Token);
-                }
+                await fixture.ReleaseAsync();
                 await HeadlessTests.WaitForAsync(() => ReadFlag("_closed"));
             }
             Assert.Equal("fixture", await File.ReadAllTextAsync(path));
