@@ -348,6 +348,14 @@ public partial class MainWindow : Window
         };
         tab.Item.ContextMenu = context;
         RegisterTabDrag(tab, close);
+        tab.Item.AddHandler(PointerReleasedEvent, (_, e) =>
+        {
+            if (!e.Handled && e.InitialPressMouseButton == MouseButton.Left && _draggedTabId != tab.Id
+                && ReferenceEquals(tab, ActiveTab) && !IsWithin(e.Source as Visual, close))
+            {
+                QueueEditorFocus(tab, FocusManager?.GetFocusedElement());
+            }
+        }, RoutingStrategies.Bubble, handledEventsToo: true);
         tab.Item.DoubleTapped += (_, e) =>
         {
             if (IsWithin(e.Source as Visual, close)) return;
@@ -586,7 +594,7 @@ public partial class MainWindow : Window
         tab.LastWorked = DateTimeOffset.Now;
         if (tab.Deferred is not null && !tab.Loading && !tab.CheckingSession && !_mountingSessionTabs)
         {
-            Run(() => ActivateDeferredAsync(tab));
+            Run(() => OpenDeferredTabAsync(tab));
         }
 
         UpdateStatus(tab);

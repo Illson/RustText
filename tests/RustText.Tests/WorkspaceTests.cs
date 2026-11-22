@@ -14,6 +14,7 @@ using Avalonia.Input.Raw;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Rendering;
@@ -1553,6 +1554,205 @@ public sealed class WorkspaceTests
             var session = await storage.LoadSessionAsync();
             var savedDraft = Assert.Single(session!.Tabs, candidate => candidate.Path is null);
             Assert.Equal("changed while paused + local", await File.ReadAllTextAsync(storage.GetDraftPath(savedDraft)!));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OpeningTextTabsFocusesOnlyTheSelectedEditor(bool startup) => HeadlessTests.RunAsync(async profile =>
+    {
+        var first = Path.Combine(profile, "first.txt");
+        var last = Path.Combine(profile, "last.txt");
+        await File.WriteAllTextAsync(first, "first");
+        await File.WriteAllTextAsync(last, "last");
+        var window = await OpenWorkspaceAsync(startup ? [first, last] : []);
+        try
+        {
+            if (!startup) await window.ReceivePathsAsync([first, last], activate: false);
+
+            var selected = ActiveTab(window);
+            Assert.Equal(last, Property(selected, "Path"));
+            var editor = Read<TextEditor>(selected, "Editor");
+            var other = Read<TextEditor>(Tabs(window).Single(tab => Equals(Property(tab, "Path"), first)), "Editor");
+            await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
+            Assert.True(editor.TextArea.IsFocused);
+            Assert.Equal(0, editor.CaretOffset);
+            window.KeyTextInput("!");
+            Assert.Equal("!last", editor.Text);
+            Assert.Equal("first", other.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task ClickingOpenTabReturnsKeyboardFocusToItsSavedCaret() => HeadlessTests.RunAsync(async profile =>
+    {
+        var first = Path.Combine(profile, "first.txt");
+        var second = Path.Combine(profile, "second.txt");
+        await File.WriteAllTextAsync(first, "left right");
+        await File.WriteAllTextAsync(second, "other");
+        var window = await OpenWorkspaceAsync(first, second);
+        try
+        {
+            var tab = Tabs(window).Single(tab => Equals(Property(tab, "Path"), first));
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.CaretOffset = 5;
+            var header = TabSurface(Read<TabItem>(tab, "Item"));
+            var point = header.TranslatePoint(new Point(header.Bounds.Width / 2, header.Bounds.Height / 2), window)!.Value;
+            window.MouseDown(point, MouseButton.Left);
+            window.MouseUp(point, MouseButton.Left);
+
+            Assert.Same(tab, ActiveTab(window));
+            Assert.True(editor.TextArea.IsFocused);
+            Assert.Equal(5, editor.CaretOffset);
+            window.KeyTextInput("middle ");
+            Assert.Equal("left middle right", editor.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task CreatingNewTabLetsYouTypeWithoutClickingTheEditor(bool fromHome) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "before-new-tab.txt");
+        await File.WriteAllTextAsync(path, "previous tab");
+        var window = await OpenWorkspaceAsync(fromHome ? [] : [path]);
+        try
+        {
+            var previous = fromHome ? null : Read<TextEditor>(ActiveTab(window), "Editor");
+            previous?.TextArea.Focus();
+            Press(window, Key.N, RawInputModifiers.Control, PhysicalKey.N, "n");
+
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            Assert.NotSame(previous, editor);
+            Assert.True(editor.TextArea.IsFocused);
+            window.KeyTextInput("new text");
+            Assert.Equal("new text", editor.Text);
+            if (previous is not null) Assert.Equal("previous tab", previous.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task RestoringTextTabFocusesAtTheSavedCaret() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "restore-position.txt");
+        await File.WriteAllTextAsync(path, "start end");
+        var window = await OpenWorkspaceAsync(path);
+        try { Read<TextEditor>(ActiveTab(window), "Editor").CaretOffset = 6; }
+        finally { await CloseAsync(window); }
+
+        window = await OpenWorkspaceAsync();
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
+            Assert.True(editor.TextArea.IsFocused);
+            Assert.Equal(6, editor.CaretOffset);
+            window.KeyTextInput("middle ");
+            Assert.Equal("start middle end", editor.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task OpeningTextTabDoesNotStealFocusFromSearchOpenedDuringLoading() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "pending.txt");
+        await File.WriteAllTextAsync(path, "file");
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "OpenSearchPanel", false);
+            await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
+            Invoke(window, "NewTab", "");
+            Read<TextEditor>(ActiveTab(window), "Editor").TextArea.Focus();
+
+            var opening = CallAsync(window, "OpenPathsAsync", new[] { path }, false, null);
+            Assert.True(Read<bool>(ActiveTab(window), "Loading"));
+            var input = (TextBox)Field(window, "_searchInput");
+            Assert.True(input.Focus());
+
+            await opening;
+            await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
+            Assert.True(input.IsFocused);
+            window.KeyTextInput("search");
+            Assert.Equal("search", input.Text);
+            Assert.Equal("file", Read<TextEditor>(ActiveTab(window), "Editor").Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData("\n", "\n")]
+    [InlineData("\r\n", "\r\n")]
+    [InlineData("\r\n", "\r")]
+    public Task CopyingAndPastingWholeFileKeepsTabClean(string firstEnding, string lastEnding) =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var firstLine = "Начало\t" + new string('x', 8192);
+            var path = Path.Combine(profile, "round-trip.txt");
+            await File.WriteAllTextAsync(path, $"{firstLine}{firstEnding}конец{lastEnding}");
+            var window = await OpenWorkspaceAsync(path);
+            try
+            {
+                var tab = ActiveTab(window);
+                var editor = Read<TextEditor>(tab, "Editor");
+                var version = editor.Document.Version;
+                editor.TextArea.Focus();
+                editor.SelectAll();
+                Assert.Equal(editor.Document.TextLength, editor.SelectionLength);
+                ApplicationCommands.Copy.Execute(null, editor.TextArea);
+                Assert.Equal($"{firstLine}{Environment.NewLine}конец{Environment.NewLine}", await window.Clipboard!.TryGetTextAsync());
+
+                Press(window, Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+                await HeadlessTests.WaitForAsync(() => editor.SelectionLength == 0);
+
+                Assert.Equal($"{firstLine}\nконец\n", editor.Text);
+                Assert.False(Read<bool>(tab, "Dirty"));
+                Assert.False(editor.Document.UndoStack.CanUndo);
+                Assert.Same(version, editor.Document.Version);
+                Assert.Equal(editor.Document.TextLength, editor.CaretOffset);
+                Assert.True(editor.TextArea.IsKeyboardFocusWithin);
+            }
+            finally { await CloseAsync(window); }
+        });
+
+    [Fact]
+    public Task IdenticalPastePreservesEarlierChangesAndTheirUndoEntry() => HeadlessTests.RunAsync(async profile =>
+    {
+        var prefix = new string('x', 8192);
+        var path = Path.Combine(profile, "replace.txt");
+        await File.WriteAllTextAsync(path, prefix + "a");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.TextArea.Focus();
+            var clipboard = window.Clipboard!;
+            await clipboard.SetTextAsync(prefix + "b");
+            editor.SelectAll();
+            Press(window, Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            await HeadlessTests.WaitForAsync(() => editor.Text == prefix + "b");
+            Assert.True(Read<bool>(tab, "Dirty"));
+
+            await clipboard.SetTextAsync("b");
+            editor.Select(prefix.Length, 1);
+            editor.CaretOffset = prefix.Length;
+            Press(window, Key.V, RawInputModifiers.Control, PhysicalKey.V, "v");
+            await HeadlessTests.WaitForAsync(() => editor.SelectionLength == 0);
+            Assert.Equal(prefix + "b", editor.Text);
+            Assert.Equal(editor.Document.TextLength, editor.CaretOffset);
+            Assert.True(Read<bool>(tab, "Dirty"));
+
+            editor.Undo();
+            Assert.Equal(prefix + "a", editor.Text);
+            Assert.False(Read<bool>(tab, "Dirty"));
         }
         finally { await CloseAsync(window); }
     });

@@ -35,6 +35,7 @@ public partial class MainWindow
 
     private void NewTab(string text = "")
     {
+        var focusEditor = CaptureEditorFocusRequest();
         var tab = AddTab();
         AttachEditor(tab, text);
         if (text.Length > 0)
@@ -44,7 +45,7 @@ public partial class MainWindow
         }
 
         TrackDetachedDraft(tab);
-        tab.Editor?.Focus();
+        focusEditor(tab);
     }
 
     private async Task OpenDialogAsync(bool asLog = false, TextEncodingKind? encoding = null)
@@ -85,20 +86,32 @@ public partial class MainWindow
             catch (Exception error) when (IsUserError(error)) { SetStatus(error.Message); }
         }
         if (last is null) return;
+        var focusEditor = CaptureEditorFocusRequest();
         Select(last);
+        if (last.Editor is not null && (encoding is null || last.Dirty))
+            focusEditor(last);
         await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
         foreach (var request in pending)
-            await GuardAsync(() => LoadOpenRequestAsync(request, encoding));
+            await GuardAsync(() => LoadOpenRequestAsync(request, encoding, ReferenceEquals(request.Tab, last) ? focusEditor : null));
     }
 
     private Task<WorkTab?> OpenPathAsync(string path, bool asLog = false, TextEncodingKind? encoding = null) =>
         OpenSinglePathAsync(path, asLog, encoding, editPages: false);
 
-    private async Task<WorkTab?> OpenSinglePathAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages)
+    private Task<WorkTab?> OpenSinglePathAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages) =>
+        OpenSinglePathCoreAsync(path, asLog, encoding, editPages, initializeEditor: null);
+
+    private async Task<WorkTab?> OpenSinglePathCoreAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages,
+        Action<WorkTab>? initializeEditor)
     {
         if (await PrepareOpenAsync(path, asLog, encoding, editPages) is not { } request) return null;
+        var focusEditor = CaptureEditorFocusRequest();
         Select(request.Tab);
-        await LoadOpenRequestAsync(request, encoding);
+        await LoadOpenRequestAsync(request, encoding, tab =>
+        {
+            initializeEditor?.Invoke(tab);
+            focusEditor(tab);
+        });
         return request.Tab;
     }
 
@@ -191,7 +204,7 @@ public partial class MainWindow
         return useLog;
     }
 
-    private async Task LoadOpenRequestAsync(OpenRequest request, TextEncodingKind? encoding)
+    private async Task LoadOpenRequestAsync(OpenRequest request, TextEncodingKind? encoding, Action<WorkTab>? onEditorReady)
     {
         var tab = request.Tab;
         if (_closed || !_tabs.TryGetValue(tab.Id, out var current) || !ReferenceEquals(tab, current)) return;
@@ -199,6 +212,7 @@ public partial class MainWindow
         {
             if (encoding is not null && !tab.Loading && !tab.Dirty)
                 await ReloadAsync(tab, encoding);
+            onEditorReady?.Invoke(tab);
             return;
         }
         try
@@ -213,6 +227,7 @@ public partial class MainWindow
             else
             {
                 await LoadFileAsync(tab, encoding);
+                onEditorReady?.Invoke(tab);
             }
 
             await RecordRecentAsync(tab);
@@ -434,7 +449,7 @@ public partial class MainWindow
         {
             var normalized = NormalizePaste(editor, text);
             if (multiCaret.IsActive) multiCaret.Paste(normalized);
-            else editor.TextArea.PerformTextInput(normalized);
+            else EditorClipboard.PasteText(editor, normalized);
         }, Run);
         void CutLineKeyDown(object? sender, KeyEventArgs e)
         {
@@ -1105,6 +1120,28 @@ public partial class MainWindow
         _active = tab.Group;
         tab.Group.Tabs.SelectedItem = tab.Item;
         ActivateTab(tab);
+    }
+
+    private Action<WorkTab> CaptureEditorFocusRequest()
+    {
+        var previouslyFocused = FocusManager?.GetFocusedElement();
+        return tab => QueueEditorFocus(tab, previouslyFocused);
+    }
+
+    private void QueueEditorFocus(WorkTab tab, IInputElement? previouslyFocused)
+    {
+        if (tab.Editor is not { } editor) return;
+        // Let the selected tab's content attach before focusing its text area.
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_closing || _closed || !IsActive || tab.Closing || !ReferenceEquals(tab, ActiveTab)
+                || !ReferenceEquals(tab.Editor, editor) || !editor.IsEffectivelyVisible) return;
+            var focused = FocusManager?.GetFocusedElement();
+            // Async loading must not take focus back from a control the user moved to.
+            if (focused is null || ReferenceEquals(focused, this)
+                || ReferenceEquals(focused, previouslyFocused) || ReferenceEquals(focused, tab.Item))
+                editor.TextArea.Focus();
+        }, DispatcherPriority.Loaded);
     }
 
     private void SelectText(WorkTab tab, int offset, int count)

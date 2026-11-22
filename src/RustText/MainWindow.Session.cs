@@ -160,7 +160,7 @@ public partial class MainWindow
         _pendingSession = null;
 
         if (SelectedIn(_active) is { } selected)
-            await GuardAsync(() => ActivateDeferredAsync(selected));
+            await GuardAsync(() => OpenDeferredTabAsync(selected));
 
         RefreshHistoryMenus();
     }
@@ -656,14 +656,18 @@ public partial class MainWindow
 
     private Control DeferredContent(WorkTab tab) => tab.CheckingSession
         ? new TextBlock { Text = "Проверка сохранённой вкладки…", Margin = new Thickness(18) }
-        : FocusButton(Button("Загрузить вкладку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
+        : FocusButton(Button("Загрузить вкладку", () => Run(() => OpenDeferredTabAsync(tab))), primary: true);
 
-    private Task ActivateDeferredAsync(WorkTab tab) => ActivateDeferredCoreAsync(tab, allowDuringWorkspaceSwitch: false);
+    private Task ActivateDeferredAsync(WorkTab tab) =>
+        ActivateDeferredCoreAsync(tab, allowDuringWorkspaceSwitch: false, focusEditor: false);
+
+    private Task OpenDeferredTabAsync(WorkTab tab) =>
+        ActivateDeferredCoreAsync(tab, allowDuringWorkspaceSwitch: false, focusEditor: true);
 
     private Task ActivateDeferredDuringWorkspaceSwitchAsync(WorkTab tab) =>
-        ActivateDeferredCoreAsync(tab, allowDuringWorkspaceSwitch: true);
+        ActivateDeferredCoreAsync(tab, allowDuringWorkspaceSwitch: true, focusEditor: true);
 
-    private async Task ActivateDeferredCoreAsync(WorkTab tab, bool allowDuringWorkspaceSwitch)
+    private async Task ActivateDeferredCoreAsync(WorkTab tab, bool allowDuringWorkspaceSwitch, bool focusEditor)
     {
         if ((_workspaceSwitchPending && !allowDuringWorkspaceSwitch)
             || tab.Closing || tab.Deferred is not { } saved || tab.Loading || tab.CheckingSession || _closed)
@@ -678,6 +682,7 @@ public partial class MainWindow
             return;
         }
 
+        var focus = focusEditor ? CaptureEditorFocusRequest() : null;
         var storage = SessionStorage;
         var workspaceId = _workspaceId;
         var tabs = _tabs;
@@ -773,12 +778,13 @@ public partial class MainWindow
 
             tab.Deferred = null;
             UpdateTab(tab);
+            focus?.Invoke(tab);
         }
         catch (Exception error)
         {
             if (IsCurrentTab())
             {
-                var retry = FocusButton(Button("Повторить загрузку", () => Run(() => ActivateDeferredAsync(tab))), primary: true);
+                var retry = FocusButton(Button("Повторить загрузку", () => Run(() => OpenDeferredTabAsync(tab))), primary: true);
                 if (saved.Path is { } missing && error is FileNotFoundException or DirectoryNotFoundException)
                 {
                     tab.DiskStatus = $"Файл не найден. {missing}";
@@ -977,6 +983,7 @@ public partial class MainWindow
 
     private async Task RestoreClosedCoreAsync(SessionTab saved)
     {
+        var focusEditor = CaptureEditorFocusRequest();
         if (saved is { Path: { } path, DraftRef: null })
         {
             var isLog = saved.Log is not null || saved.LogOffset is not null;
@@ -1012,6 +1019,7 @@ public partial class MainWindow
                 if (_tabs.ContainsKey(existing.Id))
                 {
                     Select(existing);
+                    focusEditor(existing);
                     RemoveClosedEntry(saved);
                 }
                 return;
@@ -1021,6 +1029,7 @@ public partial class MainWindow
         if (_tabs.TryGetValue(saved.Id, out var sameTab))
         {
             Select(sameTab);
+            focusEditor(sameTab);
             return;
         }
 
@@ -1028,7 +1037,7 @@ public partial class MainWindow
         SetDeferred(tab, saved);
         try
         {
-            await ActivateDeferredAsync(tab);
+            await OpenDeferredTabAsync(tab);
             RemoveClosedEntry(saved);
         }
         catch
@@ -1092,37 +1101,37 @@ public partial class MainWindow
         var encoding = entry.Log is { } bookmark ? bookmark.Encoding : entry.Encoding;
         var tab = entry.Log?.EditPages == true
             ? await OpenSinglePathAsync(entry.Path, asLog: false, encoding, editPages: true)
-            : await OpenPathAsync(entry.Path, entry.ViewAsLog, encoding);
-        if (tab is not null && _tabs.TryGetValue(tab.Id, out var current) && ReferenceEquals(current, tab))
+            : await OpenSinglePathCoreAsync(entry.Path, entry.ViewAsLog, encoding, editPages: false, RestoreRecentEditor);
+        if (tab?.Log is { } paged && _tabs.TryGetValue(tab.Id, out var current) && ReferenceEquals(current, tab))
         {
-            if (tab.Log is { } paged)
+            if (paged.HasPendingEdit || tab.Recovery is not null || entry.Log is null && entry.LogOffset is null) return;
+            var log = (entry.Log ?? new LogTabState(entry.Encoding, entry.LogOffset ?? 0)) with
             {
-                if (paged.HasPendingEdit || tab.Recovery is not null || entry.Log is null && entry.LogOffset is null) return;
-                var log = (entry.Log ?? new LogTabState(entry.Encoding, entry.LogOffset ?? 0)) with
-                {
-                    WordWrap = _wordWrap,
-                    EditPages = paged.EditsPagesByDefault
-                };
-                AttachLog(tab, entry.Path, encoding, log);
-                if (paged.EditsPagesByDefault) RestorePagedEditorCaret(tab, tab.Log!, null, focus: true);
-            }
-            else if (tab.Editor is not null)
+                WordWrap = _wordWrap,
+                EditPages = paged.EditsPagesByDefault
+            };
+            AttachLog(tab, entry.Path, encoding, log);
+            if (paged.EditsPagesByDefault) RestorePagedEditorCaret(tab, tab.Log!, null, focus: true);
+        }
+
+        void RestoreRecentEditor(WorkTab opened)
+        {
+            if (opened.Editor is null || !_tabs.TryGetValue(opened.Id, out var current) || !ReferenceEquals(current, opened))
+                return;
+            opened.JsonDisabled = entry.JsonValidationDisabled;
+            ScheduleJsonValidation(opened);
+            RestoreEditorView(opened, new SessionTab(
+                opened.Id,
+                entry.Path,
+                entry.Encoding ?? opened.Encoding,
+                entry.SelectionStart,
+                entry.SelectionLength,
+                entry.Reversed,
+                entry.ScrollX,
+                entry.ScrollY)
             {
-                tab.JsonDisabled = entry.JsonValidationDisabled;
-                ScheduleJsonValidation(tab);
-                RestoreEditorView(tab, new SessionTab(
-                    tab.Id,
-                    entry.Path,
-                    entry.Encoding ?? tab.Encoding,
-                    entry.SelectionStart,
-                    entry.SelectionLength,
-                    entry.Reversed,
-                    entry.ScrollX,
-                    entry.ScrollY)
-                {
-                    SelectionUsesUtf8 = entry.SelectionUsesUtf8
-                });
-            }
+                SelectionUsesUtf8 = entry.SelectionUsesUtf8
+            });
         }
     }
 

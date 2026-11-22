@@ -388,6 +388,7 @@ public sealed class SessionTests
             Assert.True(GetProperty<bool>(tab, "JsonDisabled"));
             await HeadlessTests.WaitForAsync(() => editor.VerticalOffset > 0);
             Assert.True(editor.VerticalOffset > 0);
+            Assert.True(editor.TextArea.IsFocused);
             window.Close();
             await HeadlessTests.WaitForAsync(() => GetField<bool>(window, "_closed"));
             await HeadlessTests.WaitForAsync(() => !window.IsVisible);
