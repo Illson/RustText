@@ -456,27 +456,31 @@ public sealed class LogUiTests
 
             var firstPage = filtered.Text;
             window.MouseWheel(point, new Vector(0, -1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text != firstPage);
+            await WaitForPageChangeAsync(firstPage);
             var secondPage = filtered.Text;
             Assert.True(FirstRowNumber(secondPage) > FirstRowNumber(firstPage));
 
             window.MouseWheel(point, new Vector(0, -1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text != secondPage);
+            await WaitForPageChangeAsync(secondPage);
             var thirdPage = filtered.Text;
             Assert.True(FirstRowNumber(thirdPage) > FirstRowNumber(secondPage));
 
             window.MouseWheel(point, new Vector(0, 1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text != thirdPage);
+            await WaitForPageChangeAsync(thirdPage);
             Assert.True(FirstRowNumber(filtered.Text) < FirstRowNumber(thirdPage));
 
             var beforeClick = filtered.Text;
             window.MouseDown(point, MouseButton.Left);
             window.MouseUp(point, MouseButton.Left);
-            await HeadlessTests.WaitForAsync(() => filtered.Text != beforeClick);
+            await WaitForPageChangeAsync(beforeClick);
             var afterClick = filtered.Text;
             window.MouseWheel(point, new Vector(0, -1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text != afterClick);
+            await WaitForPageChangeAsync(afterClick);
             Assert.True(FirstRowNumber(filtered.Text) > FirstRowNumber(afterClick));
+
+            // The filtered viewport clears its text while reading a new page.
+            Task WaitForPageChangeAsync(string? previous) => HeadlessTests.WaitForAsync(() =>
+                filtered.Text is { Length: > 0 } current && current != previous);
         }
         finally { await CloseLogAsync(window, log); }
     });
