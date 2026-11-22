@@ -67,6 +67,28 @@ public sealed class LockedFileInspectionTests
     }
 
     [Fact]
+    public async Task DoesNotOfferToCloseAShareDeleteReaderWhenRustTextHasTheBlockingHandle()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "reader.txt");
+        await File.WriteAllTextAsync(path, "test fixture");
+        using var testLock = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        await using var sharingReader = await TestLockOwner.StartAsync(path, timeout.Token, shareDelete: true);
+        var target = LockedFileInspection.Select(path);
+        var blocked = Assert.Single(LockedFileInspection.Inspect(target, timeout.Token));
+        Assert.Contains(Environment.ProcessId, blocked.ProcessIds);
+        Assert.Contains(sharingReader.Process.Id, blocked.ProcessIds);
+        var owners = FileLockProcesses.Describe([blocked]);
+        Assert.Contains(owners, owner => owner.Id == sharingReader.Process.Id && !owner.CanClose);
+        Assert.DoesNotContain(owners, owner => owner.CanClose);
+
+        testLock.Dispose();
+        Assert.Empty(LockedFileInspection.Inspect(target, timeout.Token));
+        Assert.False(sharingReader.Process.HasExited);
+    }
+
+    [Fact]
     public void RejectsReplacementAtTheSamePathAndRootOrStreamTargets()
     {
         using var temp = new TempDirectory();
@@ -90,7 +112,7 @@ internal sealed class TestLockOwner(Process process, TempDirectory communication
 {
     public Process Process { get; } = process;
 
-    public static async Task<TestLockOwner> StartAsync(string path, CancellationToken token)
+    public static async Task<TestLockOwner> StartAsync(string path, CancellationToken token, bool shareDelete = false)
     {
         var communication = new TempDirectory();
         TestLockOwner? owner = null;
@@ -105,7 +127,7 @@ internal sealed class TestLockOwner(Process process, TempDirectory communication
             foreach (var argument in new[]
             {
                 "exec", "--runtimeconfig", Path.Combine(AppContext.BaseDirectory, "RustText.Tests.runtimeconfig.json"),
-                typeof(LockFixture.Program).Assembly.Location, path, ready, Path.Combine(communication.Path, "stop")
+                typeof(LockFixture.Program).Assembly.Location, path, ready, Path.Combine(communication.Path, "stop"), shareDelete.ToString()
             })
                 setup.ArgumentList.Add(argument);
 
@@ -147,6 +169,31 @@ internal sealed class TestLockOwner(Process process, TempDirectory communication
 public sealed class RecycleDialogTests
 {
     [Fact]
+    public Task RefusesWorkspaceDataBeforeOfferingDeletion() => HeadlessTests.RunAsync(async profile =>
+    {
+        var draftDirectory = Directory.CreateDirectory(Path.Combine(profile, "workspaces", "fixture", "windows", "primary",
+            "dotnet-demo", "drafts")).FullName;
+        var draft = Path.Combine(draftDirectory, "untitled.txt");
+        await File.WriteAllTextAsync(draft, "private draft");
+        var window = new MainWindow([]);
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished"));
+            await Assert.ThrowsAsync<IOException>(() => window.RecyclePathAsync(draftDirectory));
+            await Assert.ThrowsAsync<IOException>(() => window.RecyclePathAsync(draft));
+            Assert.Empty(window.OwnedWindows);
+            Assert.Equal("private draft", await File.ReadAllTextAsync(draft));
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            window.Close();
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_closed"));
+        }
+    });
+
+    [Fact]
     public Task CancellingTheSecondConfirmationDoesNotKillTheLockOwnerOrStartDeletion() =>
         HeadlessTests.RunAsync(async _ =>
         {
@@ -160,7 +207,7 @@ public sealed class RecycleDialogTests
             window.Show();
             try
             {
-                await HeadlessTests.WaitForAsync(() => ReadFlag("_restoreFinished"));
+                await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished"));
                 var remove = window.RecyclePathAsync(path);
                 Click(await FindDialogAsync("Удалить с диска?"), "Удалить");
                 var blocked = await FindDialogAsync("Объект занят");
@@ -179,12 +226,9 @@ public sealed class RecycleDialogTests
                 foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
                 window.Close();
                 await fixture.ReleaseAsync();
-                await HeadlessTests.WaitForAsync(() => ReadFlag("_closed"));
+                await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_closed"));
             }
             Assert.Equal("fixture", await File.ReadAllTextAsync(path));
-
-            bool ReadFlag(string name) => (bool)typeof(MainWindow).GetField(name, System.Reflection.BindingFlags.Instance
-                | System.Reflection.BindingFlags.NonPublic)!.GetValue(window)!;
 
             async Task<Window> FindDialogAsync(string title)
             {
@@ -198,4 +242,7 @@ public sealed class RecycleDialogTests
                 Assert.Single(dialog.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, label))
                     .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         });
+
+    private static bool ReadFlag(MainWindow window, string name) => (bool)typeof(MainWindow)
+        .GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(window)!;
 }

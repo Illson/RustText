@@ -136,7 +136,7 @@ public partial class MainWindow
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            _storage.RootDirectory
+            _storage.ProfileBaseDirectory
         };
         if (protectedPaths.Any(path => !string.IsNullOrWhiteSpace(path)
                 && (LockedFileInspection.ContainsPath(path, target.Path) || LockedFileInspection.ContainsPath(target.Path, path)))

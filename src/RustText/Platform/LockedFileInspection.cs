@@ -91,8 +91,13 @@ internal static class LockedFileInspection
             if (error is not (SharingViolation or LockViolation))
                 throw NativeError(path, error);
             var owners = FindProcessIds(path);
-            // The query itself opens a handle in RustText. Do not offer to close our own process.
-            blocked.Add(new BlockedItem(path, owners.Where(id => id != Environment.ProcessId).ToArray()));
+            // Keep our own PID in the evidence: otherwise a second reader can look like the sole blocker.
+            // FileLockProcesses excludes RustText itself from the processes that may be closed.
+            using var recheck = Open(path, DeleteAccess);
+            if (!recheck.IsInvalid) return;
+            var remainingError = Marshal.GetLastPInvokeError();
+            if (remainingError is not (SharingViolation or LockViolation)) throw NativeError(path, remainingError);
+            blocked.Add(new BlockedItem(path, owners));
         }
     }
 
