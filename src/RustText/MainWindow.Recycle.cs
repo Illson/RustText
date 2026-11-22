@@ -42,7 +42,7 @@ public partial class MainWindow
         var (blocked, owners) = await ScanAsync();
         if (blocked.Count != 0)
         {
-            if (!owners.Any(owner => owner.CanClose))
+            if (!CanReleaseAll())
             {
                 await ShowStillBlockedAsync();
                 return;
@@ -53,11 +53,16 @@ public partial class MainWindow
 
             EnsureCanRecycle(target);
             var graceful = owners.ToHashSet();
-            var (_, current) = await ScanAsync();
+            (blocked, owners) = await ScanAsync();
             EnsureCanRecycle(target);
-            await Task.Run(() => FileLockProcesses.RequestClose(current.Where(graceful.Contains), token), token);
+            if (!CanReleaseAll(graceful))
+            {
+                await ShowStillBlockedAsync();
+                return;
+            }
+            await Task.Run(() => FileLockProcesses.RequestClose(owners, token), token);
             (blocked, owners) = await WaitForLocksAsync();
-            if (blocked.Count != 0 && owners.Any(owner => owner.CanClose))
+            if (blocked.Count != 0 && CanReleaseAll(graceful))
             {
                 if (!await ConfirmRecycleAsync("Принудительное завершение", target.Path,
                     $"{Describe()}\n\nПринудительное завершение может уничтожить несохранённые данные в этих приложениях.",
@@ -65,9 +70,14 @@ public partial class MainWindow
 
                 EnsureCanRecycle(target);
                 var approved = owners.ToHashSet();
-                (_, current) = await ScanAsync();
+                (blocked, owners) = await ScanAsync();
                 EnsureCanRecycle(target);
-                await Task.Run(() => FileLockProcesses.ForceClose(current.Where(approved.Contains), token), token);
+                if (!CanReleaseAll(approved))
+                {
+                    await ShowStillBlockedAsync();
+                    return;
+                }
+                await Task.Run(() => FileLockProcesses.ForceClose(owners, token), token);
                 (blocked, owners) = await WaitForLocksAsync();
             }
             if (blocked.Count != 0)
@@ -112,6 +122,13 @@ public partial class MainWindow
                 result = await ScanAsync();
             }
             return result;
+        }
+
+        bool CanReleaseAll(HashSet<FileLockProcesses.Owner>? approved = null)
+        {
+            var eligible = owners.Where(owner => owner.CanClose && (approved is null || approved.Contains(owner)))
+                .Select(owner => owner.Id).ToHashSet();
+            return blocked.All(item => item.ProcessIds.Count == 1 && eligible.Contains(item.ProcessIds[0]));
         }
 
         string Describe()
