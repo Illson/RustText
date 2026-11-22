@@ -363,6 +363,30 @@ public sealed class VersionTests
         }
     });
 
+    [Theory]
+    [InlineData(3, true)]
+    [InlineData(7, false)]
+    public Task RetypingNewlineChecksMixedLineEndingBytes(int offset, bool dirty) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "mixed-retype.txt");
+        await File.WriteAllTextAsync(path, "one\r\ntwo\nthree");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Remove(offset, 1);
+            editor.Document.Insert(offset, "\n");
+            Assert.Equal("one\ntwo\nthree", editor.Text);
+            Assert.Equal(dirty, Read<bool>(tab, "Dirty"));
+
+            editor.Undo();
+            editor.Undo();
+            Assert.False(Read<bool>(tab, "Dirty"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
     [Fact]
     public Task MixedEndings_ReplaceDeleteInsertAndUndoRedoPreserveDelimiterBytes() => HeadlessTests.RunAsync(async profilePath =>
     {

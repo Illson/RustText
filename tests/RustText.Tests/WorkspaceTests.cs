@@ -1758,6 +1758,68 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task RetypingDeletedCharacterRestoresCleanTabAndPreservesUndo() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string original = "до Ж после";
+        const int offset = 3;
+        var path = Path.Combine(profile, "retype.txt");
+        await File.WriteAllTextAsync(path, original);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.TextArea.Focus();
+            editor.Document.Remove(offset, 1);
+            Assert.True(Read<bool>(tab, "Dirty"));
+            editor.CaretOffset = offset;
+            window.KeyTextInput("Ж");
+            Assert.Equal(original, editor.Text);
+            Assert.False(Read<bool>(tab, "Dirty"));
+
+            editor.Undo();
+            Assert.Equal("до  после", editor.Text);
+            Assert.True(Read<bool>(tab, "Dirty"));
+            editor.Undo();
+            Assert.Equal(original, editor.Text);
+            Assert.False(Read<bool>(tab, "Dirty"));
+            editor.Redo();
+            Assert.True(Read<bool>(tab, "Dirty"));
+            editor.Redo();
+            Assert.False(Read<bool>(tab, "Dirty"));
+
+            await CallAsync(window, "CloseTabAsync", tab);
+            Assert.Empty(window.OwnedWindows);
+            Assert.Empty(Tabs(window));
+            Assert.Equal(original, await File.ReadAllTextAsync(path));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task RetypingUsesTheMostRecentlySavedText() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "saved-retype.txt");
+        await File.WriteAllTextAsync(path, "old");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var tab = ActiveTab(window);
+            var editor = Read<TextEditor>(tab, "Editor");
+            editor.Document.Replace(0, 3, "new");
+            await CallAsync(window, "SaveAsync", false);
+            Assert.Equal("new", await File.ReadAllTextAsync(path));
+            Assert.False(Read<bool>(tab, "Dirty"));
+
+            editor.Document.Replace(0, 3, "old");
+            Assert.True(Read<bool>(tab, "Dirty"));
+            editor.Document.Replace(0, 3, "new");
+            Assert.False(Read<bool>(tab, "Dirty"));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task RepeatedClipboardPasteKeepsFocusAndAdvancesTheCaret() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "paste.txt");
@@ -3707,6 +3769,13 @@ public sealed class WorkspaceTests
             Assert.False(Read<bool>(firstTab, "Dirty"));
             Assert.False(Read<bool>(secondTab, "Dirty"));
             Assert.Equal(Property(firstTab, "Stamp"), Property(secondTab, "Stamp"));
+
+            originalEditor.Document.Remove(0, 1);
+            Assert.True(Read<bool>(firstTab, "Dirty"));
+            Assert.True(Read<bool>(secondTab, "Dirty"));
+            secondEditor.Document.Insert(0, "s");
+            Assert.False(Read<bool>(firstTab, "Dirty"));
+            Assert.False(Read<bool>(secondTab, "Dirty"));
 
             originalEditor.Document.Insert(0, "new ");
             await File.WriteAllTextAsync(path, "external");

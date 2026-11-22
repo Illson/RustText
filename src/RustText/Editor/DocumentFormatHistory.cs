@@ -11,15 +11,18 @@ internal sealed record EditorFileFormat(TextEncodingKind Encoding, LineEndingKin
         new(encoding, ending, ending == LineEndingKind.Mixed ? endings?.ToImmutableList() ?? [] : null);
 }
 
-// One format and undo history belong to the document, including when several tabs share it.
+// The format and saved state belong to the document, including when several tabs share it.
 internal sealed class DocumentFormatHistory
 {
     private static readonly ConditionalWeakTable<TextDocument, DocumentFormatHistory> Histories = new();
     private readonly TextDocument _document;
+    private DocumentSavePoint? _savePoint;
     private bool _restoringFormat;
     private (int First, int Removed, int OldLineCount)? _pending;
     public EditorFileFormat Current { get; private set; }
+    public bool? IsSaved { get; private set; }
     public event Action<EditorFileFormat>? Changed;
+    public event Action? SavedStateChanged;
 
     public static DocumentFormatHistory For(TextDocument document, EditorFileFormat initial) =>
         Histories.GetValue(document, key => new(key, initial));
@@ -41,6 +44,7 @@ internal sealed class DocumentFormatHistory
 
     private void BeforeTextChange(object? sender, DocumentChangeEventArgs e)
     {
+        _savePoint?.OnTextChanging(_document.TextLength, e);
         if (_restoringFormat || Current.MixedEndings is null || !_document.UndoStack.AcceptChanges) return;
         var offset = e.Offset;
         var oldEnd = offset + e.RemovalLength;
@@ -85,6 +89,27 @@ internal sealed class DocumentFormatHistory
         finally { _restoringFormat = false; }
     }
 
+    public void MarkSaved(EditorFileFormat format) =>
+        MarkSaved(_document.CreateSnapshot(0, _document.TextLength), format, textIsCurrent: true);
+
+    public void MarkSaved(ITextSource text, EditorFileFormat format, bool textIsCurrent)
+    {
+        if (_savePoint is null) _document.UpdateFinished += AfterDocumentUpdate;
+        _savePoint = new DocumentSavePoint(text, format, textIsCurrent);
+        UpdateSavedState();
+    }
+
+    private void AfterDocumentUpdate(object? sender, EventArgs e) => UpdateSavedState();
+
+    private void UpdateSavedState()
+    {
+        if (_savePoint is not { } savePoint) return;
+        var saved = savePoint.Matches(_document, Current);
+        if (saved == IsSaved) return;
+        IsSaved = saved;
+        SavedStateChanged?.Invoke();
+    }
+
     private void SetUndoable(EditorFileFormat format)
     {
         if (Current == format) return;
@@ -96,6 +121,7 @@ internal sealed class DocumentFormatHistory
     {
         Current = format;
         Changed?.Invoke(format);
+        if (!_document.IsInUpdate) UpdateSavedState();
     }
 
     private sealed class FormatChange(DocumentFormatHistory owner, EditorFileFormat before, EditorFileFormat after) : IUndoableOperation

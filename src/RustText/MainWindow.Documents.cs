@@ -282,6 +282,8 @@ public partial class MainWindow
         tab.DiskStatus = null;
         tab.DiskEncoding = loaded.Encoding;
         tab.Format = EditorFileFormat.From(loaded.Encoding, loaded.LineEnding, loaded.OriginalLineEndings);
+        var history = DocumentFormatHistory.For(document, tab.Format);
+        if (history.IsSaved is null) history.MarkSaved(history.Current);
         document.UndoStack.MarkAsOriginalFile();
         AttachEditor(tab, document, resetDirtyState: true);
     }
@@ -409,13 +411,19 @@ public partial class MainWindow
         Grid.SetColumn(minimapDock, 1);
         grid.Children.Add(minimapDock);
         tab.Item.Content = grid;
+        void UpdateDirtyState()
+        {
+            if (!ReferenceEquals(tab.Editor, editor)) return;
+            var original = tab.Path is not null ? formatHistory.IsSaved ?? undoStack.IsOriginalFile : undoStack.IsOriginalFile;
+            var dirty = tab.RestoredDirty || !original;
+            if (dirty == tab.Dirty) return;
+            tab.Dirty = dirty;
+            UpdateTab(tab);
+        }
+        formatHistory.SavedStateChanged += UpdateDirtyState;
         System.ComponentModel.PropertyChangedEventHandler undoHandler = (_, e) =>
         {
-            if (e.PropertyName == nameof(undoStack.IsOriginalFile) && ReferenceEquals(tab.Editor, editor))
-            {
-                tab.Dirty = tab.RestoredDirty || !undoStack.IsOriginalFile;
-                UpdateTab(tab);
-            }
+            if (e.PropertyName == nameof(undoStack.IsOriginalFile)) UpdateDirtyState();
         };
         undoStack.PropertyChanged += undoHandler;
         EventHandler textChangedHandler = (_, _) =>
@@ -476,6 +484,7 @@ public partial class MainWindow
         [
             () => FocusTheme.ThemeChanged -= redrawForTheme,
             () => formatHistory.Changed -= FormatChanged,
+            () => formatHistory.SavedStateChanged -= UpdateDirtyState,
             () => undoStack.PropertyChanged -= undoHandler,
             () => editor.TextChanged -= textChangedHandler,
             () => editor.TextArea.Caret.PositionChanged -= caretHandler,
@@ -842,6 +851,7 @@ public partial class MainWindow
             throw new IOException("Этот файл уже открыт в другой вкладке.");
         }
 
+        var savedText = editor.Document.CreateSnapshot(0, editor.Document.TextLength);
         var text = editor.Text;
         var revision = tab.Revision;
         var format = tab.Format;
@@ -875,15 +885,19 @@ public partial class MainWindow
         }
         tab.LastWorked = DateTimeOffset.Now;
         var savedViews = changedPath ? [(this, tab)] : views;
+        var history = DocumentFormatHistory.For(editor.Document, tab.Format);
+        var textIsCurrent = tab.Revision == revision;
+        history.MarkSaved(savedText, format, textIsCurrent);
         foreach (var (owner, savedTab) in savedViews)
         {
             savedTab.Stamp = stamp;
             savedTab.DiskEncoding = format.Encoding;
             savedTab.DiskStatus = null;
-            if (tab.Revision == revision) savedTab.RestoredDirty = savedTab.Dirty = false;
+            savedTab.RestoredDirty = false;
+            savedTab.Dirty = history.IsSaved != true;
             owner.UpdateTab(savedTab);
         }
-        if (tab.Revision == revision) editor.Document.UndoStack.MarkAsOriginalFile();
+        if (textIsCurrent) editor.Document.UndoStack.MarkAsOriginalFile();
         await RecordRecentAsync(tab);
         var postSaveVersionWarning = await CaptureVersionAsync(path, format.Encoding, stamp);
         var versionWarning = preSaveVersionWarning ?? postSaveVersionWarning;
