@@ -35,6 +35,7 @@ public partial class MainWindow
 
     private void NewTab(string text = "")
     {
+        var focusEditor = CaptureEditorFocusRequest();
         var tab = AddTab();
         AttachEditor(tab, text);
         if (text.Length > 0)
@@ -44,7 +45,7 @@ public partial class MainWindow
         }
 
         TrackDetachedDraft(tab);
-        tab.Editor?.Focus();
+        focusEditor(tab);
     }
 
     private async Task OpenDialogAsync(bool asLog = false, TextEncodingKind? encoding = null)
@@ -85,20 +86,32 @@ public partial class MainWindow
             catch (Exception error) when (IsUserError(error)) { SetStatus(error.Message); }
         }
         if (last is null) return;
+        var focusEditor = CaptureEditorFocusRequest();
         Select(last);
+        if (last.Editor is not null && (encoding is null || last.Dirty))
+            focusEditor(last);
         await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
         foreach (var request in pending)
-            await GuardAsync(() => LoadOpenRequestAsync(request, encoding));
+            await GuardAsync(() => LoadOpenRequestAsync(request, encoding, ReferenceEquals(request.Tab, last) ? focusEditor : null));
     }
 
     private Task<WorkTab?> OpenPathAsync(string path, bool asLog = false, TextEncodingKind? encoding = null) =>
         OpenSinglePathAsync(path, asLog, encoding, editPages: false);
 
-    private async Task<WorkTab?> OpenSinglePathAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages)
+    private Task<WorkTab?> OpenSinglePathAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages) =>
+        OpenSinglePathCoreAsync(path, asLog, encoding, editPages, initializeEditor: null);
+
+    private async Task<WorkTab?> OpenSinglePathCoreAsync(string path, bool asLog, TextEncodingKind? encoding, bool editPages,
+        Action<WorkTab>? initializeEditor)
     {
         if (await PrepareOpenAsync(path, asLog, encoding, editPages) is not { } request) return null;
+        var focusEditor = CaptureEditorFocusRequest();
         Select(request.Tab);
-        await LoadOpenRequestAsync(request, encoding);
+        await LoadOpenRequestAsync(request, encoding, tab =>
+        {
+            initializeEditor?.Invoke(tab);
+            focusEditor(tab);
+        });
         return request.Tab;
     }
 
@@ -191,7 +204,7 @@ public partial class MainWindow
         return useLog;
     }
 
-    private async Task LoadOpenRequestAsync(OpenRequest request, TextEncodingKind? encoding)
+    private async Task LoadOpenRequestAsync(OpenRequest request, TextEncodingKind? encoding, Action<WorkTab>? onEditorReady)
     {
         var tab = request.Tab;
         if (_closed || !_tabs.TryGetValue(tab.Id, out var current) || !ReferenceEquals(tab, current)) return;
@@ -199,6 +212,7 @@ public partial class MainWindow
         {
             if (encoding is not null && !tab.Loading && !tab.Dirty)
                 await ReloadAsync(tab, encoding);
+            onEditorReady?.Invoke(tab);
             return;
         }
         try
@@ -213,6 +227,7 @@ public partial class MainWindow
             else
             {
                 await LoadFileAsync(tab, encoding);
+                onEditorReady?.Invoke(tab);
             }
 
             await RecordRecentAsync(tab);
@@ -267,6 +282,8 @@ public partial class MainWindow
         tab.DiskStatus = null;
         tab.DiskEncoding = loaded.Encoding;
         tab.Format = EditorFileFormat.From(loaded.Encoding, loaded.LineEnding, loaded.OriginalLineEndings);
+        var history = DocumentFormatHistory.For(document, tab.Format);
+        if (history.IsSaved is null) history.MarkSaved(history.Current);
         document.UndoStack.MarkAsOriginalFile();
         AttachEditor(tab, document, resetDirtyState: true);
     }
@@ -394,13 +411,19 @@ public partial class MainWindow
         Grid.SetColumn(minimapDock, 1);
         grid.Children.Add(minimapDock);
         tab.Item.Content = grid;
+        void UpdateDirtyState()
+        {
+            if (!ReferenceEquals(tab.Editor, editor)) return;
+            var original = tab.Path is not null ? formatHistory.IsSaved ?? undoStack.IsOriginalFile : undoStack.IsOriginalFile;
+            var dirty = tab.RestoredDirty || !original;
+            if (dirty == tab.Dirty) return;
+            tab.Dirty = dirty;
+            UpdateTab(tab);
+        }
+        formatHistory.SavedStateChanged += UpdateDirtyState;
         System.ComponentModel.PropertyChangedEventHandler undoHandler = (_, e) =>
         {
-            if (e.PropertyName == nameof(undoStack.IsOriginalFile) && ReferenceEquals(tab.Editor, editor))
-            {
-                tab.Dirty = tab.RestoredDirty || !undoStack.IsOriginalFile;
-                UpdateTab(tab);
-            }
+            if (e.PropertyName == nameof(undoStack.IsOriginalFile)) UpdateDirtyState();
         };
         undoStack.PropertyChanged += undoHandler;
         EventHandler textChangedHandler = (_, _) =>
@@ -434,7 +457,7 @@ public partial class MainWindow
         {
             var normalized = NormalizePaste(editor, text);
             if (multiCaret.IsActive) multiCaret.Paste(normalized);
-            else editor.TextArea.PerformTextInput(normalized);
+            else EditorClipboard.PasteText(editor, normalized);
         }, Run);
         void CutLineKeyDown(object? sender, KeyEventArgs e)
         {
@@ -461,6 +484,7 @@ public partial class MainWindow
         [
             () => FocusTheme.ThemeChanged -= redrawForTheme,
             () => formatHistory.Changed -= FormatChanged,
+            () => formatHistory.SavedStateChanged -= UpdateDirtyState,
             () => undoStack.PropertyChanged -= undoHandler,
             () => editor.TextChanged -= textChangedHandler,
             () => editor.TextArea.Caret.PositionChanged -= caretHandler,
@@ -827,6 +851,7 @@ public partial class MainWindow
             throw new IOException("Этот файл уже открыт в другой вкладке.");
         }
 
+        var savedText = editor.Document.CreateSnapshot(0, editor.Document.TextLength);
         var text = editor.Text;
         var revision = tab.Revision;
         var format = tab.Format;
@@ -860,15 +885,19 @@ public partial class MainWindow
         }
         tab.LastWorked = DateTimeOffset.Now;
         var savedViews = changedPath ? [(this, tab)] : views;
+        var history = DocumentFormatHistory.For(editor.Document, tab.Format);
+        var textIsCurrent = tab.Revision == revision;
+        history.MarkSaved(savedText, format, textIsCurrent);
         foreach (var (owner, savedTab) in savedViews)
         {
             savedTab.Stamp = stamp;
             savedTab.DiskEncoding = format.Encoding;
             savedTab.DiskStatus = null;
-            if (tab.Revision == revision) savedTab.RestoredDirty = savedTab.Dirty = false;
+            savedTab.RestoredDirty = false;
+            savedTab.Dirty = history.IsSaved != true;
             owner.UpdateTab(savedTab);
         }
-        if (tab.Revision == revision) editor.Document.UndoStack.MarkAsOriginalFile();
+        if (textIsCurrent) editor.Document.UndoStack.MarkAsOriginalFile();
         await RecordRecentAsync(tab);
         var postSaveVersionWarning = await CaptureVersionAsync(path, format.Encoding, stamp);
         var versionWarning = preSaveVersionWarning ?? postSaveVersionWarning;
@@ -1105,6 +1134,28 @@ public partial class MainWindow
         _active = tab.Group;
         tab.Group.Tabs.SelectedItem = tab.Item;
         ActivateTab(tab);
+    }
+
+    private Action<WorkTab> CaptureEditorFocusRequest()
+    {
+        var previouslyFocused = FocusManager?.GetFocusedElement();
+        return tab => QueueEditorFocus(tab, previouslyFocused);
+    }
+
+    private void QueueEditorFocus(WorkTab tab, IInputElement? previouslyFocused)
+    {
+        if (tab.Editor is not { } editor) return;
+        // Let the selected tab's content attach before focusing its text area.
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_closing || _closed || !IsActive || tab.Closing || !ReferenceEquals(tab, ActiveTab)
+                || !ReferenceEquals(tab.Editor, editor) || !editor.IsEffectivelyVisible) return;
+            var focused = FocusManager?.GetFocusedElement();
+            // Async loading must not take focus back from a control the user moved to.
+            if (focused is null || ReferenceEquals(focused, this)
+                || ReferenceEquals(focused, previouslyFocused) || ReferenceEquals(focused, tab.Item))
+                editor.TextArea.Focus();
+        }, DispatcherPriority.Loaded);
     }
 
     private void SelectText(WorkTab tab, int offset, int count)

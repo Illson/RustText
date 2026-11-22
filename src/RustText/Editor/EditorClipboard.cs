@@ -4,6 +4,7 @@ using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using AvaloniaEdit;
 using AvaloniaEdit.Document;
+using AvaloniaEdit.Editing;
 
 namespace RustText.Demo.Editor;
 
@@ -44,6 +45,40 @@ internal static class EditorClipboard
             }
             finally { queue.Release(); }
         }
+    }
+
+    internal static void PasteText(TextEditor editor, string text)
+    {
+        var area = editor.TextArea;
+        if (area.Selection is SimpleSelection { EnableVirtualSpace: false, SurroundingSegment: { } segment }
+            && MatchesSelection(editor.Document, segment, text))
+        {
+            area.Caret.Offset = segment.EndOffset;
+            area.ClearSelection();
+            area.Caret.BringCaretToView();
+            return;
+        }
+
+        area.PerformTextInput(text);
+    }
+
+    private static bool MatchesSelection(TextDocument document, ISegment segment, string text)
+    {
+        if (segment.Length != text.Length) return false;
+        if (text.Length <= 256)
+            return document.GetTextAsMemory(segment.Offset, segment.Length).Span.SequenceEqual(text);
+
+        // A selection can cover the entire file; compare without making another full copy.
+        using var reader = document.CreateReader(segment.Offset, segment.Length);
+        var buffer = new char[1024];
+        var remaining = text.AsSpan();
+        while (!remaining.IsEmpty)
+        {
+            var read = reader.Read(buffer, 0, Math.Min(buffer.Length, remaining.Length));
+            if (read == 0 || !remaining[..read].SequenceEqual(buffer.AsSpan(0, read))) return false;
+            remaining = remaining[read..];
+        }
+        return true;
     }
 
     internal static async Task CutLineAsync(TextEditor editor, Func<bool> canCut)
