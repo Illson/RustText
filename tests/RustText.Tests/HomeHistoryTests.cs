@@ -177,6 +177,33 @@ public sealed class HomeHistoryTests
         finally { await CloseAsync(window); }
     });
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public Task ArchivedTitleSuffixRemainsSearchableAfterRestart(bool hasSavedTitle) => HeadlessTests.RunAsync(async profile =>
+    {
+        var title = new string('а', 44) + "ноябрьская заметка";
+        var storage = StorageService.OpenForTesting(profile);
+        await storage.SaveSettingsAsync(new UserSettings(UntitledTabLimit: 70));
+        var draft = await storage.SaveClosedDraftAsync(new SessionTab(52, null, TextEncodingKind.Utf8)
+        {
+            UntitledName = hasSavedTitle ? title : null, ClosedAtMs = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeMilliseconds()
+        }, title + "\nтекст");
+        await storage.SaveSessionAsync(new SessionState([], [draft]));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => HasButton(window, title));
+            await CallAsync(window, "ArchiveClosedDraftsAsync");
+            await CloseAsync(window);
+            window = await OpenWorkspaceAsync();
+            var search = window.GetVisualDescendants().OfType<TextBox>().Single(box => box.PlaceholderText == "Поиск по имени или пути");
+            search.Text = "ноябрьская";
+            await HeadlessTests.WaitForAsync(() => HasButton(window, $"📦 {title} · архив"));
+        }
+        finally { if (window.IsVisible) await CloseAsync(window); }
+    });
+
     [Fact]
     public Task LargeArchiveDoesNotBuildMenuItemsUntilOpeningAndOlderEntriesStaySearchable() => HeadlessTests.RunAsync(async profile =>
     {

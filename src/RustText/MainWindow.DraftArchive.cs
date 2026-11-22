@@ -35,9 +35,15 @@ public partial class MainWindow
             .OrderByDescending(row => row.Archive?.ClosedAtMs ?? row.Tab.ClosedAtMs ?? long.MaxValue);
     }
 
-    private string ArchivedDraftDisplayName(DraftArchiveEntry entry) =>
-        entry.Tab.CustomTitle is { Length: > 0 } title ? title
-            : LimitUntitledHistoryName(string.IsNullOrWhiteSpace(entry.DisplayName) ? entry.Tab.UntitledName : entry.DisplayName.Trim());
+    private string ArchivedDraftDisplayName(DraftArchiveEntry entry)
+    {
+        if (entry.Tab.CustomTitle is { Length: > 0 } title) return title;
+        var saved = entry.Tab.UntitledName?.Trim();
+        var preview = entry.DisplayName?.Trim();
+        // Older archives contain a 40-character preview. Either field may hold the longer title.
+        return LimitUntitledHistoryName(string.IsNullOrEmpty(saved) || preview?.StartsWith(saved, StringComparison.Ordinal) == true
+            ? preview : saved);
+    }
 
     private static SessionTab ArchiveHistoryTab(SessionTab tab)
     {
@@ -99,7 +105,9 @@ public partial class MainWindow
                 var verified = await storage.ResolveCurrentDraftAsync(saved, token);
                 if (verified.DraftSha256 is null || storage.GetDraftPath(verified) is not { } draftPath || !File.Exists(draftPath))
                     continue;
-                await storage.DraftArchive.ArchiveAsync(verified, draftPath, token);
+                var archiveTab = string.IsNullOrWhiteSpace(verified.UntitledName) && string.IsNullOrEmpty(verified.CustomTitle)
+                    ? verified with { UntitledName = ClosedTabDisplayName(verified, storage) } : verified;
+                await storage.DraftArchive.ArchiveAsync(archiveTab, draftPath, token);
                 await SaveHistoryAsync(verified);
                 if (active)
                 {
