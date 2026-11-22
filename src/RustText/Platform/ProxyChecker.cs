@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Text.Json;
 
 namespace RustText.Demo.Platform;
 
@@ -26,7 +27,8 @@ internal sealed record ProxyCheckResult(
     ProxyCheckStatus Status,
     long? ElapsedMilliseconds,
     string Detail,
-    string? CopyValue)
+    string? CopyValue,
+    string? Region = null)
 {
     // CopyValue may contain credentials. Keep it out of diagnostic formatting.
     public override string ToString() => $"{LineNumber}: {Address} ({Status})";
@@ -35,6 +37,8 @@ internal sealed record ProxyCheckResult(
 internal static class ProxyChecker
 {
     public const string ProbeUrl = "https://connectivitycheck.gstatic.com/generate_204";
+    internal const string RegionUrl = "https://ipwho.is/?fields=success,country_code,region";
+    internal const string RegionUnavailable = "Регион не определён";
 
     public static Task CheckAsync(
         string input,
@@ -42,8 +46,10 @@ internal static class ProxyChecker
         TimeSpan timeout,
         int parallelism,
         Action<ProxyCheckResult> report,
-        CancellationToken cancellationToken) =>
-        CheckAsync(input, defaultProtocol, timeout, parallelism, report, cancellationToken, ProbeAsync);
+        CancellationToken cancellationToken,
+        bool lookupRegion = false) =>
+        CheckAsync(input, defaultProtocol, timeout, parallelism, report, cancellationToken,
+            ProbeAsync, lookupRegion ? FindRegionAsync : null);
 
     internal static Task CheckAsync(
         string input,
@@ -52,7 +58,8 @@ internal static class ProxyChecker
         int parallelism,
         Action<ProxyCheckResult> report,
         CancellationToken cancellationToken,
-        Func<Uri, NetworkCredential?, CancellationToken, Task<HttpStatusCode>> probe)
+        Func<Uri, NetworkCredential?, CancellationToken, Task<HttpStatusCode>> probe,
+        Func<Uri, NetworkCredential?, CancellationToken, Task<string?>>? findRegion = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(parallelism);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
@@ -66,7 +73,7 @@ internal static class ProxyChecker
             var proxy = Parse(line.Text, defaultProtocol, out var detail);
             var result = proxy is null
                 ? new ProxyCheckResult(line.Number, $"Строка {line.Number}", null, ProxyCheckStatus.Invalid, null, detail, null)
-                : await CheckProxyAsync(proxy, line.Number, timeout, token, probe).ConfigureAwait(false);
+                : await CheckProxyAsync(proxy, line.Number, timeout, token, probe, findRegion).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             report(result);
         });
@@ -162,19 +169,20 @@ internal static class ProxyChecker
         int lineNumber,
         TimeSpan timeout,
         CancellationToken cancellationToken,
-        Func<Uri, NetworkCredential?, CancellationToken, Task<HttpStatusCode>> probe)
+        Func<Uri, NetworkCredential?, CancellationToken, Task<HttpStatusCode>> probe,
+        Func<Uri, NetworkCredential?, CancellationToken, Task<string?>>? findRegion)
     {
         using var probeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         probeCancellation.CancelAfter(timeout);
         var timer = Stopwatch.StartNew();
+        long elapsed;
 
         try
         {
             var status = await probe(proxy.Uri, proxy.Credentials, probeCancellation.Token).ConfigureAwait(false);
-            return status == HttpStatusCode.NoContent
-                ? new ProxyCheckResult(lineNumber, proxy.Address, proxy.Protocol, ProxyCheckStatus.Working,
-                    timer.ElapsedMilliseconds, string.Empty, proxy.CopyValue)
-                : Failure(ProxyCheckStatus.Failed, $"Ответ проверки: HTTP {(int)status}");
+            if (status != HttpStatusCode.NoContent)
+                return Failure(ProxyCheckStatus.Failed, $"Ответ проверки: HTTP {(int)status}");
+            elapsed = timer.ElapsedMilliseconds;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && probeCancellation.IsCancellationRequested)
         {
@@ -192,23 +200,84 @@ internal static class ProxyChecker
             return Failure(ProxyCheckStatus.Failed, detail);
         }
 
+        var region = findRegion is null ? null :
+            await CheckRegionAsync(proxy, timeout, cancellationToken, findRegion).ConfigureAwait(false);
+        return new ProxyCheckResult(lineNumber, proxy.Address, proxy.Protocol, ProxyCheckStatus.Working,
+            elapsed, string.Empty, proxy.CopyValue, region);
+
         ProxyCheckResult Failure(ProxyCheckStatus status, string detail) =>
             new(lineNumber, proxy.Address, proxy.Protocol, status, null, detail, null);
     }
 
+    private static async Task<string> CheckRegionAsync(ParsedProxy proxy, TimeSpan timeout, CancellationToken cancellationToken,
+        Func<Uri, NetworkCredential?, CancellationToken, Task<string?>> findRegion)
+    {
+        using var lookup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        lookup.CancelAfter(timeout);
+        try
+        {
+            return await findRegion(proxy.Uri, proxy.Credentials, lookup.Token).ConfigureAwait(false) ?? RegionUnavailable;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && lookup.IsCancellationRequested)
+        {
+            return RegionUnavailable;
+        }
+        catch (Exception error) when (error is HttpRequestException or IOException or JsonException)
+        {
+            return RegionUnavailable;
+        }
+    }
+
     private static async Task<HttpStatusCode> ProbeAsync(Uri proxy, NetworkCredential? credentials, CancellationToken token)
     {
-        using var client = new HttpClient(new SocketsHttpHandler
+        using var client = CreateProxyClient(proxy, credentials);
+        using var response = await client.GetAsync(ProbeUrl, HttpCompletionOption.ResponseHeadersRead, token)
+            .ConfigureAwait(false);
+        return response.StatusCode;
+    }
+
+    internal static async Task<string?> FindRegionAsync(Uri proxy, NetworkCredential? credentials, CancellationToken token)
+    {
+        using var client = CreateProxyClient(proxy, credentials);
+        using var response = await client.GetAsync(RegionUrl, HttpCompletionOption.ResponseHeadersRead, token)
+            .ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode) return null;
+
+        // Do not let an unexpected response allocate an unbounded amount of memory.
+        var buffer = new byte[4097];
+        await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+        var size = await stream.ReadAtLeastAsync(buffer, buffer.Length, throwOnEndOfStream: false, cancellationToken: token)
+            .ConfigureAwait(false);
+        return size == buffer.Length ? null : ParseRegion(buffer.AsMemory(0, size));
+    }
+
+    internal static string? ParseRegion(ReadOnlyMemory<byte> body)
+    {
+        using var json = JsonDocument.Parse(body);
+        var root = json.RootElement;
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("success", out var success)
+            || success.ValueKind != JsonValueKind.True
+            || ReadString("country_code") is not { Length: 2 } country || !country.All(char.IsAsciiLetter))
+            return null;
+
+        var region = ReadString("region");
+        return region is { Length: > 0 and <= 80 } && !region.Any(char.IsControl)
+            ? $"{country.ToUpperInvariant()} · {region}"
+            : country.ToUpperInvariant();
+
+        string? ReadString(string property) =>
+            root.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()?.Trim() : null;
+    }
+
+    private static HttpClient CreateProxyClient(Uri proxy, NetworkCredential? credentials) =>
+        new(new SocketsHttpHandler
         {
             Proxy = new WebProxy(proxy) { Credentials = credentials },
             UseProxy = true,
             UseCookies = false,
             AllowAutoRedirect = false
         }) { Timeout = Timeout.InfiniteTimeSpan };
-        using var response = await client.GetAsync(ProbeUrl, HttpCompletionOption.ResponseHeadersRead, token)
-            .ConfigureAwait(false);
-        return response.StatusCode;
-    }
 
     private sealed class ParsedProxy(
         Uri uri, NetworkCredential? credentials, ProxyProtocol protocol, string address, string copyValue)
