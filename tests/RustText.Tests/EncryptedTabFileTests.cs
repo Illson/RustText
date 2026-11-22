@@ -104,6 +104,10 @@ public sealed class EncryptedTabDialogTests
 
             var saving = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
             var create = await FindDialogAsync("Зашифровать копию вкладки");
+            Assert.Contains(create.GetVisualDescendants().OfType<TextBlock>(), label =>
+                label.Text is { } warning && warning.Contains("только новая копия .rte", StringComparison.Ordinal)
+                && warning.Contains("черновиках без шифрования", StringComparison.Ordinal)
+                && warning.Contains("ещё нет файла", StringComparison.Ordinal));
             Field(create, "Пароль").Text = password;
             Field(create, "Повторите пароль").Text = password;
             Field(create, "Подсказка (необязательно)").Text = hint;
