@@ -1246,6 +1246,24 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Fact]
+    public Task SearchCanNavigateToTheLastCrTerminatedHitAfterAppendingLf() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "append-split-crlf.log");
+        await File.WriteAllTextAsync(path, "first\nneedle\r");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            var snapshot = log.CaptureSearchSnapshot();
+            await File.AppendAllTextAsync(path, "\nneedle appended\n");
+            var result = await log.SearchSnapshotAsync(snapshot, new("needle", false, true, false), null, 32, default);
+            var hit = Assert.Single(result.Hits);
+            Assert.True(await log.NavigateToSearchHitAsync(snapshot, hit));
+            Assert.Equal("needle", SelectedText((TextBox)Field(log, "_logText")));
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

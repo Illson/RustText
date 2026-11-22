@@ -7,7 +7,7 @@ using RustText.Demo.Editor;
 namespace RustText.Demo.Logs;
 
 internal sealed record LogSearchCursor(long Offset, int MatchIndex, bool SkipLine = false,
-    long LineOffset = -1, string PendingText = "");
+    long LineOffset = -1, string PendingText = "", int? RegexStart = null);
 internal sealed record LogSearchHit(long Offset, long? LineNumber, string Preview, int MatchIndex, int MatchLength,
     int LineLengthBytes, string LineDigest, bool WasIncomplete);
 internal sealed record LogSearchPage(IReadOnlyList<LogSearchHit> Hits, LogSearchCursor? NextCursor, bool HasMore, string? Message);
@@ -23,6 +23,7 @@ internal sealed partial class LogDataReader
         // There is no newline inside a logical log line. Without Multiline,
         // .NET can anchor a search such as \d{12}$ at the end of its input.
         var matcher = new TextMatcher(options, multiline: false);
+        var usesSearchStart = options.IsRegex && options.Pattern.Contains(@"\G", StringComparison.Ordinal);
         var needle = CreateSearchPrefilter(options);
         var results = new List<LogSearchHit>(Math.Min(maxResults, 32));
         var offset = Math.Max(cursor.Offset, _bomLength);
@@ -78,8 +79,6 @@ internal sealed partial class LogDataReader
                 {
                     token.ThrowIfCancellationRequested();
                     var limit = Math.Min(DefaultFrameBytes, pageEnd - position);
-                    limit -= limit % _codeUnitBytes;
-                    if (limit == 0) break;
                     var frame = ReadFrame(bytes, position, limit, end - offset);
                     if (frame.ConsumedBytes == 0) break;
                     // Start the next read window at the last complete line. A
@@ -95,6 +94,7 @@ internal sealed partial class LogDataReader
                     position += frame.ConsumedBytes;
                     var next = offset + position;
                     var matchIndex = lineStart == cursorLineStart ? cursor.MatchIndex : 0;
+                    var regexStart = lineStart == cursorLineStart ? cursor.RegexStart : null;
                     if (!skipLine && next - lineStart > MaximumSearchLineBytes)
                     {
                         skipLine = true;
@@ -108,7 +108,8 @@ internal sealed partial class LogDataReader
                         if (next >= budgetEnd && next < end)
                         {
                             var resume = skipLine ? new LogSearchCursor(next, 0, SkipLine: true)
-                                : new LogSearchCursor(next, matchIndex, LineOffset: lineStart, PendingText: pending?.ToString() ?? "");
+                                : new LogSearchCursor(next, matchIndex, LineOffset: lineStart,
+                                    PendingText: pending?.ToString() ?? "", RegexStart: regexStart);
                             return new(results, resume, true, notice);
                         }
                         continue;
@@ -118,27 +119,25 @@ internal sealed partial class LogDataReader
                     {
                         var text = DecodeSearchFrame(content, ref buffer);
                         if (pending is { Length: > 0 }) text = pending.Append(text).ToString().AsSpan();
-                        var matches = matcher.Enumerate(text, Math.Clamp(matchIndex, 0, text.Length));
-                        if (matches.MoveNext())
+                        var matches = matcher.Enumerate(text, Math.Clamp(regexStart ?? matchIndex, 0, text.Length));
+                        string? digest = null;
+                        while (matches.MoveNext())
                         {
-                            var digest = SearchLineDigest(text);
-                            var incomplete = next == end && !IsNewlineBefore(handle, end);
-                            var lineBytes = checked((int)(next - lineStart));
-                            do
-                            {
-                                token.ThrowIfCancellationRequested();
-                                var match = matches.Current;
-                                results.Add(new(lineStart, lineNumber, ClipMatch(text, match.Index), match.Index,
-                                    match.Length, lineBytes, digest, incomplete));
-                                var moreOnLine = matches.MoveNext();
-                                if (results.Count == maxResults)
-                                {
-                                    var resume = moreOnLine ? new LogSearchCursor(lineStart, matches.Current.Index)
-                                        : next < end ? new LogSearchCursor(next, 0) : null;
-                                    return new(results, resume, resume is not null, notice);
-                                }
-                                if (!moreOnLine) break;
-                            } while (true);
+                            token.ThrowIfCancellationRequested();
+                            var match = matches.Current;
+                            // \G depends on where the previous search started, not
+                            // necessarily where it found a hit. Replay empty matches
+                            // from the last non-empty match end so .NET bumps them itself.
+                            if (match.Index < matchIndex) continue;
+                            if (usesSearchStart && match.Length > 0) regexStart = match.Index + match.Length;
+                            digest ??= SearchLineDigest(text);
+                            results.Add(new(lineStart, lineNumber, ClipMatch(text, match.Index), match.Index,
+                                match.Length, checked((int)(next - lineStart)), digest, !frame.Terminated));
+                            if (results.Count < maxResults) continue;
+                            var resume = matches.MoveNext() ? new LogSearchCursor(lineStart, matches.Current.Index,
+                                    RegexStart: usesSearchStart ? regexStart ?? 0 : null)
+                                : next < end ? new LogSearchCursor(next, 0) : null;
+                            return new(results, resume, resume is not null, notice);
                         }
                     }
                     continued = false;

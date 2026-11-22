@@ -294,12 +294,6 @@ internal sealed partial class LogDataReader
                 cancellationToken.ThrowIfCancellationRequested();
                 var rowStart = position;
                 var frameLimit = Math.Min(maxFrameBytes, pageEnd - position);
-                frameLimit -= frameLimit % _codeUnitBytes;
-                if (frameLimit == 0)
-                {
-                    break;
-                }
-
                 var frame = ReadFrame(bytes, position, frameLimit, observedLength - readOffset);
                 if (frame.ConsumedBytes == 0) break;
 
@@ -345,6 +339,10 @@ internal sealed partial class LogDataReader
 
     private Frame ReadFrame(ReadOnlySpan<byte> bytes, int position, int limit, long bytesRemaining)
     {
+        // A live UTF-16 file can end between the two bytes of a code unit.
+        // Decode the dangling byte at snapshot EOF, but not at an I/O boundary.
+        if (position + limit < bytesRemaining) limit -= limit % _codeUnitBytes;
+        if (limit == 0) return default;
         var frame = bytes.Slice(position, limit);
         var ending = FindLineEnding(frame);
         if (ending.Index >= 0)
@@ -695,28 +693,22 @@ internal sealed partial class LogDataReader
             var relativeOffset = Math.Max(0, offset - _bomLength);
             return Math.Min(length, _bomLength + relativeOffset - relativeOffset % 2);
         }
-        if (offset <= 0 || offset >= length || Encoding == TextEncodingKind.Windows1251)
+        if (offset <= _bomLength || offset >= length || Encoding == TextEncodingKind.Windows1251)
         {
             return offset;
         }
 
-        Span<byte> bytes = stackalloc byte[4];
-        var count = RandomAccess.Read(_file.SafeFileHandle, bytes, offset);
-        if (count == 0 || !IsUtf8Continuation(bytes[0]))
-        {
-            return offset;
-        }
-
-        var aligned = offset + 1;
-        while (aligned < length && aligned - offset < 4)
-        {
-            if (RandomAccess.Read(_file.SafeFileHandle, bytes[..1], aligned) == 0 || !IsUtf8Continuation(bytes[0]))
-            {
-                return aligned;
-            }
-            aligned++;
-        }
-        return aligned;
+        // A stray continuation byte is itself displayed as U+FFFD. Skip bytes
+        // only if the requested position falls inside an actual UTF-8 sequence.
+        var before = (int)Math.Min(3, offset - _bomLength);
+        var after = (int)Math.Min(3, length - offset);
+        Span<byte> bytes = stackalloc byte[6];
+        var read = ReadWindowInto(_file.SafeFileHandle, offset - before, bytes[..(before + after)], default);
+        if (read <= before || !IsUtf8Continuation(bytes[before])) return offset;
+        var lead = before;
+        while (lead > 0 && IsUtf8Continuation(bytes[lead])) lead--;
+        return Rune.DecodeFromUtf8(bytes[lead..read], out _, out var consumed) == OperationStatus.Done
+            && lead + consumed > before ? offset + (lead + consumed - before) : offset;
     }
 
     private bool IsNewlineBefore(ReadOnlySpan<byte> bytes, int localOffset)

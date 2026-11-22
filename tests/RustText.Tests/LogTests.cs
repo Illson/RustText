@@ -406,6 +406,115 @@ public sealed class LogTests
     }
 
     [Fact]
+    public void SearchAndNavigationKeepInvalidUtf8AtTheStartOfALine()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "invalid-line-start.log");
+        File.WriteAllBytes(path, [0xef, 0xbb, 0xbf, 0x80, (byte)'\n', 0xbf, (byte)'\n']);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8Bom);
+        var options = new SearchOptions("\uFFFD", false, true, false);
+
+        var first = reader.Search(options, new(0, 0), file.Length, 1, 1, long.MaxValue, default);
+        Assert.Equal(3, Assert.Single(first.Hits).Offset);
+        var second = reader.Search(options, first.NextCursor!, file.Length, 2, 1, long.MaxValue, default);
+        var hit = Assert.Single(second.Hits);
+        Assert.Equal(5, hit.Offset);
+        Assert.Equal(0, hit.MatchIndex);
+        Assert.Null(second.NextCursor);
+        Assert.Equal("\uFFFD", Assert.Single(reader.ReadPage(hit.Offset).Rows).Text);
+    }
+
+    [Fact]
+    public void PageStartingInsideUtf8ScalarSkipsOnlyTheRestOfThatScalar()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "continuation.log");
+        File.WriteAllBytes(path, [.. "😀"u8, 0x80, (byte)'x']);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        for (var offset = 1; offset <= 4; offset++)
+        {
+            var row = Assert.Single(reader.ReadPage(offset).Rows);
+            Assert.Equal(4, row.StartOffset);
+            Assert.Equal("\uFFFDx", row.Text);
+        }
+    }
+
+    [Theory]
+    [InlineData(@"\Gx|x+", "x---xxx", 3)]
+    [InlineData(@"\Gx|(?=x)", "x---xxx", 0)]
+    public void PagedRegexSearchPreservesPreviousMatchAnchor(string pattern, string line, int secondLength)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "regex-anchor.log");
+        File.WriteAllText(path, line);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        var options = new SearchOptions(pattern, true, true, false);
+        var expected = TextOperations.BuildRegex(options).Matches(line).Select(match => (match.Index, match.Length)).ToArray();
+        Assert.Equal((4, secondLength), expected[1]);
+
+        foreach (var budget in new long[] { 4, long.MaxValue })
+        {
+            LogSearchCursor? cursor = new(0, 0);
+            var actual = new List<(int, int)>();
+            for (var page = 0; cursor is not null && page <= 2 * (line.Length + 1); page++)
+            {
+                var result = reader.Search(options, cursor, file.Length, 1, 1, budget, default);
+                actual.AddRange(result.Hits.Select(hit => (hit.MatchIndex, hit.MatchLength)));
+                cursor = result.NextCursor;
+            }
+            Assert.Null(cursor);
+            Assert.Equal(expected, actual);
+        }
+    }
+
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian)]
+    [InlineData(TextEncodingKind.Utf16BigEndian)]
+    public void SearchDecidesWhetherTheLastHitIsTerminatedInsideTheSnapshot(TextEncodingKind encoding)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "append-lf.log");
+        var end = Encode("needle\r", encoding, false).Length;
+        File.WriteAllBytes(path, Encode("needle\r\nnext", encoding, false));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        var options = new SearchOptions("needle", false, true, false);
+        var hit = Assert.Single(reader.Search(options, new(0, 0), end, 1, 32, long.MaxValue, default).Hits);
+        Assert.Equal(end, hit.LineLengthBytes);
+        Assert.False(hit.WasIncomplete);
+    }
+
+    [Theory]
+    [InlineData(TextEncodingKind.Utf16LittleEndian)]
+    [InlineData(TextEncodingKind.Utf16BigEndian)]
+    public void Utf16SnapshotEndingInsideACodeUnitKeepsTheUnterminatedLine(TextEncodingKind encoding)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "partial-code-unit.log");
+        var bytes = Encode("first\nneedle!", encoding, true);
+        File.WriteAllBytes(path, bytes);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        var snapshotEnd = bytes.Length - 1;
+        var options = new SearchOptions("needle", false, true, false);
+
+        var hit = Assert.Single(reader.Search(options, new(0, 0), snapshotEnd, 1, 32, long.MaxValue, default).Hits);
+        Assert.Equal("needle\uFFFD", hit.Preview);
+        Assert.True(hit.WasIncomplete);
+        Assert.Equal(snapshotEnd, hit.Offset + hit.LineLengthBytes);
+        var page = reader.ReadPage(hit.Offset, endOffset: snapshotEnd);
+        Assert.Equal(hit.Preview, Assert.Single(page.Rows).Text);
+        Assert.False(page.HasMore);
+
+        var complete = Assert.Single(reader.Search(options, new(0, 0), file.Length, 1, 32, long.MaxValue, default).Hits);
+        Assert.Equal("needle!", complete.Preview);
+    }
+
+    [Fact]
     public void LiteralMissDoesNotAllocatePerLine()
     {
         using var directory = new TempDirectory();
