@@ -1,0 +1,25 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <SourceDir>$(RustTextSource)/src/RustText</SourceDir>
+    <DefineConstants Condition="Exists('$(SourceDir)/Logs/LogDataReader.Search.cs')">$(DefineConstants);BUFFERED_LOG_SEARCH</DefineConstants>
+    <DefineConstants Condition="Exists('$(SourceDir)/Editor/TextMatcher.cs')">$(DefineConstants);TEXT_MATCHER</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)CoreAdapter.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)EditorCaretStub.cs" />
+    <Compile Include="$(SourceDir)/Logs/LogDataReader.cs" />
+    <Compile Include="$(SourceDir)/Logs/LogDataReader.Search.cs" Condition="Exists('$(SourceDir)/Logs/LogDataReader.Search.cs')" />
+    <Compile Include="$(SourceDir)/Storage/DocumentFiles.cs" />
+    <Compile Include="$(SourceDir)/Editor/TextOperations.cs" />
+    <Compile Include="$(SourceDir)/Editor/TextMatcher.cs" Condition="Exists('$(SourceDir)/Editor/TextMatcher.cs')" />
+    <Compile Include="$(SourceDir)/Editor/JsonFormatting.cs" Condition="Exists('$(SourceDir)/Editor/JsonFormatting.cs')" />
+    <Compile Include="$(SourceDir)/Editor/ReplacementLineEndings.cs" />
+  </ItemGroup>
+  <Target Name="CheckRustTextSources" BeforeTargets="CoreCompile">
+    <Error Condition="'$(RustTextSource)' == '' Or !Exists('$(SourceDir)/Logs/LogDataReader.cs')"
+           Text="Pass both BaselineSource and CandidateSource pointing to compatible RustText source trees." />
+  </Target>
+</Project>

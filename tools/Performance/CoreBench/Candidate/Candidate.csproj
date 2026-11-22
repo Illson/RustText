@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RustTextSource>$(CandidateSource)</RustTextSource>
+  </PropertyGroup>
+  <Import Project="../CoreAdapter.props" />
+</Project>

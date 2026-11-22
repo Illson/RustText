@@ -80,6 +80,20 @@ jobs:
       - name: Check capture from a classic Windows console
         run: python tests/windows/console_capture.py (Join-Path $env:RUNNER_TEMP 'rusttext-win-x64/rusttext.exe')
 
+      - name: Validate performance harness without GUI or timing thresholds
+        run: |
+          ./tests/windows/performance_readiness.ps1
+          $run = Join-Path $env:RUNNER_TEMP 'rusttext-performance'
+          ./tools/Measure-RustTextPerformance.ps1 -BaselineRef HEAD -CoreOnly -Smoke -Iterations 2 -OutputDirectory $run
+          $rendered = Join-Path $run 'rendered.md'
+          ./tools/Measure-RustTextPerformance.ps1 -RenderFromRawJson -RawJsonPath (Join-Path $run 'raw.json') -ReportPath $rendered
+          if ((Get-FileHash $rendered).Hash -ne (Get-FileHash (Join-Path $run 'report.md')).Hash) {
+            throw 'Re-rendered performance report differs from the original.'
+          }
+          if (Test-Path (Join-Path $run 'work')) {
+            throw 'Performance harness left temporary files behind.'
+          }
+
       - name: Upload Windows preview
         if: github.event_name == 'push'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
