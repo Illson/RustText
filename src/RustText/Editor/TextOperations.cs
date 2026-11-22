@@ -8,7 +8,7 @@ using RustText.Demo.Logs;
 namespace RustText.Demo.Editor;
 
 internal sealed record SearchOptions(string Pattern, bool IsRegex, bool MatchCase, bool WholeWord);
-internal sealed record SearchHit(int Offset, int Length, int Line, string Preview);
+internal readonly record struct SearchHit(int Offset, int Length, int Line, string Preview);
 internal sealed record SearchSummary(IReadOnlyList<SearchHit> Hits, int Count, bool TimedOut, IReadOnlyList<CaretRange>? Carets);
 internal sealed record JsonProblem(int Offset, int Line, int Column, string Message);
 internal sealed record ListComparison(string Common, string LeftOnly, string RightOnly);
@@ -42,22 +42,25 @@ internal static class TextOperations
         return new Regex(pattern, flags, SearchBudget);
     }
 
-    public static SearchSummary Find(string text, Regex regex, int resultLimit, CancellationToken cancellationToken, int caretLimit = 0)
+    public static SearchSummary Find(string text, TextMatcher matcher, int resultLimit, CancellationToken cancellationToken, int caretLimit = 0)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var hits = new List<SearchHit>(Math.Min(resultLimit, 100));
         var carets = caretLimit > 0 ? new List<CaretRange>() : null;
         var count = 0;
         var line = 1;
         var lineStart = 0;
+        var lineEnd = -1;
         var started = Stopwatch.GetTimestamp();
         try
         {
-            foreach (var match in regex.EnumerateMatches(text))
+            foreach (var match in matcher.Enumerate(text))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (Stopwatch.GetElapsedTime(started) >= SearchBudget)
+                if ((count & 63) == 0)
                 {
-                    return new SearchSummary(hits, count, true, carets);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (Stopwatch.GetElapsedTime(started) >= SearchBudget)
+                        return new SearchSummary(hits, count, true, carets);
                 }
 
                 count++;
@@ -68,17 +71,16 @@ internal static class TextOperations
                     continue;
                 }
 
-                var newline = text.AsSpan(lineStart, match.Index - lineStart).IndexOf('\n');
-                while (newline >= 0)
+                if (lineEnd < 0) lineEnd = EndOfLine(0);
+                while (lineEnd < match.Index)
                 {
                     line++;
-                    lineStart += newline + 1;
-                    newline = text.AsSpan(lineStart, match.Index - lineStart).IndexOf('\n');
+                    lineStart = lineEnd + 1;
+                    lineEnd = EndOfLine(lineStart);
                 }
 
-                var lineEnd = text.IndexOf('\n', match.Index);
                 var begin = Math.Max(lineStart, match.Index - 40);
-                var end = Math.Min(lineEnd < 0 ? text.Length : lineEnd, begin + 180);
+                var end = Math.Min(lineEnd, begin + 180);
                 hits.Add(new SearchHit(match.Index, match.Length, line, text[begin..end]));
             }
         }
@@ -87,23 +89,29 @@ internal static class TextOperations
             return new SearchSummary(hits, count, true, carets);
         }
 
-        return new SearchSummary(hits, count, false, carets);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new SearchSummary(hits, count, Stopwatch.GetElapsedTime(started) >= SearchBudget, carets);
+
+        int EndOfLine(int start) => text.IndexOf('\n', start) is var end && end >= 0 ? end : text.Length;
     }
 
-    public static Match? FindNext(string text, Regex regex, int offset, bool backward)
+    public static TextMatch? FindNext(string text, TextMatcher matcher, int offset, bool backward)
     {
         if (!backward)
         {
-            var next = regex.Match(text, Math.Clamp(offset, 0, text.Length));
-            return next.Success ? next : regex.Match(text) is { Success: true } wrapped ? wrapped : null;
+            var next = matcher.Enumerate(text, Math.Clamp(offset, 0, text.Length));
+            if (next.MoveNext()) return next.Current;
+            next = matcher.Enumerate(text);
+            return next.MoveNext() ? next.Current : null;
         }
 
         var started = Stopwatch.GetTimestamp();
-        Match? previous = null;
-        Match? last = null;
-        for (var match = regex.Match(text); match.Success; match = match.NextMatch())
+        TextMatch? previous = null;
+        TextMatch? last = null;
+        var count = 0;
+        foreach (var match in matcher.Enumerate(text))
         {
-            CheckBudget(started);
+            if ((count++ & 63) == 0) CheckBudget(started);
             if (match.Index < offset)
             {
                 previous = match;
@@ -119,39 +127,97 @@ internal static class TextOperations
         return previous ?? last;
     }
 
-    public static ReplaceAllResult ReplaceAll(string text, Regex regex, string replacement, bool expandGroups,
+    public static ReplaceAllResult ReplaceAll(string text, TextMatcher matcher, string replacement, bool expandGroups,
         CancellationToken cancellationToken = default, ImmutableList<LineEndingKind>? originalEndings = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var started = Stopwatch.GetTimestamp();
-        var builder = new StringBuilder(text.Length);
+        if (matcher.Literal is not null && originalEndings is null && !expandGroups)
+            return ReplaceOrdinal(text, matcher, replacement, started, cancellationToken);
+
+        StringBuilder? builder = null;
         ReplacementLineEndings? endings = null;
         var count = 0;
         var previousEnd = 0;
-        for (var match = regex.Match(text); match.Success; match = match.NextMatch())
+        if (expandGroups)
         {
-            CheckOperation();
-            if (originalEndings is not null)
-                endings ??= new ReplacementLineEndings(text, originalEndings, regex, replacement, expandGroups, CheckOperation);
-
-            builder.Append(text.AsSpan(previousEnd, match.Index - previousEnd));
-            var inserted = expandGroups ? match.Result(replacement) : replacement;
-            builder.Append(inserted);
-            endings?.AppendSource(previousEnd, match.Index);
-            endings?.AppendReplacement(match, inserted);
-            previousEnd = match.Index + match.Length;
-            count++;
+            for (var match = matcher.Expression!.Match(text); match.Success; match = match.NextMatch())
+            {
+                var inserted = match.Result(replacement);
+                Append(match.Index, match.Length, inserted);
+                endings?.AppendReplacement(match, inserted);
+            }
+        }
+        else
+        {
+            foreach (var match in matcher.Enumerate(text))
+            {
+                Append(match.Index, match.Length, replacement);
+                endings?.AppendLiteralReplacement(match.Index, match.Length, replacement);
+            }
         }
 
-        if (count == 0) return new ReplaceAllResult(text, 0, originalEndings);
+        if (builder is null) return new ReplaceAllResult(text, 0, originalEndings);
         builder.Append(text.AsSpan(previousEnd));
         endings?.AppendSource(previousEnd, text.Length);
         return new ReplaceAllResult(builder.ToString(), count, endings?.Result.ToImmutable());
+
+        void Append(int index, int length, string inserted)
+        {
+            CheckOperation();
+            builder ??= new StringBuilder(text.Length);
+            if (originalEndings is not null)
+                endings ??= new ReplacementLineEndings(text, originalEndings, matcher.Expression, replacement, expandGroups, CheckOperation);
+            builder.Append(text.AsSpan(previousEnd, index - previousEnd));
+            builder.Append(inserted);
+            endings?.AppendSource(previousEnd, index);
+            previousEnd = index + length;
+            count++;
+        }
 
         void CheckOperation()
         {
             cancellationToken.ThrowIfCancellationRequested();
             CheckBudget(started);
         }
+    }
+
+    private static ReplaceAllResult ReplaceOrdinal(string text, TextMatcher matcher, string replacement, long started,
+        CancellationToken token)
+    {
+        var count = 0;
+        foreach (var _ in matcher.Enumerate(text))
+        {
+            if ((count++ & 63) != 0) continue;
+            token.ThrowIfCancellationRequested();
+            CheckBudget(started);
+        }
+        token.ThrowIfCancellationRequested();
+        if (count == 0) return new(text, 0);
+
+        var length = checked((int)(text.Length + (long)count * (replacement.Length - matcher.Literal!.Length)));
+        var result = string.Create(length, (text, matcher, replacement, started, token), static (destination, state) =>
+        {
+            var previousEnd = 0;
+            var written = 0;
+            foreach (var match in state.matcher.Enumerate(state.text))
+            {
+                if ((written++ & 63) == 0)
+                {
+                    state.token.ThrowIfCancellationRequested();
+                    CheckBudget(state.started);
+                }
+                var unchanged = state.text.AsSpan(previousEnd, match.Index - previousEnd);
+                unchanged.CopyTo(destination);
+                state.replacement.AsSpan().CopyTo(destination[unchanged.Length..]);
+                destination = destination[(unchanged.Length + state.replacement.Length)..];
+                previousEnd = match.Index + match.Length;
+            }
+            state.text.AsSpan(previousEnd).CopyTo(destination);
+        });
+        token.ThrowIfCancellationRequested();
+        CheckBudget(started);
+        return new(result, count);
     }
 
     private static void CheckBudget(long started)
@@ -200,18 +266,18 @@ internal static class TextOperations
     {
         cancellationToken.ThrowIfCancellationRequested();
         var input = JsonInput(text);
-        CheckJsonSize(input);
+        var utf8Length = CheckJsonSize(input);
         var start = text.Length - input.Length;
         if (!UsesJsonLines(input, path))
         {
-            return ValidateJsonValue(input, start, 1);
+            return ValidateJsonValue(input, start, 1, cancellationToken, utf8Length);
         }
 
         for (var line = 1; !input.IsEmpty; line++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var consumed = ReadJsonLine(input, out var record);
-            if (ValidateJsonValue(record, start, line) is { } problem)
+            if (ValidateJsonValue(record, start, line, cancellationToken) is { } problem)
             {
                 return problem;
             }
@@ -223,11 +289,12 @@ internal static class TextOperations
         return null;
     }
 
-    private static JsonProblem? ValidateJsonValue(ReadOnlyMemory<char> input, int start, int lineNumber)
+    private static JsonProblem? ValidateJsonValue(ReadOnlyMemory<char> input, int start, int lineNumber,
+        CancellationToken cancellationToken = default, int utf8Length = -1)
     {
         try
         {
-            using var parsed = ParseJson(input);
+            JsonFormatting.Validate(input.Span, utf8Length, cancellationToken);
             return null;
         }
         catch (JsonException exception)
@@ -268,8 +335,11 @@ internal static class TextOperations
     {
         cancellationToken.ThrowIfCancellationRequested();
         var input = JsonInput(text);
-        CheckJsonSize(input);
+        var utf8Length = CheckJsonSize(input);
         var jsonLines = UsesJsonLines(containingText is null ? input : JsonInput(containingText), path);
+        if (!jsonLines && JsonFormatting.TryFormat(input.Span, utf8Length, cancellationToken) is { } formatted)
+            return formatted;
+
         using var memory = new MemoryStream();
         using var writer = new Utf8JsonWriter(memory, new JsonWriterOptions
         {
@@ -354,12 +424,14 @@ internal static class TextOperations
     private static JsonDocument ParseJson(ReadOnlyMemory<char> input) =>
         JsonDocument.Parse(input, new JsonDocumentOptions { MaxDepth = 128 });
 
-    private static void CheckJsonSize(ReadOnlyMemory<char> input)
+    private static int CheckJsonSize(ReadOnlyMemory<char> input)
     {
-        if (Encoding.UTF8.GetByteCount(input.Span) > JsonByteLimit)
+        var bytes = Encoding.UTF8.GetByteCount(input.Span);
+        if (bytes > JsonByteLimit)
         {
             throw new InvalidDataException("JSON превышает 64 МиБ.");
         }
+        return bytes;
     }
 
     private static void CheckFormattedJsonSize(long length)

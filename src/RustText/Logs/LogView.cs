@@ -42,12 +42,6 @@ internal sealed record LogTabState(
     bool? IndexOptIn = null,
     bool EditPages = false);
 
-internal sealed record LogSearchCursor(long Offset, int MatchIndex, bool SkipLine = false,
-    long LineOffset = -1, string PendingText = "");
-internal sealed record LogSearchHit(long Offset, long? LineNumber, string Preview, int MatchIndex, int MatchLength,
-    int LineLengthBytes, string LineDigest, bool WasIncomplete);
-internal sealed record LogSearchPage(IReadOnlyList<LogSearchHit> Hits, LogSearchCursor? NextCursor, bool HasMore, string? Message);
-
 internal sealed record LogFileIdentity(ulong Volume, int[] Id);
 internal sealed record LogSystemTime(long SecsSinceEpoch, uint NanosSinceEpoch);
 internal sealed record LogFingerprint(LogSystemTime? Modified, int[] Digest);
@@ -58,7 +52,6 @@ internal sealed partial class LogView : UserControl, IDisposable
     private const int SearchResultsPerPage = 32;
     private const int MaximumSearchResultsPerCall = 256;
     private const int MaximumSearchBytesPerCall = 16 * 1024 * 1024;
-    private const int MaximumSearchLineBytes = 1024 * 1024;
     private const int IndexBatchBytes = 16 * 1024 * 1024;
     private const long LargeLogIndexOptInBytes = 128L * 1024 * 1024;
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(1);
@@ -461,7 +454,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _activeSearchResult = _searchResults.IndexOf(hit);
         if (!DisplaysSearchHit(hit))
         {
-            var pageBytes = Math.Clamp(hit.LineLengthBytes, LogDataReader.DefaultPageBytes, MaximumSearchLineBytes);
+            var pageBytes = Math.Clamp(hit.LineLengthBytes, LogDataReader.DefaultPageBytes, LogDataReader.MaximumSearchLineBytes);
             var readStamp = FileStamp.Read(_path, _file);
             if (readStamp.Identity != snapshot.Stamp.Identity) return false;
             await LoadPageAsync(hit.Offset, saveHistory: true, maxPageBytes: pageBytes, expectedPageStamp: readStamp);
@@ -509,7 +502,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         var end = line.IndexOfAny('\r', '\n');
         if (end >= 0) line = line[..end];
         return hit.MatchIndex >= 0 && hit.MatchLength >= 0 && hit.MatchIndex <= line.Length - hit.MatchLength
-            && SearchLineDigest(line) == hit.LineDigest;
+            && LogDataReader.SearchLineDigest(line) == hit.LineDigest;
     }
 
     public void FocusSearch()
@@ -1479,16 +1472,13 @@ internal sealed partial class LogView : UserControl, IDisposable
             if (hit.Offset != snapshot.HiddenOffset && hit.Offset != snapshot.Reader.PreambleLength
                 && !snapshot.Reader.IsNewlineBefore(hit.Offset)) return false;
             var currentText = snapshot.Reader.ReadTerminatedLineText(hit.Offset, hit.LineLengthBytes);
-            return currentText is not null && SearchLineDigest(currentText) == hit.LineDigest;
+            return currentText is not null && LogDataReader.SearchLineDigest(currentText) == hit.LineDigest;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ObjectDisposedException or ArgumentOutOfRangeException)
         {
             return false;
         }
     }
-
-    private static string SearchLineDigest(ReadOnlySpan<char> text) =>
-        Convert.ToHexString(SHA256.HashData(MemoryMarshal.AsBytes(text)));
 
     internal async Task<LogSearchPage> SearchSnapshotAsync(LogSearchSnapshot snapshot, SearchOptions options,
         LogSearchCursor? cursor, int maxResults, CancellationToken token,
@@ -1533,95 +1523,10 @@ internal sealed partial class LogView : UserControl, IDisposable
     private LogSearchPage SearchFile(LogSearchSnapshot snapshot, SearchOptions options, LogSearchCursor cursor,
         int maxResults, long maxScanBytes, CancellationToken token)
     {
-        var expression = TextOperations.BuildRegex(options);
-
-        var results = new List<LogSearchHit>(maxResults);
         var reader = snapshot.Reader;
         var searchOffset = Math.Max(Math.Max(cursor.Offset, snapshot.HiddenOffset), reader.PreambleLength);
-        var pageEnd = snapshot.Length;
-        var readAheadEnd = searchOffset + Math.Min(maxScanBytes, Math.Max(0, pageEnd - searchOffset));
-        using var scan = reader.BeginSequentialScan(readAheadEnd: readAheadEnd);
-        var pendingLine = new StringBuilder(cursor.PendingText);
-        var cursorLineStart = cursor.LineOffset >= 0 ? cursor.LineOffset : searchOffset;
-        var pendingOffset = cursorLineStart;
-        var lineNumber = FindLineNumber(reader, searchOffset, token);
-        string? notice = null;
-        var skippingOversizedLine = cursor.SkipLine;
-        var nextOffset = searchOffset;
-
-        while (nextOffset < pageEnd)
-        {
-            token.ThrowIfCancellationRequested();
-            var maxPageBytes = (int)Math.Clamp(maxScanBytes - (nextOffset - searchOffset), 4, LogDataReader.DefaultPageBytes);
-            var page = scan.ReadPage(nextOffset, token, endOffset: pageEnd, maxPageBytes: maxPageBytes);
-            if (page.NextOffset <= nextOffset) break;
-            foreach (var row in page.Rows)
-            {
-                token.ThrowIfCancellationRequested();
-                if (!row.StartsWithinLine)
-                {
-                    pendingOffset = row.StartOffset;
-                    pendingLine.Clear();
-                    skippingOversizedLine = false;
-                }
-                nextOffset = row.EndOffset;
-                var matchIndex = pendingOffset == cursorLineStart ? cursor.MatchIndex : 0;
-                if (!skippingOversizedLine && row.EndOffset - pendingOffset > MaximumSearchLineBytes)
-                {
-                    skippingOversizedLine = true;
-                    notice = $"Пропущена строка длиннее лимита поиска в {MaximumSearchLineBytes:N0} байт.";
-                }
-
-                if (row.IsTruncated)
-                {
-                    if (!skippingOversizedLine) pendingLine.Append(row.Text);
-                    if (nextOffset - searchOffset >= maxScanBytes)
-                    {
-                        var nextCursor = skippingOversizedLine ? new LogSearchCursor(nextOffset, 0, SkipLine: true)
-                            : new LogSearchCursor(nextOffset, matchIndex, LineOffset: pendingOffset, PendingText: pendingLine.ToString());
-                        return new LogSearchPage(results, nextCursor, true, notice);
-                    }
-                    continue;
-                }
-
-                if (!skippingOversizedLine)
-                {
-                    var text = pendingLine.Length == 0 ? row.Text : pendingLine.Append(row.Text).ToString();
-                    var match = expression.Match(text, Math.Clamp(matchIndex, 0, text.Length));
-                    var lineDigest = match.Success ? SearchLineDigest(text) : "";
-                    var wasIncomplete = match.Success && nextOffset == pageEnd && !reader.IsNewlineBefore(pageEnd);
-                    var lineLengthBytes = checked((int)(nextOffset - pendingOffset));
-                    while (match.Success)
-                    {
-                        results.Add(new LogSearchHit(pendingOffset, lineNumber, ClipMatch(text, match.Index), match.Index,
-                            match.Length, lineLengthBytes, lineDigest, wasIncomplete));
-                        var nextMatch = match.NextMatch();
-                        if (results.Count >= maxResults)
-                        {
-                            var nextCursor = nextMatch.Success
-                                ? new LogSearchCursor(pendingOffset, nextMatch.Index)
-                                : nextOffset < pageEnd ? new LogSearchCursor(nextOffset, 0) : null;
-                            return new LogSearchPage(results, nextCursor, nextCursor is not null, notice);
-                        }
-                        if (!nextMatch.Success) break;
-                        match = nextMatch;
-                    }
-                }
-                pendingLine.Clear();
-                skippingOversizedLine = false;
-                lineNumber++;
-
-                if (nextOffset - searchOffset >= maxScanBytes)
-                {
-                    var nextCursor = nextOffset < pageEnd ? new LogSearchCursor(nextOffset, 0) : null;
-                    return new LogSearchPage(results, nextCursor, nextCursor is not null, notice);
-                }
-            }
-            if (!page.HasMore) break;
-            nextOffset = page.NextOffset;
-        }
-
-        return new LogSearchPage(results, null, false, notice);
+        return reader.Search(options, cursor with { Offset = searchOffset }, snapshot.Length,
+            FindLineNumber(reader, searchOffset, token), maxResults, maxScanBytes, token);
     }
 
     private bool IsContinuationAt(long offset)
@@ -2548,17 +2453,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         _statusLabel.Text = text;
         _statusLabel.IsVisible = text.Length > 0;
         StatusChanged?.Invoke(text);
-    }
-
-    private static string ClipMatch(string value, int matchIndex, int maxLength = 160)
-    {
-        if (value.Length <= maxLength) return value;
-        var begin = Math.Max(0, matchIndex - 40);
-        var prefix = begin > 0 ? "…" : string.Empty;
-        var end = Math.Min(value.Length, begin + maxLength - prefix.Length);
-        var suffix = end < value.Length ? "…" : string.Empty;
-        if (suffix.Length > 0) end--;
-        return string.Concat(prefix, value.AsSpan(begin, end - begin), suffix);
     }
 
     private bool TryParseRequestedTime(string text, out DateTime requested)

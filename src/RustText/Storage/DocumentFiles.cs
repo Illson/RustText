@@ -50,17 +50,21 @@ public static class DocumentFiles
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var fullPath = Path.GetFullPath(path);
         await using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        if (stream.Length > MaximumDocumentBytes) throw new IOException("Файл больше лимита редактора (50 МиБ).");
-        var before = await FileStamp.CaptureAsync(stream, cancellationToken).ConfigureAwait(false);
-        if (before.Length > MaximumDocumentBytes) throw new IOException("Файл больше лимита редактора (50 МиБ).");
-        stream.Position = 0;
-        var bytes = new byte[checked((int)before.Length)];
+        var length = stream.Length;
+        if (length > MaximumDocumentBytes) throw new IOException("Файл больше лимита редактора (50 МиБ).");
+        var modified = File.GetLastWriteTimeUtc(fullPath);
+        var bytes = GC.AllocateUninitializedArray<byte>(checked((int)length));
         await stream.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        // Hash the bytes being decoded, not a separate read that might have seen
+        // different contents. Still verify them against the file before publishing the snapshot.
+        var before = new FileStamp(length, modified, Convert.ToHexString(SHA256.HashData(bytes)));
         var after = await FileStamp.CaptureAsync(stream, cancellationToken).ConfigureAwait(false);
         if (before != after) throw new IOException("Файл изменился во время чтения.");
 
         var (decoded, detected) = Decode(bytes, encoding);
         var (normalized, endings, style) = NormalizeNewlines(decoded);
+        cancellationToken.ThrowIfCancellationRequested();
         return new(normalized, detected, style, endings, before);
     }
 
@@ -199,27 +203,38 @@ public static class DocumentFiles
 
     private static (string Text, ImmutableArray<LineEndingKind> Endings, LineEndingKind Style) NormalizeNewlines(string text)
     {
-        var builder = new StringBuilder(text.Length);
         var endings = ImmutableArray.CreateBuilder<LineEndingKind>();
         var first = (LineEndingKind?)null;
         var mixed = false;
-        for (var i = 0; i < text.Length; i++)
+        var pairs = 0;
+        var hasCr = false;
+        var rest = text.AsSpan();
+        while (rest.IndexOfAny('\r', '\n') is var index && index >= 0)
         {
-            var c = text[i];
-            if (c == '\r')
-            {
-                var kind = i + 1 < text.Length && text[i + 1] == '\n' ? LineEndingKind.CrLf : LineEndingKind.Cr;
-                if (kind == LineEndingKind.CrLf) i++;
-                builder.Append('\n'); endings.Add(kind);
-                if (first is null) first = kind; else if (first != kind) mixed = true;
-            }
-            else if (c == '\n')
-            {
-                builder.Append('\n'); endings.Add(LineEndingKind.Lf);
-                if (first is null) first = LineEndingKind.Lf; else if (first != LineEndingKind.Lf) mixed = true;
-            }
-            else builder.Append(c);
+            rest = rest[index..];
+            var kind = rest[0] == '\n' ? LineEndingKind.Lf
+                : rest is ['\r', '\n', ..] ? LineEndingKind.CrLf : LineEndingKind.Cr;
+            if (kind == LineEndingKind.CrLf) pairs++;
+            hasCr |= kind != LineEndingKind.Lf;
+            endings.Add(kind);
+            if (first is null) first = kind;
+            else if (first != kind) mixed = true;
+            rest = rest[(kind == LineEndingKind.CrLf ? 2 : 1)..];
         }
-        return (builder.ToString(), endings.ToImmutable(), mixed ? LineEndingKind.Mixed : first ?? LineEndingKind.Lf);
+
+        var normalized = !hasCr ? text : pairs == 0 ? text.Replace('\r', '\n')
+            : string.Create(text.Length - pairs, text, static (destination, source) =>
+            {
+                var remaining = source.AsSpan();
+                while (remaining.IndexOf('\r') is var cr && cr >= 0)
+                {
+                    remaining[..cr].CopyTo(destination);
+                    destination[cr] = '\n';
+                    destination = destination[(cr + 1)..];
+                    remaining = remaining[(cr + (remaining[cr..] is ['\r', '\n', ..] ? 2 : 1))..];
+                }
+                remaining.CopyTo(destination);
+            });
+        return (normalized, endings.ToImmutable(), mixed ? LineEndingKind.Mixed : first ?? LineEndingKind.Lf);
     }
 }

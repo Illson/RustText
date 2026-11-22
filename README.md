@@ -43,4 +43,4 @@
 
 [Руководство пользователя](docs/user-guide.md) · [Выпуски](https://github.com/Illson/RustText/releases) · [Сообщить о проблеме](https://github.com/Illson/RustText/issues)
 
-Для разработки: [проверки](docs/verification.md) · [парные замеры производительности](docs/performance.md).
+Для разработки: [проверки](docs/verification.md) · [стенд замеров](docs/performance.md) · [история производительности](docs/performance-history.md).

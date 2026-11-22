@@ -356,7 +356,7 @@ public partial class MainWindow
                 var previewLimit = 100 - results.Count;
                 var caretLimit = selectAll ? MultiCaretEditing.MaxCarets : 0;
                 var result = await Task.Run(
-                    () => TextOperations.Find(text, query, previewLimit, source.Token, caretLimit), source.Token);
+                    () => TextOperations.Find(text, new TextMatcher(options, query), previewLimit, source.Token, caretLimit), source.Token);
                 if (tab.Revision != revision || !ReferenceEquals(tab.Editor, editor))
                 {
                     incomplete = true;
@@ -449,14 +449,14 @@ public partial class MainWindow
         }
         var text = editor.Text;
         var revision = tab.Revision;
-        var match = await Task.Run(() => TextOperations.FindNext(text, query, offset, backward), _lifetime.Token);
+        var result = await Task.Run(() => TextOperations.FindNext(text, new TextMatcher(options, query), offset, backward), _lifetime.Token);
         if (tab.Revision != revision || !ReferenceEquals(tab.Editor, editor) || !ReferenceEquals(ActiveTab, tab)
             || CurrentQuery() != options)
         {
             return;
         }
 
-        if (match is null)
+        if (result is not { } match)
         {
             _searchStatus.Text = "Совпадений нет";
             return;
@@ -503,7 +503,7 @@ public partial class MainWindow
         var source = editor.Text;
         var revision = tab.Revision;
         var format = tab.Format;
-        var result = await Task.Run(() => TextOperations.ReplaceAll(source, query, replacement, options.IsRegex,
+        var result = await Task.Run(() => TextOperations.ReplaceAll(source, new TextMatcher(options, query), replacement, options.IsRegex,
             _lifetime.Token, format.MixedEndings), _lifetime.Token);
         if (tab.Revision != revision || !_tabs.ContainsKey(tab.Id))
         {

@@ -19,7 +19,7 @@ internal sealed partial class ReplacementLineEndings
     private bool _previousWasCr;
     public ImmutableList<LineEndingKind>.Builder Result { get; } = ImmutableList.CreateBuilder<LineEndingKind>();
 
-    public ReplacementLineEndings(string source, ImmutableList<LineEndingKind> original, Regex regex,
+    public ReplacementLineEndings(string source, ImmutableList<LineEndingKind> original, Regex? regex,
         string template, bool expandGroups, Action checkOperation)
     {
         _source = source;
@@ -48,8 +48,8 @@ internal sealed partial class ReplacementLineEndings
                 "$'" => m => (m.Index + m.Length)..source.Length,
                 "$_" => _ => 0..source.Length,
                 "$&" => CaptureRange(0),
-                "$+" => CaptureRange(regex.GetGroupNumbers()[^1]),
-                _ => NamedOrNumberedRange(regex, token.Value)
+                "$+" => CaptureRange(regex!.GetGroupNumbers()[^1]),
+                _ => NamedOrNumberedRange(regex!, token.Value)
             };
             if (range is not null) _references.Add((token, range));
         }
@@ -106,6 +106,9 @@ internal sealed partial class ReplacementLineEndings
         }
         Append(_template.AsSpan(offset), first + (Result.Count - initialCount), limit);
     }
+
+    public void AppendLiteralReplacement(int index, int length, string inserted) =>
+        Append(inserted, FirstBreakAt(index), FirstBreakAt(index + length));
 
     private int FirstBreakAt(int offset)
     {

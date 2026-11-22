@@ -1,5 +1,6 @@
 using System.Text;
 using RustText.Demo;
+using RustText.Demo.Editor;
 using RustText.Demo.Logs;
 using Xunit;
 
@@ -258,6 +259,128 @@ public sealed class LogTests
         Assert.Equal(reader.PreambleLength + block, first.Offset);
         Assert.Equal(1L, first.Lines);
         Assert.Equal(complete, reader.ScanLineBreaks(first, file.Length, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public void SparseScanHandlesDenseMixedSeparatorsAcrossVectorLanesAndPartialCheckpoints()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "dense-index.log");
+        var prefix = new string('x', 31) + "\r\n" + new string('y', 30) + "\r\n";
+        var text = prefix + string.Concat(Enumerable.Repeat("a\r\r\n\nb\nc\r", 300)) + "tail";
+        File.WriteAllText(path, text);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+
+        foreach (var offset in new[] { 31, 32, 33, 63, 64, 65, text.Length - 1 })
+        {
+            var head = reader.ScanLineBreaks(default, offset, null, default);
+            var whole = reader.ScanLineBreaks(head, file.Length, null, default);
+            Assert.Equal(new(file.Length, 2 + 300 * 5), whole);
+        }
+    }
+
+    [Fact]
+    public void SearchSkipsOnlyCompleteLinesAndKeepsNumberAndMatchOffsetsAtWindowBoundary()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "search-window.log");
+        var prefix = "first\rlf\n" + new string('x', LogDataReader.DefaultPageBytes - "first\rlf\n".Length - 1) + "\r\n";
+        const string target = "😀needle needle\r";
+        File.WriteAllText(path, prefix + target + "needle at tail");
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        var options = new SearchOptions("needle", false, true, false);
+
+        var batch = reader.Search(options, new(0, 0), file.Length, 1, 1, long.MaxValue, default);
+        var hit = Assert.Single(batch.Hits);
+        Assert.Equal(prefix.Length, hit.Offset);
+        Assert.Equal(4L, hit.LineNumber);
+        Assert.Equal(2, hit.MatchIndex);
+        Assert.Equal(Encoding.UTF8.GetByteCount(target), hit.LineLengthBytes);
+        Assert.False(hit.WasIncomplete);
+        Assert.Equal(new LogSearchCursor(prefix.Length, 9), batch.NextCursor);
+
+        var continuation = reader.Search(options, batch.NextCursor!, file.Length, hit.LineNumber, 32, long.MaxValue, default);
+        Assert.Equal([9, 0], continuation.Hits.Select(item => item.MatchIndex));
+        Assert.Equal([4L, 5L], continuation.Hits.Select(item => item.LineNumber));
+        Assert.True(continuation.Hits[^1].WasIncomplete);
+        Assert.False(continuation.HasMore);
+    }
+
+    [Theory]
+    [InlineData(@"^\d+.*MARKER", true, "123 MARKER", 0, 10)]
+    [InlineData(@"foo?bar", true, "fobar", 0, 5)]
+    [InlineData(@"(unneeded|target)", true, "a target", 2, 6)]
+    [InlineData(@"(?i)MARKER", true, "marker", 0, 6)]
+    [InlineData(@"(?x)M A R K E R", true, "MARKER", 0, 6)]
+    [InlineData(@"\x61nd", true, "and", 0, 3)]
+    [InlineData("K", false, "K", 0, 1)]
+    public void SearchPrefilterDoesNotChangeRegexOrInvariantCaseMatching(string query, bool matchCase, string text, int index, int length)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "prefilter.log");
+        var prefix = string.Concat(Enumerable.Repeat("ignore\r\n", 20_000));
+        File.WriteAllText(path, prefix + text + "\n");
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        var options = new SearchOptions(query, query != "K", matchCase, false);
+
+        var result = reader.Search(options, new(0, 0), file.Length, 1, 32, long.MaxValue, default);
+        var hit = Assert.Single(result.Hits);
+        Assert.Equal(prefix.Length, hit.Offset);
+        Assert.Equal(20_001, hit.LineNumber);
+        Assert.Equal(index, hit.MatchIndex);
+        Assert.Equal(length, hit.MatchLength);
+    }
+
+    [Theory]
+    [InlineData(TextEncodingKind.Utf8Bom)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian)]
+    [InlineData(TextEncodingKind.Utf16BigEndian)]
+    [InlineData(TextEncodingKind.Windows1251)]
+    public void SearchUsesByteOffsetsAcrossEncodingsAndKeepsPartialLineWhenResuming(TextEncodingKind encoding)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "encoded-search.log");
+        const string prefix = "первая\r\n";
+        const string target = "Ёжик пришёл; Ёжик остался\r";
+        var bom = encoding != TextEncodingKind.Windows1251;
+        var offset = Encode(prefix, encoding, bom).Length;
+        File.WriteAllBytes(path, Encode(prefix + target + "хвост", encoding, bom));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        var options = new SearchOptions("Ёжик", false, true, true);
+
+        var first = reader.Search(options, new(offset, 0), file.Length, 2, 32, 8, default);
+        Assert.Empty(first.Hits);
+        Assert.True(first.HasMore);
+        Assert.NotEmpty(first.NextCursor!.PendingText);
+        var rest = reader.Search(options, first.NextCursor, file.Length, 2, 32, long.MaxValue, default);
+
+        Assert.Equal([0, 13], rest.Hits.Select(hit => hit.MatchIndex));
+        Assert.All(rest.Hits, hit =>
+        {
+            Assert.Equal(offset, hit.Offset);
+            Assert.Equal(2L, hit.LineNumber);
+            Assert.Equal(Encode(target, encoding, false).Length, hit.LineLengthBytes);
+        });
+        Assert.False(rest.HasMore);
+    }
+
+    [Fact]
+    public void SearchReplacementCharacterMatchesInvalidUtf8WithoutSearchingPastSnapshot()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "invalid-sequence.log");
+        File.WriteAllBytes(path, [(byte)'a', 0xff, (byte)'\n', 0xff]);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        var options = new SearchOptions("\uFFFD", false, true, false);
+        var result = reader.Search(options, new(0, 0), 3, 1, 32, long.MaxValue, default);
+        Assert.Equal(1, Assert.Single(result.Hits).MatchIndex);
+        Assert.Throws<OperationCanceledException>(() => reader.Search(options, new(0, 0), 3, 1, 32,
+            long.MaxValue, new CancellationToken(true)));
     }
 
     private static byte[] Encode(string text, TextEncodingKind encoding, bool preamble)
