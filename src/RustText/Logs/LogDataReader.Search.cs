@@ -48,6 +48,7 @@ internal sealed partial class LogDataReader
                 var bytes = scan.ReadWindow(handle, offset, request, end, token);
                 var pageEnd = Math.Min(bytes.Length, pageBytes);
                 var position = 0;
+                var canMoveTail = pageEnd == DefaultPageBytes && offset + pageEnd < budgetEnd;
 
                 // Skip only complete lines, never a continuation or a line split
                 // by the I/O window. A window cannot contain an over-limit line.
@@ -79,6 +80,9 @@ internal sealed partial class LogDataReader
                     if (limit == 0) break;
                     var frame = ReadFrame(bytes, position, limit, end - offset);
                     if (frame.ConsumedBytes == 0) break;
+                    // Start the next read window at the last complete line. A
+                    // short fragment at its tail then needs no decoded buffer.
+                    if (canMoveTail && !continued && position > 0 && frame.Truncated && limit < DefaultFrameBytes) break;
                     var content = bytes.Slice(position, frame.TextBytes);
                     if (!continued)
                     {

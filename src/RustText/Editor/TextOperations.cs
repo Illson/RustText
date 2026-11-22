@@ -45,7 +45,7 @@ internal static class TextOperations
     public static SearchSummary Find(string text, TextMatcher matcher, int resultLimit, CancellationToken cancellationToken, int caretLimit = 0)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var hits = new List<SearchHit>(Math.Min(resultLimit, 100));
+        var hits = new List<SearchHit>(Math.Min(resultLimit, 256));
         var carets = caretLimit > 0 ? new List<CaretRange>() : null;
         var count = 0;
         var line = 1;

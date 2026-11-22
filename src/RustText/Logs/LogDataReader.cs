@@ -1,7 +1,7 @@
 using System.Buffers;
-using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Text;
 using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
@@ -46,16 +46,14 @@ internal sealed partial class LogDataReader
         }
 
         var count = (int)Math.Min(witnessedSize, 256);
-        var head = ReadWindow(_file.SafeFileHandle, 0, count, CancellationToken.None);
-        var tail = ReadWindow(_file.SafeFileHandle, witnessedSize - count, count, CancellationToken.None);
-        if (head.Length != count || tail.Length != count)
+        Span<byte> witness = stackalloc byte[count * 2];
+        var handle = _file.SafeFileHandle;
+        if (ReadWindowInto(handle, 0, witness[..count], CancellationToken.None) != count
+            || ReadWindowInto(handle, witnessedSize - count, witness[count..], CancellationToken.None) != count)
         {
             throw new EndOfStreamException("Файл изменился при проверке закладки лога.");
         }
 
-        var witness = new byte[count * 2];
-        head.CopyTo(witness, 0);
-        tail.CopyTo(witness, count);
         return SHA256.HashData(witness);
     }
 
@@ -127,38 +125,40 @@ internal sealed partial class LogDataReader
         return new(offset, lines);
     }
 
-    // Each CR counts once. An LF counts only when the preceding byte is not CR,
-    // including the first lane after a vector, read window or sparse checkpoint.
+    // Each CR counts once. An LF counts only when the preceding byte is not CR.
+    // Count in byte lanes and widen the sums before a lane can overflow.
     private static int CountByteLineBreaks(ReadOnlySpan<byte> bytes, bool previousCr = false)
     {
+        if (bytes.IsEmpty) return 0;
         var lines = 0;
         var i = 0;
-        ref var start = ref MemoryMarshal.GetReference(bytes);
-        if (Vector256.IsHardwareAccelerated)
+        if (Sse2.IsSupported && bytes.Length > Vector128<byte>.Count)
         {
-            var crs = Vector256.Create((byte)'\r');
-            var lfs = Vector256.Create((byte)'\n');
-            for (; i <= bytes.Length - Vector256<byte>.Count; i += Vector256<byte>.Count)
-            {
-                var vector = Vector256.LoadUnsafe(ref start, (nuint)i);
-                var cr = Vector256.Equals(vector, crs).ExtractMostSignificantBits();
-                var lf = Vector256.Equals(vector, lfs).ExtractMostSignificantBits();
-                lines += BitOperations.PopCount(cr | (lf & ~((cr << 1) | (previousCr ? 1u : 0u))));
-                previousCr = (cr >> 31) != 0;
-            }
-        }
-        if (Vector128.IsHardwareAccelerated)
-        {
+            // Count the first byte using the incoming CR state. Each full
+            // vector after that can read its predecessors one byte behind it.
+            if (bytes[0] == '\r' || (!previousCr && bytes[0] == '\n')) lines++;
+            i = 1;
+            ref var start = ref MemoryMarshal.GetReference(bytes);
+            var width = Vector128<byte>.Count;
             var crs = Vector128.Create((byte)'\r');
             var lfs = Vector128.Create((byte)'\n');
-            for (; i <= bytes.Length - Vector128<byte>.Count; i += Vector128<byte>.Count)
+            while (i <= bytes.Length - width)
             {
-                var vector = Vector128.LoadUnsafe(ref start, (nuint)i);
-                var cr = Vector128.Equals(vector, crs).ExtractMostSignificantBits();
-                var lf = Vector128.Equals(vector, lfs).ExtractMostSignificantBits();
-                lines += BitOperations.PopCount(cr | (lf & ~((cr << 1) | (previousCr ? 1u : 0u))));
-                previousCr = (cr >> 15) != 0;
+                var stop = i + Math.Min((bytes.Length - i) / width, 128) * width;
+                var counts = Vector128<byte>.Zero;
+                for (; i < stop; i += width)
+                {
+                    var current = Vector128.LoadUnsafe(ref start, (nuint)i);
+                    var prior = Vector128.LoadUnsafe(ref start, (nuint)(i - 1));
+                    var cr = Vector128.Equals(current, crs);
+                    var lf = Vector128.Equals(current, lfs);
+                    var followsCr = Vector128.Equals(prior, crs);
+                    counts -= cr | Vector128.AndNot(lf, followsCr);
+                }
+                var sums = Sse2.SumAbsoluteDifferences(counts, Vector128<byte>.Zero).AsUInt64();
+                lines += (int)(sums.GetElement(0) + sums.GetElement(1));
             }
+            previousCr = bytes[i - 1] == '\r';
         }
         for (; i < bytes.Length; i++)
         {
@@ -514,15 +514,27 @@ internal sealed partial class LogDataReader
         var candidate = Math.Max(_bomLength, length - DefaultPageBytes);
         var aligned = AlignOffset(candidate, length);
         var scanLength = (int)Math.Min(DefaultPageBytes, length - aligned);
-        var bytes = ReadWindow(_file.SafeFileHandle, aligned, scanLength, cancellationToken);
+        var buffer = ArrayPool<byte>.Shared.Rent(scanLength);
+        try
+        {
+            var read = ReadWindowInto(_file.SafeFileHandle, aligned, buffer.AsSpan(0, scanLength), cancellationToken);
+            return FindPreviousPageStart(buffer.AsSpan(0, read), aligned, cancellationToken);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
 
+    private long FindPreviousPageStart(ReadOnlySpan<byte> bytes, long aligned, CancellationToken cancellationToken)
+    {
         var pageStart = bytes.Length;
         var searchIndex = bytes.Length - _codeUnitBytes;
-        if (searchIndex >= 0 && IsLineEndingCodeUnit(bytes.AsSpan(searchIndex, _codeUnitBytes)))
+        if (searchIndex >= 0 && IsLineEndingCodeUnit(bytes.Slice(searchIndex, _codeUnitBytes)))
         {
-            if (IsLineFeed(bytes.AsSpan(searchIndex, _codeUnitBytes))
+            if (IsLineFeed(bytes.Slice(searchIndex, _codeUnitBytes))
                 && searchIndex >= _codeUnitBytes
-                && IsCarriageReturn(bytes.AsSpan(searchIndex - _codeUnitBytes, _codeUnitBytes)))
+                && IsCarriageReturn(bytes.Slice(searchIndex - _codeUnitBytes, _codeUnitBytes)))
             {
                 searchIndex -= _codeUnitBytes * 2;
             }
@@ -536,20 +548,25 @@ internal sealed partial class LogDataReader
         for (var index = searchIndex; index >= 0; index -= _codeUnitBytes)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!IsLineEndingCodeUnit(bytes.AsSpan(index, _codeUnitBytes)))
+            if (_codeUnitBytes == 1)
+            {
+                index = bytes[..(index + 1)].LastIndexOfAny((byte)'\r', (byte)'\n');
+                if (index < 0) break;
+            }
+            else if (!IsLineEndingCodeUnit(bytes.Slice(index, _codeUnitBytes)))
             {
                 continue;
             }
 
-            if (IsLineFeed(bytes.AsSpan(index, _codeUnitBytes)) && index >= _codeUnitBytes
-                && IsCarriageReturn(bytes.AsSpan(index - _codeUnitBytes, _codeUnitBytes)))
+            if (IsLineFeed(bytes.Slice(index, _codeUnitBytes)) && index >= _codeUnitBytes
+                && IsCarriageReturn(bytes.Slice(index - _codeUnitBytes, _codeUnitBytes)))
             {
                 continue;
             }
 
-            var endingBytes = IsCarriageReturn(bytes.AsSpan(index, _codeUnitBytes))
+            var endingBytes = IsCarriageReturn(bytes.Slice(index, _codeUnitBytes))
                 && index + _codeUnitBytes < bytes.Length
-                && IsLineFeed(bytes.AsSpan(index + _codeUnitBytes, _codeUnitBytes))
+                && IsLineFeed(bytes.Slice(index + _codeUnitBytes, _codeUnitBytes))
                     ? _codeUnitBytes * 2
                     : _codeUnitBytes;
             var lineStart = index + endingBytes;
@@ -560,7 +577,6 @@ internal sealed partial class LogDataReader
             }
 
             pageStart = lineStart;
-            index -= endingBytes - _codeUnitBytes;
             if (renderedRows == DefaultPageSize)
             {
                 return aligned + pageStart;

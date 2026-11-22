@@ -239,6 +239,27 @@ public sealed class LogTests
     }
 
     [Theory]
+    [InlineData(TextEncodingKind.Utf8, false)]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, true)]
+    [InlineData(TextEncodingKind.Utf16BigEndian, true)]
+    public void GetEndOffsetCountsAdjacentCrAndCrLfAsSeparateLines(TextEncodingKind encoding, bool preamble)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "tail.log");
+        var text = string.Concat(Enumerable.Range(1, 100).Select(i => $"row-{i}\r\r\n"));
+        File.WriteAllBytes(path, Encode(text, encoding, preamble));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+        var page = reader.ReadPage(reader.GetEndOffset());
+
+        Assert.Equal(80, page.Rows.Count);
+        Assert.Equal("row-61", page.Rows[0].Text);
+        Assert.Equal("row-100", page.Rows[^2].Text);
+        Assert.Empty(page.Rows[^1].Text);
+        Assert.False(page.HasMore);
+    }
+
+    [Theory]
     [InlineData(TextEncodingKind.Utf8, false, 1)]
     [InlineData(TextEncodingKind.Utf16LittleEndian, true, 2)]
     [InlineData(TextEncodingKind.Utf16BigEndian, true, 2)]
@@ -381,6 +402,29 @@ public sealed class LogTests
         Assert.Equal(1, Assert.Single(result.Hits).MatchIndex);
         Assert.Throws<OperationCanceledException>(() => reader.Search(options, new(0, 0), 3, 1, 32,
             long.MaxValue, new CancellationToken(true)));
+    }
+
+    [Fact]
+    public void LiteralMissDoesNotAllocatePerLine()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "search-miss.log");
+        File.WriteAllText(path, string.Concat(Enumerable.Repeat("2026-11-22 INFO запрос выполнен\r\n", 50_000)));
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf8);
+        var options = new SearchOptions("no matching lines", false, true, false);
+        var cursor = new LogSearchCursor(0, 0);
+        var length = file.Length;
+        _ = reader.Search(options, cursor, length, 1, 32, long.MaxValue, default);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var result = reader.Search(options, cursor, length, 1, 32, long.MaxValue, default);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Empty(result.Hits);
+        Assert.False(result.HasMore);
+        // Also allow a fresh rent of the 256 KiB read window if the shared pool was empty.
+        Assert.True(allocated < 512 * 1024, $"Literal miss allocated {allocated:N0} bytes.");
     }
 
     private static byte[] Encode(string text, TextEncodingKind encoding, bool preamble)
