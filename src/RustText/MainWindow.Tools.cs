@@ -41,6 +41,9 @@ public partial class MainWindow
             _recentMenu,
             _closedFilesMenu,
             new Separator(),
+            MenuGroup("Шифрование",
+                Command("Зашифровать копию вкладки…", () => Run(EncryptActiveTabAsync)),
+                Command("Расшифровать файл…", () => Run(DecryptTabFileAsync))),
             Command("Настроить открытие файлов в Windows…", () => Run(RegisterAssociationsAsync)),
             Command("Выход", Close)));
         TopMenu.Items.Add(MenuGroup("_Инструменты",
