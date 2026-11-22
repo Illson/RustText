@@ -230,18 +230,71 @@ public sealed class RecycleDialogTests
             }
             Assert.Equal("fixture", await File.ReadAllTextAsync(path));
 
-            async Task<Window> FindDialogAsync(string title)
-            {
-                await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any(dialog => dialog.Title == title));
-                var dialog = Assert.Single(window.OwnedWindows, dialog => dialog.Title == title);
-                dialog.UpdateLayout();
-                return dialog;
-            }
-
-            static void Click(Window dialog, string label) =>
-                Assert.Single(dialog.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, label))
-                    .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Task<Window> FindDialogAsync(string title) => WaitForDialogAsync(window, title);
         });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task UnreleasableChildPreventsClosingOtherOwners(bool blockAfterForcePrompt) => HeadlessTests.RunAsync(async _ =>
+    {
+        using var temp = new TempDirectory();
+        var first = Path.Combine(temp.Path, "first.txt");
+        var second = Path.Combine(temp.Path, "second.txt");
+        await File.WriteAllTextAsync(first, "first");
+        await File.WriteAllTextAsync(second, "second");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        await using var fixture = await TestLockOwner.StartAsync(second, timeout.Token);
+        using var initial = blockAfterForcePrompt ? null : HoldFirst();
+        var window = new MainWindow([]);
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished"));
+            var remove = window.RecyclePathAsync(temp.Path);
+            Click(await WaitForDialogAsync(window, "Удалить с диска?"), "Удалить");
+            if (blockAfterForcePrompt)
+            {
+                Click(await WaitForDialogAsync(window, "Объект занят"), "Освободить и удалить");
+                var force = await WaitForDialogAsync(window, "Принудительное завершение");
+                using var changed = HoldFirst();
+                Click(force, "Завершить и удалить");
+                await DismissBlockedAsync();
+            }
+            else await DismissBlockedAsync();
+            await remove;
+            Assert.False(fixture.Process.HasExited);
+            Assert.Equal("first", await File.ReadAllTextAsync(first));
+            Assert.Equal("second", await File.ReadAllTextAsync(second));
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            window.Close();
+            await fixture.ReleaseAsync();
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_closed"));
+        }
+        FileStream HoldFirst() => new(first, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        async Task DismissBlockedAsync()
+        {
+            var blocked = await WaitForDialogAsync(window, "Объект остаётся занят");
+            Assert.Single(blocked.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, "Закрыть"));
+            Assert.DoesNotContain(blocked.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, "Завершить и удалить"));
+            Click(blocked, "Закрыть");
+        }
+    });
+
+    private static async Task<Window> WaitForDialogAsync(MainWindow window, string title)
+    {
+        await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any(dialog => dialog.Title == title));
+        var dialog = Assert.Single(window.OwnedWindows, dialog => dialog.Title == title);
+        dialog.UpdateLayout();
+        return dialog;
+    }
+
+    private static void Click(Window dialog, string label) =>
+        Assert.Single(dialog.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, label))
+            .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
 
     private static bool ReadFlag(MainWindow window, string name) => (bool)typeof(MainWindow)
         .GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(window)!;
