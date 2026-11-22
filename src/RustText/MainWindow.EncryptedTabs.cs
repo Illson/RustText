@@ -156,10 +156,10 @@ public partial class MainWindow
                     if (removedDrafts.Count == 0) return;
                     foreach (var entry in await storage.DraftArchive.GetEntriesAsync(token))
                     {
-                        // Tab numbers can be reused after restart. Do not remove an older, unrelated archive by ID alone.
+                        // A live checkpoint has no closing time. Its number and text may belong to another note after restart.
                         if (removedDrafts.Any(item => item.Id == entry.Tab.Id
                             && string.Equals(item.DraftSha256, entry.Sha256, StringComparison.OrdinalIgnoreCase)
-                            && (item.ClosedAtMs is null || item.ClosedAtMs == entry.Tab.ClosedAtMs)))
+                            && item.ClosedAtMs is { } closedAt && closedAt == entry.ClosedAtMs))
                             await storage.DraftArchive.RemoveAsync(entry, token, requireDeletion: true);
                     }
                 });

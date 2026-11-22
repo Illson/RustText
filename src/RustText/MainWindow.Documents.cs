@@ -812,12 +812,14 @@ public partial class MainWindow
                 return;
             }
 
+            EncryptedTabFile.EnsurePlaintextTarget(target);
             if (!SamePath(path, target) || expected is null)
             {
                 expected = File.Exists(target) ? await DocumentFiles.GetStampAsync(target, _lifetime.Token) : null;
             }
             path = target;
         }
+        else EncryptedTabFile.EnsurePlaintextTarget(path);
 
         var changedPath = !SamePath(tab.Path, path);
         if (changedPath && FileViews(path).Any(view => !ReferenceEquals(view.Tab, tab)))

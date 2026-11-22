@@ -363,6 +363,7 @@ public partial class MainWindow
                     });
                     if (selected?.TryGetLocalPath() is { } path)
                     {
+                        EncryptedTabFile.EnsurePlaintextTarget(path);
                         await Task.Run(() => generator.GenerateFileAsync(path, reporter, token), token);
                         status.Text = $"Сохранено · {path}";
                     }

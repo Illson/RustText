@@ -25,6 +25,12 @@ internal static class EncryptedTabFile
 
     public static bool HasExtension(string path) => string.Equals(Path.GetExtension(path), Extension, StringComparison.OrdinalIgnoreCase);
 
+    public static void EnsurePlaintextTarget(string path)
+    {
+        if (HasExtension(path))
+            throw new IOException("Расширение .rte предназначено для шифрования. Выберите другое имя или используйте «Инструменты → Шифрование».");
+    }
+
     public static byte[] Encrypt(string text, string password, string hint)
     {
         if (password.Length == 0)
