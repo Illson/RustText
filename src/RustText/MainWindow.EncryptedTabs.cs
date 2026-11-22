@@ -13,14 +13,27 @@ public partial class MainWindow
     {
         Patterns = ["*" + EncryptedTabFile.Extension]
     };
+    private readonly SemaphoreSlim _encryptedOpenGate = new(1, 1);
 
     private Task EncryptActiveTabAsync() => EncryptActiveTabAsync(PickEncryptedTargetAsync);
 
     internal async Task EncryptActiveTabAsync(Func<Task<string?>> chooseTargetAsync)
     {
-        if (ActiveTab?.Editor?.Document is not { } document)
+        if (ActiveTab is not { Editor: { } editor } tab)
         {
             SetStatus("Для шифрования откройте обычную текстовую вкладку.");
+            return;
+        }
+        if (tab.Closing) return;
+        var document = editor.Document;
+        var views = _workspace.Windows.Where(owner => !owner._closed)
+            .SelectMany(owner => owner.LoadedWorkspaceTabs()
+                .Where(view => ReferenceEquals(view.Editor?.Document, document)).Select(view => (Owner: owner, Tab: view)))
+            .ToArray();
+        if (views.Any(view => view.Owner._closing || view.Owner._closed || view.Owner._workspaceSwitchPending
+            || view.Tab.Closing || view.Tab.Saving || view.Tab.Loading || view.Tab.CheckingSession))
+        {
+            SetStatus("Дождитесь завершения операции с вкладкой перед шифрованием.");
             return;
         }
         if (document.TextLength > EncryptedTabFile.MaxTextBytes)
@@ -29,25 +42,147 @@ public partial class MainWindow
             return;
         }
 
+        var viewEditors = views.Select(view => (view.Tab, Editor: view.Tab.Editor!, view.Tab.Editor!.IsEnabled)).ToArray();
+        var revision = tab.Revision;
         var snapshot = document.CreateSnapshot();
+        var sourcePath = tab.Path;
         var token = _lifetime.Token;
-        if (await chooseTargetAsync() is not { } path) return;
-        token.ThrowIfCancellationRequested();
-        if (File.Exists(path))
+        foreach (var (item, viewEditor, _) in viewEditors)
         {
-            SetStatus("Файл уже существует. Выберите новое имя; шифрование не перезаписывает файлы.");
-            return;
+            item.Closing = true;
+            viewEditor.IsEnabled = false;
+        }
+        try
+        {
+            if (await chooseTargetAsync() is not { } path) return;
+            token.ThrowIfCancellationRequested();
+            if (File.Exists(path))
+            {
+                SetStatus("Файл уже существует. Выберите новое имя; шифрование не перезаписывает файлы.");
+                return;
+            }
+            if (!EncryptedTabFile.HasExtension(path))
+            {
+                SetStatus("Для зашифрованной копии укажите имя с расширением .rte.");
+                return;
+            }
+
+            var input = await AskEncryptionPasswordAsync(creating: true, string.Empty, null);
+            if (input is not { } secret) return;
+            var container = await Task.Run(() =>
+            {
+                using var reader = snapshot.CreateReader();
+                return EncryptedTabFile.Encrypt(reader.ReadToEnd(), secret.Password, secret.Hint);
+            }, token);
+            await EncryptedTabFile.WriteNewAsync(path, container, token);
+
+            await _workspace.WorkspaceSwitchGate.WaitAsync(token);
+            try
+            {
+                await CloseEncryptedViewsAsync(views, tab, revision, document, sourcePath, token);
+            }
+            finally { _workspace.WorkspaceSwitchGate.Release(); }
+        }
+        finally
+        {
+            foreach (var (item, viewEditor, wasEnabled) in viewEditors)
+            {
+                item.Closing = false;
+                if (ReferenceEquals(item.Editor, viewEditor))
+                {
+                    viewEditor.IsEnabled = wasEnabled;
+                    if (item.AutoRefresh) item.FileWatch?.Schedule(force: true);
+                }
+            }
+        }
+    }
+
+    private async Task CloseEncryptedViewsAsync((MainWindow Owner, WorkTab Tab)[] views, WorkTab source, long revision,
+        AvaloniaEdit.Document.TextDocument document, string? sourcePath, CancellationToken token)
+    {
+        var affected = new Dictionary<StorageService, HashSet<long>>();
+        var emptyWindows = new HashSet<MainWindow>();
+        string? cleanupError = null;
+
+        await _workspace.SaveGate.WaitAsync(token);
+        try
+        {
+            if (source.Revision != revision || views.Any(view => !ReferenceEquals(view.Tab.Editor?.Document, document)))
+            {
+                SetStatus("Зашифрованная копия сохранена. Вкладка изменена во время операции и оставлена открытой.");
+                return;
+            }
+
+            foreach (var (owner, tab) in views)
+            {
+                var hidden = owner._workspaceViews.Values.FirstOrDefault(view =>
+                    ReferenceEquals(view.Tabs.GetValueOrDefault(tab.Id), tab));
+                var storage = hidden?.Storage ?? owner.SessionStorage;
+                AddAffected(storage, tab.Id);
+                owner.RemoveTab(tab, hidden?.Tabs);
+                if (hidden is null && owner._tabs.Count == 0) emptyWindows.Add(owner);
+            }
+
+            foreach (var (storage, ids) in affected.ToArray())
+            {
+                if (!_workspace.DetachedDrafts.TryGetValue(storage, out var recovery)) continue;
+                foreach (var id in ids.ToArray())
+                {
+                    if (recovery.DestinationIds.Remove(id, out var destination) && destination is { } previousId
+                        && !SessionViews(recovery.PrimaryStorage, null).Any(view => view.View.Tabs.ContainsKey(previousId)))
+                        AddAffected(recovery.PrimaryStorage, previousId);
+                }
+            }
+
+            foreach (var (storage, ids) in affected)
+            {
+                var cacheKey = StorageCacheKey(storage);
+                _workspace.GetClosedTabs(storage).RemoveAll(RemoveClosed);
+                foreach (var id in ids) _workspace.GetLiveDrafts(cacheKey).Remove(id);
+                _workspace.SetLastCheckpoint(cacheKey, null);
+                await TryCleanupAsync(async () =>
+                {
+                    await storage.RemoveTabHistoryAsync(ids, RemoveClosed, token);
+                    // A newly imported session may still have no .NET checkpoint. Commit the remaining
+                    // live tabs so the previous application's profile is not restored on the next launch.
+                    if (!storage.HasSessionCheckpoint && !_workspace.UnavailableSessions.Contains(cacheKey)
+                        && SessionViews(storage, null).ToList() is { Count: > 0 } owners)
+                        await SaveSessionViewsAsync(storage, owners, forget: null, force: true);
+                });
+                await TryCleanupAsync(async () =>
+                {
+                    foreach (var entry in await storage.DraftArchive.GetEntriesAsync(token))
+                        if (ids.Contains(entry.Tab.Id)) await storage.DraftArchive.RemoveAsync(entry, token, requireDeletion: true);
+                });
+
+                // A file bookmark has no text of its own. Independent drafts of the same file are not removed by path.
+                bool RemoveClosed(SessionTab entry) => ids.Contains(entry.Id)
+                    || (sourcePath is not null && entry.DraftRef is null && SamePath(entry.Path, sourcePath));
+            }
+
+            if (sourcePath is not null)
+                await TryCleanupAsync(async () => { _recent = await _storage.RemoveRecentAsync(sourcePath, token); });
+        }
+        finally { _workspace.SaveGate.Release(); }
+
+        foreach (var owner in emptyWindows)
+            if (!owner._closed && owner._tabs.Count == 0) await TryCleanupAsync(owner.ShowHomeAsync);
+        RefreshHistoryMenus();
+        SetStatus(cleanupError is null
+            ? "Зашифрованная копия сохранена. Исходная вкладка закрыта без истории."
+            : $"Зашифрованная копия сохранена, но не удалось полностью очистить историю вкладки. {cleanupError}");
+
+        void AddAffected(StorageService storage, long id)
+        {
+            if (!affected.TryGetValue(storage, out var ids)) affected.Add(storage, ids = []);
+            ids.Add(id);
         }
 
-        var input = await AskEncryptionPasswordAsync(creating: true, string.Empty, null);
-        if (input is not { } secret) return;
-        var container = await Task.Run(() =>
+        async Task TryCleanupAsync(Func<Task> cleanup)
         {
-            using var reader = snapshot.CreateReader();
-            return EncryptedTabFile.Encrypt(reader.ReadToEnd(), secret.Password, secret.Hint);
-        }, token);
-        await EncryptedTabFile.WriteNewAsync(path, container, token);
-        if (!_closed) SetStatus("Зашифрованная копия сохранена. Исходная вкладка не изменена.");
+            try { await cleanup(); }
+            catch (Exception error) when (IsUserError(error)) { cleanupError ??= error.Message; }
+        }
     }
 
     private async Task<string?> PickEncryptedTargetAsync()
@@ -74,11 +209,29 @@ public partial class MainWindow
         if (file.TryGetLocalPath() is { } path) await DecryptTabPathAsync(path);
     }
 
-    internal async Task DecryptTabPathAsync(string path)
+    private async Task DecryptTabPathAsync(string path)
     {
         var token = _lifetime.Token;
+        await _encryptedOpenGate.WaitAsync(token);
+        try
+        {
+            if (!_closing && !_closed) await OpenEncryptedContainerAsync(path, token);
+        }
+        finally { _encryptedOpenGate.Release(); }
+    }
+
+    private async Task OpenEncryptedContainerAsync(string path, CancellationToken token)
+    {
         var container = await EncryptedTabFile.ReadAsync(path, token);
         var hint = EncryptedTabFile.ReadHint(container);
+        if (_recent.Any(entry => SamePath(entry.Path, path)))
+        {
+            try { await ForgetRecentFileAsync(path); }
+            catch (Exception failure) when (IsUserError(failure))
+            {
+                SetStatus($"Не удалось убрать зашифрованный файл из недавних. {failure.Message}");
+            }
+        }
         string? error = null;
         while (!token.IsCancellationRequested && await AskEncryptionPasswordAsync(creating: false, hint, error) is { } secret)
         {
@@ -107,9 +260,8 @@ public partial class MainWindow
         var body = DialogPanel(new TextBlock
         {
             Text = creating
-                ? "Шифруется только новая копия .rte. Исходная вкладка остаётся открытой: RustText может и дальше "
-                    + "сохранять её текст в черновиках без шифрования, даже если у вкладки ещё нет файла. "
-                    + "Исходный файл и прежние черновики не меняются.\n\n"
+                ? "После записи новой копии .rte исходная вкладка закроется, а её запись и черновики будут удалены из истории. "
+                    + "Исходный файл на диске не изменится. Отдельно сохранённые версии и копии не шифруются и не удаляются.\n\n"
                     + "Рекомендуется длинный уникальный пароль. "
                     + "Подсказку видно без пароля: не помещайте в неё секреты."
                 : string.IsNullOrEmpty(hint) ? "Подсказка не сохранена." : $"Подсказка из файла (ещё не проверена):\n{hint}",
