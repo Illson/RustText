@@ -137,12 +137,14 @@ public partial class MainWindow
             foreach (var (storage, ids) in affected)
             {
                 var cacheKey = StorageCacheKey(storage);
-                _workspace.GetClosedTabs(storage).RemoveAll(RemoveClosed);
+                var history = _workspace.GetClosedTabs(storage);
+                var removedDrafts = history.Where(item => RemoveClosed(item) && item.DraftSha256 is not null).ToList();
+                history.RemoveAll(RemoveClosed);
                 foreach (var id in ids) _workspace.GetLiveDrafts(cacheKey).Remove(id);
                 _workspace.SetLastCheckpoint(cacheKey, null);
                 await TryCleanupAsync(async () =>
                 {
-                    await storage.RemoveTabHistoryAsync(ids, RemoveClosed, token);
+                    removedDrafts.AddRange(await storage.RemoveTabHistoryAsync(ids, RemoveClosed, token));
                     // A newly imported session may still have no .NET checkpoint. Commit the remaining
                     // live tabs so the previous application's profile is not restored on the next launch.
                     if (!storage.HasSessionCheckpoint && !_workspace.UnavailableSessions.Contains(cacheKey)
@@ -151,8 +153,15 @@ public partial class MainWindow
                 });
                 await TryCleanupAsync(async () =>
                 {
+                    if (removedDrafts.Count == 0) return;
                     foreach (var entry in await storage.DraftArchive.GetEntriesAsync(token))
-                        if (ids.Contains(entry.Tab.Id)) await storage.DraftArchive.RemoveAsync(entry, token, requireDeletion: true);
+                    {
+                        // Tab numbers can be reused after restart. Do not remove an older, unrelated archive by ID alone.
+                        if (removedDrafts.Any(item => item.Id == entry.Tab.Id
+                            && string.Equals(item.DraftSha256, entry.Sha256, StringComparison.OrdinalIgnoreCase)
+                            && (item.ClosedAtMs is null || item.ClosedAtMs == entry.Tab.ClosedAtMs)))
+                            await storage.DraftArchive.RemoveAsync(entry, token, requireDeletion: true);
+                    }
                 });
 
                 // A file bookmark has no text of its own. Independent drafts of the same file are not removed by path.

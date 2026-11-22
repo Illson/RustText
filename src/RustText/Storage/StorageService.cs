@@ -590,13 +590,14 @@ internal sealed class StorageService
 
     // Encryption has already committed the text elsewhere. Do not rotate an old plaintext
     // checkpoint into the fallback, and do not touch the other tabs' drafts.
-    public async Task RemoveTabHistoryAsync(IReadOnlySet<long> tabIds, Predicate<SessionTab> removeClosed,
+    public async Task<IReadOnlyList<SessionTab>> RemoveTabHistoryAsync(IReadOnlySet<long> tabIds, Predicate<SessionTab> removeClosed,
         CancellationToken token)
     {
         using var writerLock = AcquireSessionLock();
         var latest = Path.Combine(_checkpoints, "latest.json");
         var previous = Path.Combine(_checkpoints, "previous.json");
         _hasCachedSession = _cachedSessionWasLatest = false;
+        var removedDrafts = new List<SessionTab>();
         foreach (var pointer in new[] { latest, previous })
         {
             if (!File.Exists(pointer)) continue;
@@ -621,8 +622,11 @@ internal sealed class StorageService
                 DetachedDrafts = detached
             };
             await WriteJsonAsync(manifest, cleaned, StorageJsonContext.Default.SessionState, token).ConfigureAwait(false);
+            removedDrafts.AddRange(state.Tabs.Where(tab => tabIds.Contains(tab.Id) && tab.DraftSha256 is not null));
+            removedDrafts.AddRange((state.ClosedTabs ?? []).Where(tab => removeClosed(tab) && tab.DraftSha256 is not null));
         }
         await PruneUnreferencedDraftsAsync(latest, previous, token, tabIds).ConfigureAwait(false);
+        return removedDrafts;
 
         WorkspaceLayout? ForgetLayoutTabs(WorkspaceLayout? layout) => layout is null ? null : layout with
         {
