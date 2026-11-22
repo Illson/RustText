@@ -20,7 +20,9 @@ internal sealed partial class LogDataReader
         int maxResults, long maxScanBytes, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var matcher = new TextMatcher(options);
+        // There is no newline inside a logical log line. Without Multiline,
+        // .NET can anchor a search such as \d{12}$ at the end of its input.
+        var matcher = new TextMatcher(options, multiline: false);
         var needle = CreateSearchPrefilter(options);
         var results = new List<LogSearchHit>(Math.Min(maxResults, 32));
         var offset = Math.Max(cursor.Offset, _bomLength);
@@ -172,8 +174,12 @@ internal sealed partial class LogDataReader
         return buffer.AsSpan(0, _decoder.GetChars(bytes, buffer));
     }
 
-    internal static string SearchLineDigest(ReadOnlySpan<char> text) =>
-        Convert.ToHexString(SHA256.HashData(MemoryMarshal.AsBytes(text)));
+    internal static string SearchLineDigest(ReadOnlySpan<char> text)
+    {
+        Span<byte> digest = stackalloc byte[SHA256.HashSizeInBytes];
+        SHA256.HashData(MemoryMarshal.AsBytes(text), digest);
+        return Convert.ToHexString(digest);
+    }
 
     private static string ClipMatch(ReadOnlySpan<char> text, int matchIndex)
     {

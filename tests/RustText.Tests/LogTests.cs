@@ -331,6 +331,7 @@ public sealed class LogTests
 
     [Theory]
     [InlineData(@"^\d+.*MARKER", true, "123 MARKER", 0, 10)]
+    [InlineData(@"\d{4}$", true, "suffix=0123", 7, 4)]
     [InlineData(@"foo?bar", true, "fobar", 0, 5)]
     [InlineData(@"(unneeded|target)", true, "a target", 2, 6)]
     [InlineData(@"(?i)MARKER", true, "marker", 0, 6)]

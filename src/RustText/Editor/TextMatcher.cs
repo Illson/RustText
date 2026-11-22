@@ -6,13 +6,13 @@ internal readonly record struct TextMatch(int Index, int Length);
 
 internal readonly struct TextMatcher
 {
-    public TextMatcher(SearchOptions options, Regex? expression = null)
+    public TextMatcher(SearchOptions options, Regex? expression = null, bool multiline = true)
     {
         if (options.Pattern.Length == 0) throw new ArgumentException("Введите текст для поиска.");
         if (!options.IsRegex && options.MatchCase && !options.WholeWord)
             Literal = options.Pattern;
         else
-            Expression = expression ?? TextOperations.BuildRegex(options);
+            Expression = expression ?? TextOperations.BuildRegex(options, multiline);
     }
 
     public string? Literal { get; }

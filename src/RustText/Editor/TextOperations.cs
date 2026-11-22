@@ -20,7 +20,7 @@ internal static class TextOperations
     internal const long AutomaticSearchMaxBytes = 1024L * 1024 * 1024;
     private static readonly TimeSpan SearchBudget = TimeSpan.FromMilliseconds(400);
 
-    public static Regex BuildRegex(SearchOptions options)
+    public static Regex BuildRegex(SearchOptions options, bool multiline = true)
     {
         if (options.Pattern.Length == 0)
         {
@@ -33,7 +33,8 @@ internal static class TextOperations
             pattern = @"(?<![\p{L}\p{N}\p{M}\p{Pc}])(?:" + pattern + @")(?![\p{L}\p{N}\p{M}\p{Pc}])";
         }
 
-        var flags = RegexOptions.CultureInvariant | RegexOptions.Multiline;
+        var flags = RegexOptions.CultureInvariant;
+        if (multiline) flags |= RegexOptions.Multiline;
         if (!options.MatchCase)
         {
             flags |= RegexOptions.IgnoreCase;
