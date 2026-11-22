@@ -57,6 +57,9 @@ public partial class MainWindow
             MenuGroup("Шифрование",
                 Command("Зашифровать копию вкладки…", () => Run(EncryptActiveTabAsync)),
                 Command("Расшифровать файл…", () => Run(DecryptTabFileAsync))),
+            MenuGroup("Удалить с диска",
+                Command("Выбрать файл…", () => Run(() => RecycleFromPickerAsync(folder: false))),
+                Command("Выбрать папку…", () => Run(() => RecycleFromPickerAsync(folder: true)))),
             Command("Настроить открытие файлов в Windows…", () => Run(RegisterAssociationsAsync)),
             Command("Выход", Close)));
         TopMenu.Items.Add(MenuGroup("_Инструменты",

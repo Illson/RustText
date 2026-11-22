@@ -42,6 +42,12 @@ public sealed class HistoryMenuTests
                 var toolsMenu = topMenu.Items.OfType<MenuItem>().Single(item => MenuHeader(item).Contains("Инструменты", StringComparison.Ordinal));
                 Assert.Contains(fileMenu.Items, item => ReferenceEquals(item, closedFiles));
                 Assert.DoesNotContain(fileMenu.Items, item => ReferenceEquals(item, closedDrafts));
+                var fileCommands = fileMenu.Items.OfType<MenuItem>().ToArray();
+                Assert.Equal(new[] { "Зашифровать копию вкладки…", "Расшифровать файл…" },
+                    MenuLabels(Assert.Single(fileCommands, item => MenuHeader(item) == "Шифрование")));
+                Assert.Equal(new[] { "Выбрать файл…", "Выбрать папку…" },
+                    MenuLabels(Assert.Single(fileCommands, item => MenuHeader(item) == "Удалить с диска")));
+                Assert.Single(fileCommands, item => MenuHeader(item) == "Настроить открытие файлов в Windows…");
 
                 var toolsGroups = toolsMenu.Items.OfType<MenuItem>().ToArray();
                 Assert.Equal(new[]
