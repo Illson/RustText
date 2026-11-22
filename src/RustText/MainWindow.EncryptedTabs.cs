@@ -110,7 +110,7 @@ public partial class MainWindow
                 ? "Шифруется только новая копия .rte. Исходная вкладка остаётся открытой: RustText может и дальше "
                     + "сохранять её текст в черновиках без шифрования, даже если у вкладки ещё нет файла. "
                     + "Исходный файл и прежние черновики не меняются.\n\n"
-                    + $"Используйте длинный уникальный пароль (не менее {EncryptedTabFile.PasswordMinLength} символов). "
+                    + "Рекомендуется длинный уникальный пароль. "
                     + "Подсказку видно без пароля: не помещайте в неё секреты."
                 : string.IsNullOrEmpty(hint) ? "Подсказка не сохранена." : $"Подсказка из файла (ещё не проверена):\n{hint}",
             TextWrapping = TextWrapping.Wrap
@@ -125,11 +125,9 @@ public partial class MainWindow
         var submit = FocusButton(Button(creating ? "Зашифровать" : "Расшифровать", () =>
         {
             var value = password.Text ?? string.Empty;
-            if (value.Length > EncryptedTabFile.PasswordMaxLength
-                || creating && (value.Length < EncryptedTabFile.PasswordMinLength || string.IsNullOrWhiteSpace(value))
-                || !creating && value.Length == 0)
+            if (value.Length == 0)
             {
-                status.Text = creating ? $"Введите пароль от {EncryptedTabFile.PasswordMinLength} до {EncryptedTabFile.PasswordMaxLength} символов."
+                status.Text = creating ? "Введите пароль для шифрования."
                     : "Введите пароль для расшифровки.";
                 return;
             }

@@ -9,8 +9,6 @@ internal static class EncryptedTabFile
     public const string Extension = ".rte";
     public const int MaxTextBytes = 32 * 1024 * 1024;
     public const int MaxHintBytes = 1024;
-    public const int PasswordMinLength = 12;
-    public const int PasswordMaxLength = 1024;
     // RUSTENC1: magic | int32 LE hint length | salt | nonce | UTF-8 hint | ciphertext | tag.
     // Version 1 fixes the KDF parameters; the whole prefix through the hint is authenticated.
     private const int Iterations = 600_000;
@@ -27,8 +25,8 @@ internal static class EncryptedTabFile
 
     public static byte[] Encrypt(string text, string password, string hint)
     {
-        if (password.Length is < PasswordMinLength or > PasswordMaxLength || string.IsNullOrWhiteSpace(password))
-            throw new ArgumentException($"Введите пароль длиной от {PasswordMinLength} символов (не только пробелы).");
+        if (password.Length == 0)
+            throw new ArgumentException("Введите пароль для шифрования.");
         var textSize = Utf8.GetByteCount(text);
         var hintSize = Utf8.GetByteCount(hint);
         if (textSize > MaxTextBytes || hintSize > MaxHintBytes)
@@ -77,7 +75,7 @@ internal static class EncryptedTabFile
     public static string Decrypt(ReadOnlySpan<byte> container, string password)
     {
         var cipherOffset = ReadCipherOffset(container);
-        if (password.Length is 0 or > PasswordMaxLength)
+        if (password.Length == 0)
             throw new ArgumentException("Введите пароль для расшифровки.");
         var encrypted = container[cipherOffset..^TagSize];
         Span<byte> key = stackalloc byte[32];

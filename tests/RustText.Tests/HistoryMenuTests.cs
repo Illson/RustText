@@ -43,8 +43,7 @@ public sealed class HistoryMenuTests
                 Assert.Contains(fileMenu.Items, item => ReferenceEquals(item, closedFiles));
                 Assert.DoesNotContain(fileMenu.Items, item => ReferenceEquals(item, closedDrafts));
                 var fileCommands = fileMenu.Items.OfType<MenuItem>().ToArray();
-                Assert.Equal(new[] { "Зашифровать копию вкладки…", "Расшифровать файл…" },
-                    MenuLabels(Assert.Single(fileCommands, item => MenuHeader(item) == "Шифрование")));
+                Assert.DoesNotContain(fileCommands, item => MenuHeader(item) == "Шифрование");
                 Assert.Equal(new[] { "Выбрать файл…", "Выбрать папку…" },
                     MenuLabels(Assert.Single(fileCommands, item => MenuHeader(item) == "Удалить с диска")));
                 Assert.Single(fileCommands, item => MenuHeader(item) == "Настроить открытие файлов в Windows…");
@@ -52,7 +51,7 @@ public sealed class HistoryMenuTests
                 var toolsGroups = toolsMenu.Items.OfType<MenuItem>().ToArray();
                 Assert.Equal(new[]
                 {
-                    "Терминал", "Редактор и просмотр", "Форматирование и данные", "История и черновики", "Обновления",
+                    "Терминал", "Редактор и просмотр", "Форматирование и данные", "Шифрование", "История и черновики", "Обновления",
                     "Найти окно процесса…", "Прокси-чекер…", "Настройки…"
                 }, toolsGroups.Select(MenuHeader));
 
@@ -68,6 +67,8 @@ public sealed class HistoryMenuTests
                 Assert.Equal(new[] { "Форматировать JSON   Ctrl+Shift+J", "Включить проверку JSON", "Генератор строк…", "Сравнить списки…" },
                     MenuLabels(dataGroup));
                 var historyGroup = toolsGroups.Single(item => MenuHeader(item) == "История и черновики");
+                var encryptionGroup = toolsGroups.Single(item => MenuHeader(item) == "Шифрование");
+                Assert.Equal(new[] { "Зашифровать копию вкладки…", "Расшифровать файл…" }, MenuLabels(encryptionGroup));
                 Assert.Contains(historyGroup.Items, item => ReferenceEquals(item, closedDrafts));
                 Assert.Equal(new[] { "Версии файла…", "Призрачные вкладки", "Показывать архивные записи", "Архив черновиков…" }, MenuLabels(historyGroup));
                 var updatesGroup = toolsGroups.Single(item => MenuHeader(item) == "Обновления");

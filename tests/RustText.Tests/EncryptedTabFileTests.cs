@@ -53,7 +53,15 @@ public sealed class EncryptedTabFileTests
         data[8] = 1;
         Assert.Throws<InvalidDataException>(() => EncryptedTabFile.ReadHint(data));
         Assert.Throws<ArgumentException>(() => EncryptedTabFile.Encrypt("text", Password, new string('я', 513)));
-        Assert.Throws<ArgumentException>(() => EncryptedTabFile.Encrypt("text", "short", ""));
+    }
+
+    [Fact]
+    public void PasswordMustNotBeEmptyButSpacesAreKeptAsEntered()
+    {
+        Assert.Throws<ArgumentException>(() => EncryptedTabFile.Encrypt("text", "", ""));
+        var data = EncryptedTabFile.Encrypt("text", " ", "");
+        Assert.Throws<ArgumentException>(() => EncryptedTabFile.Decrypt(data, ""));
+        Assert.Equal("text", EncryptedTabFile.Decrypt(data, " "));
     }
 
     [Fact]
@@ -83,14 +91,16 @@ public sealed class EncryptedTabDialogTests
     private const System.Reflection.BindingFlags Private = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
     private static bool ReadFlag(MainWindow window, string name) => (bool)typeof(MainWindow).GetField(name, Private)!.GetValue(window)!;
 
-    [Fact]
-    public Task EncryptsUnsavedTabAndRetriesAfterTheWrongPassword() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1500)]
+    public Task EncryptsUnsavedTabAndRetriesAfterTheWrongPassword(int passwordLength) => HeadlessTests.RunAsync(async profile =>
     {
         var source = Path.Combine(profile, "source.txt");
         var target = Path.Combine(profile, "copy.rte");
         const string original = "Первая версия";
         const string changed = "Несохранённые изменения 🌿";
-        const string password = "Случайный тестовый пароль";
+        var password = new string('я', passwordLength);
         const string hint = "Подсказка про растение";
         await File.WriteAllTextAsync(source, original);
         var window = new MainWindow([source]);
@@ -108,6 +118,9 @@ public sealed class EncryptedTabDialogTests
                 label.Text is { } warning && warning.Contains("только новая копия .rte", StringComparison.Ordinal)
                 && warning.Contains("черновиках без шифрования", StringComparison.Ordinal)
                 && warning.Contains("ещё нет файла", StringComparison.Ordinal));
+            Click(create, "Зашифровать");
+            Assert.Contains(create.GetVisualDescendants().OfType<TextBlock>(), label => label.Text == "Введите пароль для шифрования.");
+            Assert.False(File.Exists(target));
             Field(create, "Пароль").Text = password;
             Field(create, "Повторите пароль").Text = password;
             Field(create, "Подсказка (необязательно)").Text = hint;
