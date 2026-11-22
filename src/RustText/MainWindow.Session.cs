@@ -1172,7 +1172,7 @@ public partial class MainWindow
         menu.Items.Add(Command("Вся история", () => Run(ShowHomeAsync)));
     }
 
-    private string ClosedTabDisplayName(SessionTab tab)
+    private string ClosedTabDisplayName(SessionTab tab, StorageService? storage = null)
     {
         if (tab.CustomTitle is { Length: > 0 } title) return title;
         if (tab.Path is { } path)
@@ -1181,7 +1181,7 @@ public partial class MainWindow
         }
 
         var line = tab.UntitledName;
-        if (string.IsNullOrWhiteSpace(line) && tab.DraftRef is not null && SessionStorage.GetDraftPath(tab) is { } draftPath)
+        if (string.IsNullOrWhiteSpace(line) && tab.DraftRef is not null && (storage ?? SessionStorage).GetDraftPath(tab) is { } draftPath)
         {
             try
             {
