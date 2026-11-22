@@ -18,7 +18,9 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private const int PreviewColumns = 66;
     private const int RowPitch = 2;
     private const int MaxRows = 512;
+    private const int MinMarkerHeight = 8;
     private readonly TextEditor _editor;
+    private readonly Pen _viewportBorder = new(FocusTheme.Accent, 1);
     private WriteableBitmap? _preview;
     private bool _previewDirty = true;
     private bool _dragging;
@@ -39,6 +41,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
         if (_disposed) return;
         FocusTheme.ThemeChanged += OnThemeChanged;
         _editor.TextChanged += OnTextChanged;
+        _editor.AddHandler(ScrollViewer.ScrollChangedEvent, OnScrollChanged);
         _editor.TextArea.TextView.VisualLinesChanged += OnVisualLinesChanged;
         InvalidateVisual();
     }
@@ -59,6 +62,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     {
         FocusTheme.ThemeChanged -= OnThemeChanged;
         _editor.TextChanged -= OnTextChanged;
+        _editor.RemoveHandler(ScrollViewer.ScrollChangedEvent, OnScrollChanged);
         _editor.TextArea.TextView.VisualLinesChanged -= OnVisualLinesChanged;
         _preview?.Dispose();
         _preview = null;
@@ -75,20 +79,9 @@ internal sealed class DocumentMinimap : Control, IDisposable
         if (rows == 0) return;
 
         var height = PreviewHeight;
-        var navigationHeight = NavigationHeight;
-        var viewport = _editor.ViewportHeight;
-        var maximum = _editor.ExtentHeight - viewport;
-        if (viewport > 0 && maximum > 0)
-        {
-            var markerHeight = Math.Clamp(navigationHeight * viewport / _editor.ExtentHeight,
-                Math.Min(8, navigationHeight), navigationHeight);
-            var fraction = Math.Clamp(_editor.VerticalOffset / maximum, 0, 1);
-            var top = Padding + fraction * (navigationHeight - markerHeight);
-            var marker = navigationHeight > height
-                ? new Rect(Bounds.Width - 2, top, 2, markerHeight)
-                : new Rect(0, top, Bounds.Width, markerHeight);
+        var marker = ViewportMarker(document);
+        if (marker.Height > 0)
             context.FillRectangle(FocusTheme.MinimapViewport, marker);
-        }
 
         if (_preview?.PixelSize.Height != rows * RowPitch)
         {
@@ -104,6 +97,21 @@ internal sealed class DocumentMinimap : Control, IDisposable
             _previewDirty = false;
         }
         context.DrawImage(_preview, new Rect(Padding, Padding, PreviewColumns, height));
+        if (marker.Height > 1 && marker.Width > 1)
+            context.DrawRectangle(null, _viewportBorder, marker.Deflate(.5));
+    }
+
+    private Rect ViewportMarker(TextDocument document)
+    {
+        var viewport = _editor.ViewportHeight;
+        if (document.TextLength == 0 || viewport <= 0) return default;
+
+        var minimum = Math.Min(MinMarkerHeight, Math.Max(0, Bounds.Height - Padding * 2));
+        var track = Math.Max(NavigationHeight, minimum);
+        var maximum = _editor.ExtentHeight - viewport;
+        var markerHeight = maximum <= 0 ? track : Math.Clamp(track * viewport / _editor.ExtentHeight, minimum, track);
+        var fraction = maximum <= 0 ? 0 : Math.Clamp(_editor.VerticalOffset / maximum, 0, 1);
+        return new Rect(0, Padding + fraction * (track - markerHeight), Bounds.Width, markerHeight);
     }
 
     internal static int GetRowCount(int lineCount, double height) =>
@@ -253,6 +261,11 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private ScrollViewer? FindScrollViewer() => _editor.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
 
     private void OnTextChanged(object? sender, EventArgs e) => InvalidatePreview();
+    private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
+    {
+        if (e.OffsetDelta.Y != 0 || e.ViewportDelta != default || e.ExtentDelta != default)
+            InvalidateVisual();
+    }
     private void OnVisualLinesChanged(object? sender, EventArgs e) => InvalidateVisual();
     private void OnThemeChanged() => InvalidatePreview();
 

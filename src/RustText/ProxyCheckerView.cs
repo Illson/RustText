@@ -46,7 +46,8 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
     };
 
     private readonly NumericUpDown _timeout = Number(5, 1, 120);
-    private readonly NumericUpDown _parallelism = Number(8, 1, 32);
+    private readonly NumericUpDown _parallelism = Number(8, 1, int.MaxValue);
+    private readonly CheckBox _lookupRegion = new() { Name = "ProxyCheckerLookupRegion", Content = "Проверять регион" };
     private readonly Button _start = new() { Content = "Проверить", Classes = { "focus-primary" } };
     private readonly Button _stop = new() { Content = "Остановить" };
     private readonly Button _copy = new() { Content = "Копировать рабочие" };
@@ -73,6 +74,9 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
         AutomationProperties.SetName(_input, "Список прокси");
         ToolTip.SetTip(_protocol, "Протокол для строк без http://, https:// или socks5://");
         ToolTip.SetTip(_copy, "Копирует адреса со схемой и введёнными данными авторизации");
+        _parallelism.Name = "ProxyCheckerParallelism";
+        ToolTip.SetTip(_parallelism, "Не больше числа адресов. Высокая параллельность увеличивает нагрузку на сеть.");
+        ToolTip.SetTip(_lookupRegion, "После проверки определяет регион выходного IP через ipwho.is. Запрос идёт через проверяемый прокси.");
 
         var commands = new WrapPanel
         {
@@ -81,7 +85,7 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
             Children =
             {
                 _start, _stop, LabeledField("Без схемы", _protocol),
-                LabeledField("Тайм-аут, с", _timeout), LabeledField("Параллельно", _parallelism)
+                LabeledField("Тайм-аут, с", _timeout), LabeledField("Параллельно", _parallelism), _lookupRegion
             }
         };
         var toolbar = new Border
@@ -122,7 +126,7 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
             BorderBrush = FocusTheme.Border,
             BorderThickness = new Thickness(0, 1, 0, 1),
             Child = Columns(Cell("Прокси", FocusTheme.Text), Cell("Статус", FocusTheme.Text),
-                _delay, Cell("Детали", FocusTheme.Text))
+                _delay, Cell("Регион / детали", FocusTheme.Text))
         };
         var list = new ListBox
         {
@@ -233,7 +237,8 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
 
         var protocol = Protocols[Math.Max(0, _protocol.SelectedIndex)];
         var timeout = TimeSpan.FromSeconds((double)(_timeout.Value ?? 5));
-        var parallelism = (int)(_parallelism.Value ?? 8);
+        var parallelism = Math.Min(count, (int)(_parallelism.Value ?? 8));
+        var lookupRegion = _lookupRegion.IsChecked == true;
         using var cancellation = new CancellationTokenSource();
         _run = cancellation;
         _total = count;
@@ -248,7 +253,7 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
         try
         {
             await Task.Run(() => ProxyChecker.CheckAsync(
-                input, protocol, timeout, parallelism, _pending.Enqueue, cancellation.Token));
+                input, protocol, timeout, parallelism, _pending.Enqueue, cancellation.Token, lookupRegion));
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -376,6 +381,7 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
         _stop.IsEnabled = running;
         _input.IsReadOnly = running;
         _protocol.IsEnabled = _timeout.IsEnabled = _parallelism.IsEnabled = !running;
+        _lookupRegion.IsEnabled = !running;
     }
 
     private static Control CreateRow(ProxyCheckResult result)
@@ -395,18 +401,24 @@ internal sealed class ProxyCheckerView : UserControl, IDisposable
         {
             detail = detail.Length == 0 ? result.Detail : $"{detail} · {result.Detail}";
         }
+        if (result.Region is { } region)
+        {
+            detail = detail.Length == 0 ? region : $"{detail} · {region}";
+        }
         var elapsed = result.ElapsedMilliseconds is { } delay ? $"{delay} мс" : "—";
+        var details = Cell(detail, FocusTheme.Muted);
+        if (detail.Length != 0) ToolTip.SetTip(details, detail);
         return new Border
         {
             BorderBrush = FocusTheme.Border,
             BorderThickness = new Thickness(0, 0, 0, 1),
-            Child = Columns(address, Cell(status, brush), Cell(elapsed, FocusTheme.Text), Cell(detail, FocusTheme.Muted))
+            Child = Columns(address, Cell(status, brush), Cell(elapsed, FocusTheme.Text), details)
         };
     }
 
     private static Grid Columns(params Control[] cells)
     {
-        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("2.55*,1.35*,1.2*,1.5*") };
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("2.55*,1.35*,1.2*,2*") };
         for (var col = 0; col < cells.Length; col++)
         {
             Grid.SetColumn(cells[col], col);

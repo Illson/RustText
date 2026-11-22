@@ -31,19 +31,26 @@ public sealed class HistoryMenuTests
                 var closedDrafts = Field<MenuItem>(window, "_closedDraftsMenu");
                 Assert.Contains(closedFiles.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.StartsWith("report.txt", StringComparison.Ordinal) == true);
                 Assert.DoesNotContain(closedFiles.Items.OfType<MenuItem>(), item => item.Header?.ToString()?.Contains("ghost", StringComparison.Ordinal) == true);
-                Assert.Single(closedDrafts.Items.OfType<MenuItem>());
-                Assert.StartsWith("ghost", closedDrafts.Items.OfType<MenuItem>().Single().Header?.ToString());
+                Assert.Equal("Вся история", Assert.IsType<MenuItem>(Assert.Single(closedDrafts.Items)).Header);
+                closedDrafts.IsSubMenuOpen = true;
+                Assert.Equal(2, closedDrafts.Items.Count);
+                Assert.StartsWith("ghost", Assert.IsType<MenuItem>(closedDrafts.Items[0]).Header?.ToString());
+                closedDrafts.IsSubMenuOpen = false;
 
                 var topMenu = window.FindControl<Menu>("TopMenu")!;
                 var fileMenu = topMenu.Items.OfType<MenuItem>().Single(item => MenuHeader(item).Contains("Файл", StringComparison.Ordinal));
                 var toolsMenu = topMenu.Items.OfType<MenuItem>().Single(item => MenuHeader(item).Contains("Инструменты", StringComparison.Ordinal));
                 Assert.Contains(fileMenu.Items, item => ReferenceEquals(item, closedFiles));
                 Assert.DoesNotContain(fileMenu.Items, item => ReferenceEquals(item, closedDrafts));
+                var fileCommands = fileMenu.Items.OfType<MenuItem>().ToArray();
+                Assert.DoesNotContain(fileCommands, item => MenuHeader(item) == "Шифрование");
+                Assert.DoesNotContain(fileCommands, item => MenuHeader(item) == "Удалить с диска");
+                Assert.Single(fileCommands, item => MenuHeader(item) == "Настроить открытие файлов в Windows…");
 
                 var toolsGroups = toolsMenu.Items.OfType<MenuItem>().ToArray();
                 Assert.Equal(new[]
                 {
-                    "Терминал", "Редактор и просмотр", "Форматирование и данные", "История и черновики", "Обновления",
+                    "Терминал", "Редактор и просмотр", "Форматирование и данные", "Шифрование", "История и черновики", "Удалить с диска", "Обновления",
                     "Найти окно процесса…", "Прокси-чекер…", "Настройки…"
                 }, toolsGroups.Select(MenuHeader));
 
@@ -59,9 +66,13 @@ public sealed class HistoryMenuTests
                 Assert.Equal(new[] { "Форматировать JSON   Ctrl+Shift+J", "Включить проверку JSON", "Генератор строк…", "Сравнить списки…" },
                     MenuLabels(dataGroup));
                 var historyGroup = toolsGroups.Single(item => MenuHeader(item) == "История и черновики");
+                var encryptionGroup = toolsGroups.Single(item => MenuHeader(item) == "Шифрование");
+                Assert.Equal(new[] { "Зашифровать копию вкладки…", "Расшифровать файл…" }, MenuLabels(encryptionGroup));
                 Assert.Contains(historyGroup.Items, item => ReferenceEquals(item, closedDrafts));
-                Assert.Equal(new[] { "Версии файла…", "Призрачные вкладки", "Архив черновиков…" }, MenuLabels(historyGroup));
+                Assert.Equal(new[] { "Версии файла…", "Призрачные вкладки", "Показывать архивные записи", "Архив черновиков…" }, MenuLabels(historyGroup));
                 var updatesGroup = toolsGroups.Single(item => MenuHeader(item) == "Обновления");
+                var deletionGroup = toolsGroups.Single(item => MenuHeader(item) == "Удалить с диска");
+                Assert.Equal(new[] { "Выбрать файл…", "Выбрать папку…" }, MenuLabels(deletionGroup));
                 Assert.Equal(new[] { "Проверить обновления…", "История выпусков…" }, MenuLabels(updatesGroup));
 
                 var finderCommand = toolsGroups.Single(item => MenuHeader(item) == "Найти окно процесса…");

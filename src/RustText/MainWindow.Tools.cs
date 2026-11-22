@@ -18,7 +18,20 @@ public partial class MainWindow
     {
         _recentMenu = new MenuItem { Header = "Недавние файлы" };
         _closedFilesMenu = new MenuItem { Header = "Закрытые файлы" };
-        _closedDraftsMenu = new MenuItem { Header = "Призрачные вкладки" };
+        var draftsMenu = _closedDraftsMenu = new MenuItem { Header = "Призрачные вкладки" };
+        ResetClosedDraftsMenu(draftsMenu);
+        draftsMenu.PropertyChanged += (_, change) =>
+        {
+            if (change.Property != MenuItem.IsSubMenuOpenProperty) return;
+            if (draftsMenu.IsSubMenuOpen) PopulateClosedDraftsMenu(draftsMenu);
+            else ResetClosedDraftsMenu(draftsMenu);
+        };
+        _showArchivedDrafts = Command("Показывать архивные записи", () => Run(async () =>
+        {
+            try { await SaveWorkspaceSettingsAsync(settings => settings with { ShowArchivedDrafts = !settings.ShowArchivedDrafts }); }
+            finally { RefreshHistoryMenus(); }
+        }));
+        _showArchivedDrafts.ToggleType = MenuItemToggleType.CheckBox;
         TopMenu.Items.Add(MenuGroup("_Файл",
             Command("Новая вкладка   Ctrl+N", () => NewTab()),
             Command("Новое окно", () => Run(() => OpenWorkspaceWindowAsync(_workspaceId))),
@@ -60,11 +73,18 @@ public partial class MainWindow
                 new Separator(),
                 Command("Генератор строк…", () => Run(ShowGeneratorAsync)),
                 Command("Сравнить списки…", () => Run(ShowListComparisonAsync))),
+            MenuGroup("Шифрование",
+                Command("Зашифровать копию вкладки…", () => Run(EncryptActiveTabAsync)),
+                Command("Расшифровать файл…", () => Run(DecryptTabFileAsync))),
             MenuGroup("История и черновики",
                 Command("Версии файла…", () => Run(ShowVersionsAsync)),
                 new Separator(),
                 _closedDraftsMenu,
+                _showArchivedDrafts,
                 Command("Архив черновиков…", () => Run(ShowDraftArchiveAsync))),
+            MenuGroup("Удалить с диска",
+                Command("Выбрать файл…", () => Run(() => RecycleFromPickerAsync(folder: false))),
+                Command("Выбрать папку…", () => Run(() => RecycleFromPickerAsync(folder: true)))),
             MenuGroup("Обновления",
                 Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),
                 Command("История выпусков…", () => Run(ShowReleaseHistoryAsync))),
@@ -343,6 +363,7 @@ public partial class MainWindow
                     });
                     if (selected?.TryGetLocalPath() is { } path)
                     {
+                        EncryptedTabFile.EnsurePlaintextTarget(path);
                         await Task.Run(() => generator.GenerateFileAsync(path, reporter, token), token);
                         status.Text = $"Сохранено · {path}";
                     }

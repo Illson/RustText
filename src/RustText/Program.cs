@@ -87,6 +87,7 @@ internal static class Program
                 return 1;
             }
 
+            FileAssociations.TryRegisterOnStartup(Environment.ProcessPath, Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR"));
             return AppBuilder.Configure<App>()
                 .UsePlatformDetect()
                 .StartWithClassicDesktopLifetime(args);

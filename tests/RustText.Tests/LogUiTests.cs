@@ -414,6 +414,44 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task FilteredMinimapMarksVisibleSourceRowsWhenScrollingWithinOnePage(bool wrap) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "uneven-levels.log");
+        var body = wrap ? new string('x', 240) + " " : "";
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(0, 1000).Select(row =>
+            $"{(row < 42 || row >= 945 ? "Error" : "Info ")} {body}row-{row:D4}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            log.WordWrap = wrap;
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("row-0999", StringComparison.Ordinal) == true);
+            var scroll = Assert.Single(filtered.GetVisualDescendants().OfType<ScrollViewer>());
+            await HeadlessTests.WaitForAsync(() => minimap.Bounds.Height > 100 && scroll.ScrollBarMaximum.Y > 200);
+            window.UpdateLayout();
+            if (wrap)
+                Assert.True(Assert.Single(filtered.GetVisualDescendants().OfType<TextPresenter>()).TextLayout.TextLines.Count > 97);
+            var text = filtered.Text;
+
+            Assert.InRange(minimap.ViewportMarker.Bottom / minimap.Bounds.Height, 0.01, 0.2);
+            scroll.Offset = new Vector(0, scroll.ScrollBarMaximum.Y);
+            window.UpdateLayout();
+            Assert.InRange(minimap.ViewportMarker.Y / minimap.Bounds.Height, 0.85, 1);
+            Assert.Equal(text, filtered.Text); // No new filter page was loaded.
+
+            scroll.Offset = default;
+            window.UpdateLayout();
+            Assert.InRange(minimap.ViewportMarker.Bottom / minimap.Bounds.Height, 0.01, 0.2);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Fact]
     public Task InlineLevelFilterCannotOpenWhilePageHasPendingEdits() => HeadlessTests.RunAsync(async profile =>
     {
@@ -456,27 +494,31 @@ public sealed class LogUiTests
 
             var firstPage = filtered.Text;
             window.MouseWheel(point, new Vector(0, -1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text != firstPage);
+            await WaitForPageChangeAsync(firstPage);
             var secondPage = filtered.Text;
             Assert.True(FirstRowNumber(secondPage) > FirstRowNumber(firstPage));
 
             window.MouseWheel(point, new Vector(0, -1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text != secondPage);
+            await WaitForPageChangeAsync(secondPage);
             var thirdPage = filtered.Text;
             Assert.True(FirstRowNumber(thirdPage) > FirstRowNumber(secondPage));
 
             window.MouseWheel(point, new Vector(0, 1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text != thirdPage);
+            await WaitForPageChangeAsync(thirdPage);
             Assert.True(FirstRowNumber(filtered.Text) < FirstRowNumber(thirdPage));
 
             var beforeClick = filtered.Text;
             window.MouseDown(point, MouseButton.Left);
             window.MouseUp(point, MouseButton.Left);
-            await HeadlessTests.WaitForAsync(() => filtered.Text != beforeClick);
+            await WaitForPageChangeAsync(beforeClick);
             var afterClick = filtered.Text;
             window.MouseWheel(point, new Vector(0, -1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text != afterClick);
+            await WaitForPageChangeAsync(afterClick);
             Assert.True(FirstRowNumber(filtered.Text) > FirstRowNumber(afterClick));
+
+            // The filtered viewport clears its text while reading a new page.
+            Task WaitForPageChangeAsync(string? previous) => HeadlessTests.WaitForAsync(() =>
+                filtered.Text is { Length: > 0 } current && current != previous);
         }
         finally { await CloseLogAsync(window, log); }
     });
@@ -496,16 +538,30 @@ public sealed class LogUiTests
             var filtered = (TextBox)Field(log, "_filteredLogText");
             var minimap = (LogView.LogMinimap)Field(log, "_minimap");
             var previous = (Button)Field(log, "_previousButton");
+            var next = (Button)Field(log, "_nextButton");
+            var status = (TextBlock)Field(log, "_filterStatus");
             await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true
-                && minimap.Bounds.Height > 100);
+                && minimap.Bounds.Height > 100 && next.IsEnabled);
+            next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-0100", StringComparison.Ordinal) == true
+                && previous.IsEnabled);
+
+            bool? backEnabledWhileClearing = null;
+            filtered.PropertyChanged += (_, change) =>
+            {
+                if (change.Property == TextBox.TextProperty && string.IsNullOrEmpty(filtered.Text))
+                    backEnabledWhileClearing ??= previous.IsEnabled;
+            };
             var origin = minimap.TranslatePoint(new Point(0, 0), window) ?? throw new InvalidOperationException("Minimap is not attached.");
             var target = origin + new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height * .9);
             window.MouseDown(target, MouseButton.Left);
             window.MouseUp(target, MouseButton.Left);
-            await HeadlessTests.WaitForAsync(() => filtered.Text?.Length == 0 && previous.IsEnabled);
+            await HeadlessTests.WaitForAsync(() => status.Text == "Совпадений нет" && previous.IsEnabled);
+            Assert.False(backEnabledWhileClearing);
+            Assert.Empty(filtered.Text ?? string.Empty);
 
             previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-000", StringComparison.Ordinal) == true);
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-0100", StringComparison.Ordinal) == true);
         }
         finally { await CloseLogAsync(window, log); }
     });

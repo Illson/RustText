@@ -27,6 +27,10 @@ public partial class MainWindow
     private const int MaxEditorCharacters = 8 * 1024 * 1024;
     private const int MaxEditorLineLength = 64 * 1024;
     private static readonly FilePickerFileType TextFiles = new("Текст и логи") { Patterns = ["*.txt", "*.log", "*.json", "*.jsonl", "*.ndjson", "*.xml"] };
+    private static readonly FilePickerFileType OpenableFiles = new("Текст, логи и зашифрованные файлы")
+    {
+        Patterns = [.. TextFiles.Patterns!, "*" + EncryptedTabFile.Extension]
+    };
     private bool _confirmingTabClose;
 
     private void NewTab(string text = "")
@@ -49,7 +53,7 @@ public partial class MainWindow
         {
             Title = asLog ? "Открыть как лог" : "Открыть файлы",
             AllowMultiple = true,
-            FileTypeFilter = [TextFiles, FilePickerFileTypes.All]
+            FileTypeFilter = [OpenableFiles, EncryptedTabFiles, FilePickerFileTypes.All]
         });
         var paths = new List<string>();
         foreach (var item in items)
@@ -100,7 +104,13 @@ public partial class MainWindow
 
     private async Task<OpenRequest?> PrepareOpenAsync(string path, bool? asLog, TextEncodingKind? encoding, bool editPages = false)
     {
+        if (_closed || _closing) return null;
         var fullPath = Path.GetFullPath(path);
+        if (EncryptedTabFile.HasExtension(fullPath))
+        {
+            await DecryptTabPathAsync(fullPath);
+            return null;
+        }
         var file = new FileInfo(fullPath);
         if (!file.Exists)
         {
@@ -688,7 +698,7 @@ public partial class MainWindow
 
     private async Task ReloadAsync(WorkTab tab, TextEncodingKind? encoding = null)
     {
-        if (tab.Path is not { } path || tab.Saving)
+        if (tab.Path is not { } path || tab.Saving || tab.Closing)
         {
             return;
         }
@@ -722,7 +732,7 @@ public partial class MainWindow
         var revision = tab.Revision;
         var path = tab.Path;
         var loaded = await read;
-        if (_closed || !_tabs.TryGetValue(tab.Id, out var current) || !ReferenceEquals(tab, current)
+        if (_closed || tab.Closing || !_tabs.TryGetValue(tab.Id, out var current) || !ReferenceEquals(tab, current)
             || !ReferenceEquals(tab.Editor, editor) || !SamePath(tab.Path, path))
         {
             return;
@@ -769,7 +779,7 @@ public partial class MainWindow
 
     private async Task SaveAsync(bool saveAs = false)
     {
-        if (ActiveTab is not { } tab || tab.Saving)
+        if (ActiveTab is not { } tab || tab.Saving || tab.Closing)
         {
             return;
         }
@@ -802,12 +812,14 @@ public partial class MainWindow
                 return;
             }
 
+            EncryptedTabFile.EnsurePlaintextTarget(target);
             if (!SamePath(path, target) || expected is null)
             {
                 expected = File.Exists(target) ? await DocumentFiles.GetStampAsync(target, _lifetime.Token) : null;
             }
             path = target;
         }
+        else EncryptedTabFile.EnsurePlaintextTarget(path);
 
         var changedPath = !SamePath(tab.Path, path);
         if (changedPath && FileViews(path).Any(view => !ReferenceEquals(view.Tab, tab)))
@@ -1069,14 +1081,15 @@ public partial class MainWindow
         }
     }
 
-    private void RemoveTab(WorkTab tab)
+    private void RemoveTab(WorkTab tab, Dictionary<long, WorkTab>? tabs = null)
     {
+        tabs ??= _tabs;
         ForgetSearchTab(tab);
         tab.JsonCancellation?.Cancel();
         ReleaseTabContents(tab);
-        _tabs.Remove(tab.Id);
+        tabs.Remove(tab.Id);
         tab.Group.Tabs.Items.Remove(tab.Item);
-        if (ReferenceEquals(_active, tab.Group) && SelectedIn(_active) is { } next)
+        if (ReferenceEquals(tabs, _tabs) && ReferenceEquals(_active, tab.Group) && SelectedIn(_active) is { } next)
         {
             ActivateTab(next);
         }

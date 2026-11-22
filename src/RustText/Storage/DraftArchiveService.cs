@@ -13,6 +13,9 @@ internal sealed class DraftArchiveService
     private readonly string _draftDirectory;
     private readonly string _indexPath;
     private readonly SemaphoreSlim _gate;
+    // Only index metadata. Reading history must never extract a draft.
+    public IReadOnlyList<DraftArchiveEntry> HistoryEntries => _historyEntries;
+    private volatile DraftArchiveEntry[] _historyEntries = [];
 
     public DraftArchiveService(string profileRoot)
     {
@@ -27,7 +30,7 @@ internal sealed class DraftArchiveService
     public async Task<IReadOnlyList<DraftArchiveEntry>> GetEntriesAsync(CancellationToken token = default)
     {
         await _gate.WaitAsync(token).ConfigureAwait(false);
-        try { return await ReadIndexAsync(token).ConfigureAwait(false); }
+        try { return _historyEntries = (await ReadIndexAsync(token).ConfigureAwait(false)).ToArray(); }
         finally { _gate.Release(); }
     }
 
@@ -227,7 +230,7 @@ internal sealed class DraftArchiveService
         }
     }
 
-    public async Task RemoveAsync(DraftArchiveEntry entry, CancellationToken token = default)
+    public async Task RemoveAsync(DraftArchiveEntry entry, CancellationToken token = default, bool requireDeletion = false)
     {
         await _gate.WaitAsync(token).ConfigureAwait(false);
         string? tombstone = null;
@@ -247,7 +250,11 @@ internal sealed class DraftArchiveService
                 if (tombstone is not null && File.Exists(tombstone)) File.Move(tombstone, archivePath, overwrite: true);
                 throw;
             }
-            if (tombstone is not null) TryDelete(tombstone);
+            if (tombstone is not null)
+            {
+                if (requireDeletion) File.Delete(tombstone);
+                else TryDelete(tombstone);
+            }
         }
         finally { _gate.Release(); }
     }
@@ -361,6 +368,7 @@ internal sealed class DraftArchiveService
                 stream.Flush(true);
             }
             File.Move(temporary, _indexPath, overwrite: true);
+            _historyEntries = entries.ToArray();
         }
         finally { TryDelete(temporary); }
     }

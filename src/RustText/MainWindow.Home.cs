@@ -75,9 +75,8 @@ public partial class MainWindow
             var term = search.Text?.Trim() ?? "";
             var recentFiles = _recent.Where(item => Matches(item.Path)).ToArray();
             var closedFiles = _closedTabs.Where(item => item.Path is { } path && (Matches(path) || Matches(ClosedTabDisplayName(item)))).ToArray();
-            var closedDrafts = _closedTabs.Where(item => item.Path is null)
-                .Select(item => (Saved: item, Name: ClosedTabDisplayName(item)))
-                .Where(item => Matches(item.Name)).ToArray();
+            var storage = SessionStorage;
+            var closedDrafts = DraftHistory(storage).Where(item => Matches(item.Name)).ToArray();
 
             FillHistory(recent, recentFiles, item =>
             {
@@ -86,11 +85,18 @@ public partial class MainWindow
                     () => Run(() => OpenRecentAsync(item)), "Удалить из недавних", () => Run(() => ForgetRecentFileAsync(item.Path)));
             });
             FillHistory(closed, closedFiles, item => ClosedRow(item, ClosedTabDisplayName(item), FileSize(item.Path!)));
-            FillHistory(ghosts, closedDrafts, item => ClosedRow(item.Saved, item.Name, DraftSize(item.Saved)));
+            FillHistory(ghosts, closedDrafts, item => item.Archive is { } entry
+                ? HistoryRow(item.Label, null, WorkDetails(Settings.ShowDraftLineCount ? item.Tab.LineCount : null, item.Tab.LastWorkedMs),
+                    Task.FromResult<long?>(entry.Bytes), () => Run(() => RestoreArchivedDraftAsync(storage, entry)),
+                    "Удалить из архива", () => Run(async () =>
+                    {
+                        if (await ConfirmForgetDraftAsync(item.Name)) await RemoveArchivedDraftAsync(storage, entry);
+                    }))
+                : ClosedRow(item.Tab, item.Name, DraftSize(item.Tab)));
 
             var allDraftSizes = _closedTabs.Where(item => item.Path is null && item.DraftRef is not null)
                 .DistinctBy(item => item.DraftRef, StringComparer.OrdinalIgnoreCase).Select(DraftSize).ToArray();
-            _ = UpdateGhostSizeAsync(++revision, allDraftSizes, closedDrafts.Length);
+            _ = UpdateGhostSizeAsync(++revision, allDraftSizes, closedDrafts.Length, closedDrafts.Count(item => item.Archive is not null));
             bool Matches(string name) => name.Contains(term, StringComparison.OrdinalIgnoreCase);
         }
 
@@ -115,14 +121,15 @@ public partial class MainWindow
         Task<long?> DraftSize(SessionTab item) => item.DraftRef is { } reference
             ? CachedSize(draftSizes, reference, () => SessionStorage.GetDraftPath(item)) : Task.FromResult<long?>(0);
 
-        async Task UpdateGhostSizeAsync(int requestedRevision, Task<long?>[] sizes, int count)
+        async Task UpdateGhostSizeAsync(int requestedRevision, Task<long?>[] sizes, int count, int archived)
         {
             var values = await Task.WhenAll(sizes);
             if (requestedRevision == revision)
             {
                 var amount = values.Sum(value => value ?? 0);
                 if (values.All(value => value is not null) || amount > 0)
-                    ghosts.Summary.Text = $"{LineNumbers.Format(count)}  ·  Всего {FormatHistorySize(amount)} на диске";
+                    ghosts.Summary.Text = archived == 0 ? $"{LineNumbers.Format(count)}  ·  Всего {FormatHistorySize(amount)} на диске"
+                        : $"{LineNumbers.Format(count)}  ·  В архиве: {LineNumbers.Format(archived)}  ·  Вне архива: {FormatHistorySize(amount)}";
             }
         }
 
