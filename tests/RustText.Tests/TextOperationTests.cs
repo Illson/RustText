@@ -65,6 +65,15 @@ public sealed class TextOperationTests
         Assert.ThrowsAny<JsonException>(() => TextOperations.FormatJson(text, "data.json"));
     }
 
+    [Fact]
+    public void JsonRejectsUnpairedUtf16InsteadOfSilentlyReplacingIt()
+    {
+        const string input = """{"value": "a"}""";
+        var invalid = input.Replace('a', '\uD800');
+        Assert.ThrowsAny<ArgumentException>(() => TextOperations.ValidateJson(invalid, "data.json"));
+        Assert.ThrowsAny<ArgumentException>(() => TextOperations.FormatJson(invalid, "data.json"));
+    }
+
     [Theory]
     [InlineData(TextEncodingKind.Utf8)]
     [InlineData(TextEncodingKind.Utf8Bom)]

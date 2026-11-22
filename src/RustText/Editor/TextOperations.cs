@@ -143,6 +143,7 @@ internal static class TextOperations
         {
             for (var match = matcher.Expression!.Match(text); match.Success; match = match.NextMatch())
             {
+                CheckOperation();
                 var inserted = match.Result(replacement);
                 Append(match.Index, match.Length, inserted);
                 endings?.AppendReplacement(match, inserted);
@@ -152,6 +153,7 @@ internal static class TextOperations
         {
             foreach (var match in matcher.Enumerate(text))
             {
+                CheckOperation();
                 Append(match.Index, match.Length, replacement);
                 endings?.AppendLiteralReplacement(match.Index, match.Length, replacement);
             }
@@ -164,7 +166,6 @@ internal static class TextOperations
 
         void Append(int index, int length, string inserted)
         {
-            CheckOperation();
             builder ??= new StringBuilder(text.Length);
             if (originalEndings is not null)
                 endings ??= new ReplacementLineEndings(text, originalEndings, matcher.Expression, replacement, expandGroups, CheckOperation);

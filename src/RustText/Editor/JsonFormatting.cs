@@ -9,6 +9,7 @@ internal static class JsonFormatting
 {
     private const int MaxFastInput = 2 * 1024 * 1024;
     private const int MaxFastOutput = 4 * 1024 * 1024;
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
     private static readonly byte[] Newline = Encoding.UTF8.GetBytes(Environment.NewLine);
     private static readonly JsonReaderOptions ReaderOptions = new() { MaxDepth = 128 };
 
@@ -19,7 +20,7 @@ internal static class JsonFormatting
         Span<byte> utf8 = byteCount <= 512 ? stackalloc byte[byteCount] : rented ?? GC.AllocateUninitializedArray<byte>(byteCount);
         try
         {
-            var length = Encoding.UTF8.GetBytes(input, utf8);
+            var length = Encode(input, utf8);
             var reader = new Utf8JsonReader(utf8[..length], ReaderOptions);
             var tokens = 0;
             while (reader.Read())
@@ -28,7 +29,7 @@ internal static class JsonFormatting
         }
         finally
         {
-            if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
+            if (rented is not null) ArrayPool<byte>.Shared.Return(rented, clearArray: true);
         }
     }
 
@@ -42,7 +43,7 @@ internal static class JsonFormatting
         try
         {
             output = ArrayPool<byte>.Shared.Rent(Math.Min(MaxFastOutput, byteCount + byteCount / 2 + 256));
-            var length = Encoding.UTF8.GetBytes(input, utf8);
+            var length = Encode(input, utf8);
             var reader = new Utf8JsonReader(utf8.AsSpan(0, length), ReaderOptions);
             var previous = JsonTokenType.None;
             var written = 0;
@@ -78,7 +79,7 @@ internal static class JsonFormatting
                 {
                     var grown = ArrayPool<byte>.Shared.Rent(Math.Min(MaxFastOutput, Math.Max(required, output.Length * 2)));
                     output.AsSpan(0, written).CopyTo(grown);
-                    ArrayPool<byte>.Shared.Return(output);
+                    ArrayPool<byte>.Shared.Return(output, clearArray: true);
                     output = grown;
                 }
 
@@ -115,8 +116,18 @@ internal static class JsonFormatting
         }
         finally
         {
-            if (output is not null) ArrayPool<byte>.Shared.Return(output);
-            ArrayPool<byte>.Shared.Return(utf8);
+            if (output is not null) ArrayPool<byte>.Shared.Return(output, clearArray: true);
+            ArrayPool<byte>.Shared.Return(utf8, clearArray: true);
+        }
+    }
+
+    private static int Encode(ReadOnlySpan<char> input, Span<byte> output)
+    {
+        try { return StrictUtf8.GetBytes(input, output); }
+        catch (EncoderFallbackException error)
+        {
+            // Match the UTF-16 input contract of JsonDocument.Parse.
+            throw new ArgumentException("JSON содержит недопустимую последовательность UTF-16.", error);
         }
     }
 }
