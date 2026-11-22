@@ -276,7 +276,8 @@ public sealed class EncryptedTabDialogTests
         const string unrelatedArchive = "независимый архив с повторно использованным номером вкладки";
         var target = Path.Combine(profile, "untitled.rte");
         var storage = StorageService.OpenDefault();
-        var closed = await storage.SaveClosedDraftAsync(new(3, null, TextEncodingKind.Utf8), earlier);
+        var closed = await storage.SaveClosedDraftAsync(new SessionTab(3, null, TextEncodingKind.Utf8)
+            { ClosedAtMs = DateTimeOffset.UtcNow.AddHours(-6).ToUnixTimeMilliseconds() }, earlier);
         var neighbour = await storage.SaveClosedDraftAsync(new(4, null, TextEncodingKind.Utf8), other);
         var unrelated = await storage.SaveClosedDraftAsync(new SessionTab(3, null, TextEncodingKind.Utf8)
             { ClosedAtMs = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeMilliseconds() }, unrelatedArchive);
@@ -368,6 +369,81 @@ public sealed class EncryptedTabDialogTests
         foreach (var path in Directory.EnumerateFiles(profile, "*", SearchOption.AllDirectories))
             Assert.DoesNotContain(secret, Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path)), StringComparison.Ordinal);
     });
+
+    [Fact]
+    public Task EncryptingANewNotePreservesAnIndependentArchivedCopyOfItsTemplate() => HeadlessTests.RunAsync(async profile =>
+    {
+        const string template = "План на день";
+        var storage = StorageService.OpenDefault();
+        var old = await storage.SaveClosedDraftAsync(new SessionTab(8, null, TextEncodingKind.Utf8)
+            { CustomTitle = "Вчера", ClosedAtMs = DateTimeOffset.UtcNow.AddDays(-2).ToUnixTimeMilliseconds() }, template);
+        var archive = await storage.DraftArchive.ArchiveAsync(old, storage.GetDraftPath(old)!);
+        await storage.SaveSessionAsync(new([new SessionTab(8, null, TextEncodingKind.Utf8) { CustomTitle = "Сегодня" }]),
+            new Dictionary<long, string> { [8] = template });
+        var window = new MainWindow([]);
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished") && window.GetVisualDescendants()
+                .OfType<TextEditor>().Any(editor => editor.Text == template));
+            const string updated = "План на сегодня: готово";
+            window.GetVisualDescendants().OfType<TextEditor>().Single().Text = updated;
+            await SaveSessionAsync(window);
+            var target = Path.Combine(profile, "today.rte");
+            var saving = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
+            SubmitTestPassword(GetCreateDialog(window));
+            await saving;
+            Assert.Equal(updated, EncryptedTabFile.Decrypt(await EncryptedTabFile.ReadAsync(target, default), "1"));
+            Assert.Equal(archive.Id, Assert.Single(await storage.DraftArchive.GetEntriesAsync()).Id);
+            var restored = await storage.DraftArchive.RestoreAsync(archive);
+            Assert.Equal("Вчера", restored.CustomTitle);
+            Assert.Equal(template, await storage.LoadDraftAsync(restored));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OrdinarySaveAsRefusesNewAndExistingEncryptedPaths(bool existing) => HeadlessTests.RunAsync(async profile =>
+    {
+        var source = Path.Combine(profile, "note.txt");
+        var target = Path.Combine(profile, "copy.RTE");
+        await File.WriteAllTextAsync(source, "original");
+        var window = new MainWindow([source]);
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished") && window.GetVisualDescendants()
+                .OfType<TextEditor>().Any(editor => editor.Text == "original"));
+            var editor = window.GetVisualDescendants().OfType<TextEditor>().Single();
+            editor.Text = "unsaved";
+            var encrypted = EncryptedTabFile.Encrypt("previous", "test", "");
+            await File.WriteAllBytesAsync(target, encrypted);
+            var chosen = await window.StorageProvider.TryGetFileFromPathAsync(target);
+            Assert.NotNull(chosen);
+            if (!existing) File.Delete(target);
+            var picker = System.Reflection.DispatchProxy.Create<IStorageProvider, SaveTargetPicker>();
+            ((SaveTargetPicker)(object)picker).Target = chosen;
+            typeof(TopLevel).GetField("_storageProvider", Private)!.SetValue(window, picker);
+            var save = (Task)typeof(MainWindow).GetMethod("SaveAsync", Private)!.Invoke(window, [true])!;
+            var error = await Assert.ThrowsAsync<IOException>(() => save);
+            Assert.Contains(".rte", error.Message);
+            Assert.Equal("unsaved", editor.Text);
+            Assert.Equal("original", await File.ReadAllTextAsync(source));
+            if (existing) Assert.Equal(encrypted, await File.ReadAllBytesAsync(target));
+            else Assert.False(File.Exists(target));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    public class SaveTargetPicker : System.Reflection.DispatchProxy
+    {
+        public IStorageFile? Target { get; set; }
+        protected override object? Invoke(System.Reflection.MethodInfo? method, object?[]? args) =>
+            method?.Name == nameof(IStorageProvider.SaveFilePickerAsync) ? Task.FromResult(Target)
+                : throw new NotSupportedException(method?.Name);
+    }
 
     private static Task SaveSessionAsync(MainWindow window) =>
         (Task)typeof(MainWindow).GetMethod("SaveSessionAsync", Private)!.Invoke(window, null)!;

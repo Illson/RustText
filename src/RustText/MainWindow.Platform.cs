@@ -282,6 +282,7 @@ public partial class MainWindow
             return;
         }
 
+        EncryptedTabFile.EnsurePlaintextTarget(path);
         var temporary = Path.Combine(Path.GetDirectoryName(path)!, $".rusttext-{Guid.NewGuid():N}.tmp");
         try
         {
