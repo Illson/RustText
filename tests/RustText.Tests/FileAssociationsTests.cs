@@ -26,8 +26,16 @@ public sealed class FileAssociationsTests
             else
                 Assert.True(FileAssociations.WriteRegistration(root, stable, new HashSet<string> { ".txt" }));
 
-            Assert.False(FileAssociations.WriteRegistration(root, preview, onlyIfChanged: true));
+            Assert.Equal(legacy, FileAssociations.WriteRegistration(root, preview, onlyIfChanged: true));
             Assert.Equal($"\"{stable}\" \"%1\"", command.GetValue(null));
+            using var types = root.OpenSubKey(@"Software\Classes\Applications\rusttext.exe\SupportedTypes")!;
+            using var candidates = root.OpenSubKey(@"Software\Classes\.jsonl\OpenWithProgids")!;
+            using var jsonLines = root.OpenSubKey(@"Software\Classes\RustText.JsonLines\shell\open\command")!;
+            Assert.Contains(".jsonl", types.GetValueNames());
+            Assert.Contains("RustText.JsonLines", candidates.GetValueNames());
+            Assert.Equal($"\"{stable}\" \"%1\"", jsonLines.GetValue(null));
+            Assert.Equal("RustText.Text", choice.GetValue("ProgId"));
+            Assert.False(FileAssociations.WriteRegistration(root, preview, onlyIfChanged: true));
             Assert.True(FileAssociations.WriteRegistration(root, preview, selected: new HashSet<string> { ".jsonl" }));
             Assert.Equal($"\"{preview}\" \"%1\"", command.GetValue(null));
             Assert.False(FileAssociations.WriteRegistration(root, stable, onlyIfChanged: true));
