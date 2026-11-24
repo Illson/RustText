@@ -30,17 +30,17 @@ public sealed class LockedFileInspectionTests
 
             var blockedChild = Assert.Single(LockedFileInspection.Inspect(directory, timeout.Token));
             Assert.Equal(path, blockedChild.Path);
-            var owner = Assert.Single(FileLockProcesses.Describe([blockedChild]));
+            var owner = Assert.Single(LocalProcesses.Describe([blockedChild]));
             Assert.True(owner.CanClose);
             Assert.Equal(holder.Id, owner.Id);
 
-            FileLockProcesses.ForceClose([owner with { Started = owner.Started - 1 }], timeout.Token);
+            LocalProcesses.ForceClose([owner with { Started = owner.Started - 1 }], timeout.Token);
             Assert.False(holder.HasExited);
-            FileLockProcesses.ForceClose([owner with { CanClose = false }], timeout.Token);
+            LocalProcesses.ForceClose([owner with { CanClose = false }], timeout.Token);
             Assert.False(holder.HasExited);
             Assert.True(File.Exists(path));
 
-            FileLockProcesses.ForceClose([owner], timeout.Token);
+            LocalProcesses.ForceClose([owner], timeout.Token);
             await holder.WaitForExitAsync(timeout.Token);
             while (LockedFileInspection.Inspect(file, timeout.Token).Count != 0)
                 await Task.Delay(25, timeout.Token);
@@ -61,7 +61,7 @@ public sealed class LockedFileInspectionTests
         await using var first = await TestLockOwner.StartAsync(path, timeout.Token);
         await using var second = await TestLockOwner.StartAsync(path, timeout.Token);
         var items = LockedFileInspection.Inspect(LockedFileInspection.Select(path), timeout.Token);
-        var owners = FileLockProcesses.Describe(items);
+        var owners = LocalProcesses.Describe(items);
         Assert.Equal(new[] { first.Process.Id, second.Process.Id }.Order(), owners.Select(owner => owner.Id));
         Assert.All(owners, owner => Assert.False(owner.CanClose));
     }
@@ -79,7 +79,7 @@ public sealed class LockedFileInspectionTests
         var blocked = Assert.Single(LockedFileInspection.Inspect(target, timeout.Token));
         Assert.Contains(Environment.ProcessId, blocked.ProcessIds);
         Assert.Contains(sharingReader.Process.Id, blocked.ProcessIds);
-        var owners = FileLockProcesses.Describe([blocked]);
+        var owners = LocalProcesses.Describe([blocked]);
         Assert.Contains(owners, owner => owner.Id == sharingReader.Process.Id && !owner.CanClose);
         Assert.DoesNotContain(owners, owner => owner.CanClose);
 

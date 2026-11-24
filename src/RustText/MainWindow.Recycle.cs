@@ -60,7 +60,7 @@ public partial class MainWindow
                 await ShowStillBlockedAsync();
                 return;
             }
-            await Task.Run(() => FileLockProcesses.RequestClose(owners, token), token);
+            await Task.Run(() => LocalProcesses.RequestClose(owners, token), token);
             (blocked, owners) = await WaitForLocksAsync();
             if (blocked.Count != 0 && CanReleaseAll(graceful))
             {
@@ -77,7 +77,7 @@ public partial class MainWindow
                     await ShowStillBlockedAsync();
                     return;
                 }
-                await Task.Run(() => FileLockProcesses.ForceClose(owners, token), token);
+                await Task.Run(() => LocalProcesses.ForceClose(owners, token), token);
                 (blocked, owners) = await WaitForLocksAsync();
             }
             if (blocked.Count != 0)
@@ -106,14 +106,14 @@ public partial class MainWindow
             await ShowStillBlockedAsync();
         }
 
-        Task<(IReadOnlyList<LockedFileInspection.BlockedItem>, IReadOnlyList<FileLockProcesses.Owner>)> ScanAsync() =>
+        Task<(IReadOnlyList<LockedFileInspection.BlockedItem>, IReadOnlyList<LocalProcesses.Owner>)> ScanAsync() =>
             Task.Run(() =>
             {
                 var items = LockedFileInspection.Inspect(target, token);
-                return (items, FileLockProcesses.Describe(items));
+                return (items, LocalProcesses.Describe(items));
             }, token);
 
-        async Task<(IReadOnlyList<LockedFileInspection.BlockedItem>, IReadOnlyList<FileLockProcesses.Owner>)> WaitForLocksAsync()
+        async Task<(IReadOnlyList<LockedFileInspection.BlockedItem>, IReadOnlyList<LocalProcesses.Owner>)> WaitForLocksAsync()
         {
             var result = await ScanAsync();
             for (var attempt = 0; attempt < 6 && result.Item1.Count != 0; attempt++)
@@ -124,7 +124,7 @@ public partial class MainWindow
             return result;
         }
 
-        bool CanReleaseAll(HashSet<FileLockProcesses.Owner>? approved = null)
+        bool CanReleaseAll(HashSet<LocalProcesses.Owner>? approved = null)
         {
             var eligible = owners.Where(owner => owner.CanClose && (approved is null || approved.Contains(owner)))
                 .Select(owner => owner.Id).ToHashSet();

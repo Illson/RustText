@@ -160,7 +160,7 @@ public partial class MainWindow
 
     private void OpenSearchPanel(bool replace = false)
     {
-        if (ActiveTab?.ProxyChecker is not null) return;
+        if (ActiveTab?.IsTool == true) return;
         if (ActiveTab is { EditorLogFilter.IsFiltering: true } filteredTab) CloseEditorLevelFilter(filteredTab);
         if (!replace && ActiveTab?.Log is { } log)
         {

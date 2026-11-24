@@ -51,7 +51,7 @@ public sealed class HistoryMenuTests
                 Assert.Equal(new[]
                 {
                     "Терминал", "Редактор и просмотр", "Форматирование и данные", "Шифрование", "История и черновики", "Удалить с диска", "Обновления",
-                    "Найти окно процесса…", "Прокси-чекер…", "Настройки…"
+                    "Найти окно процесса…", "Найти процесс по порту", "Прокси-чекер…", "Настройки…"
                 }, toolsGroups.Select(MenuHeader));
 
                 var terminalGroup = toolsGroups.Single(item => MenuHeader(item) == "Терминал");
