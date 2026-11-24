@@ -11,17 +11,96 @@ namespace RustText.Demo.Logs;
 internal sealed partial class LogView
 {
     private LogPage? _draggedPage;
+    private PointerEventArgs? _selectionDrag;
 
     private readonly record struct TextScrollAnchor(int First, int Last, double Offset, double ViewportY, double Step);
-    private sealed record ScrollAnchor(LogPage Page, bool Forward, TextScrollAnchor Text, int KeepIndex, int KeepTextIndex);
+    private readonly record struct ScrollOverlap(int Index, int Start, int End);
+    private sealed record ScrollAnchor(LogPage Page, bool Forward, TextScrollAnchor Text, ScrollOverlap Keep);
+    private readonly record struct ScrollSelection(int Caret, int Start, int End)
+    {
+        public void Restore(TextBox text)
+        {
+            text.CaretIndex = Caret;
+            text.SelectionStart = Start;
+            text.SelectionEnd = End;
+        }
+    }
+
+    private void TrackSelectionPointer(object? sender, PointerEventArgs e)
+    {
+        if (e.RoutedEvent == PointerPressedEvent && e.Pointer.Type == PointerType.Mouse
+            && e.GetCurrentPoint(this).Properties.PointerUpdateKind == PointerUpdateKind.LeftButtonPressed)
+        {
+            _selectionDrag = e;
+            StopFollowingEnd();
+        }
+        else if (ReferenceEquals(e.Pointer, _selectionDrag?.Pointer))
+        {
+            if (e.RoutedEvent == PointerReleasedEvent && !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+                _selectionDrag = null;
+            else if (e.RoutedEvent == PointerMovedEvent)
+                _selectionDrag = e;
+        }
+    }
+
+    private bool IsDraggingSelection(TextBox text) =>
+        _selectionDrag?.Pointer.Captured is TextPresenter presenter && text.IsVisualAncestorOf(presenter);
+
+    private void TrackSelectionWheel(TextBox text, PointerWheelEventArgs e, bool loading)
+    {
+        if (!IsDraggingSelection(text) || !ReferenceEquals(_selectionDrag?.Pointer, e.Pointer)) return;
+        _selectionDrag = e;
+        if (!loading) QueueSelectionAtPointer(text);
+    }
+
+    private void QueueSelectionAtPointer(TextBox text)
+    {
+        if (!IsDraggingSelection(text)) return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_selectionDrag is not { Pointer.Captured: TextPresenter presenter } drag
+                || !text.IsVisualAncestorOf(presenter) || VisualRoot is not Visual root) return;
+            var point = drag.GetCurrentPoint(root);
+            // Let TextBox move the live end of the drag to the content now under the pointer.
+            presenter.RaiseEvent(new PointerEventArgs(PointerMovedEvent, presenter, drag.Pointer,
+                root, point.Position, drag.Timestamp, point.Properties, drag.KeyModifiers));
+        }, DispatcherPriority.Loaded);
+    }
+
+    private bool TryKeepScrollSelection(TextBox text, ScrollOverlap keep, int shift, out ScrollSelection? selection,
+        bool limitReached = false)
+    {
+        selection = null;
+        var dragging = IsDraggingSelection(text);
+        var start = text.SelectionStart;
+        var end = text.SelectionEnd;
+        limitReached &= dragging;
+        if (start == end && !dragging) return true;
+        if (!limitReached && Math.Min(start, end) >= keep.Start && Math.Max(start, end) <= keep.End)
+        {
+            selection = new(Math.Clamp(text.CaretIndex, keep.Start, keep.End) + shift, start + shift, end + shift);
+            return true;
+        }
+        if (dragging)
+        {
+            SetStatus("Выделение не помещается в загруженный блок. Скопируйте его, прежде чем продолжить прокрутку.");
+            return false;
+        }
+        selection = new(0, 0, 0);
+        return true;
+    }
 
     private void OnLogPointerWheel(object? sender, PointerWheelEventArgs e)
     {
         if (e.Delta.Y == 0 || e.KeyModifiers != KeyModifiers.None || Math.Abs(e.Delta.Y) < Math.Abs(e.Delta.X)) return;
         if (_levelFilterViewport?.IsVisible == true)
         {
-            if (e.Source is Visual source && (ReferenceEquals(_filteredLogText, source) || _filteredLogText.IsVisualAncestorOf(source))
-                && TryContinueFilteredScroll(e.Delta.Y)) e.Handled = true;
+            if (e.Source is Visual source && (ReferenceEquals(_filteredLogText, source) || _filteredLogText.IsVisualAncestorOf(source)))
+            {
+                var loading = TryContinueFilteredScroll(e.Delta.Y);
+                TrackSelectionWheel(_filteredLogText, e, loading);
+                if (loading) e.Handled = true;
+            }
             return;
         }
         if (!IsLogTextSource(e.Source as Visual)) return;
@@ -31,8 +110,10 @@ internal sealed partial class LogView
         if (PageAtScrollBoundary(forward) is { } page)
         {
             e.Handled = true;
+            TrackSelectionWheel(_logText, e, loading: true);
             _ = ContinueScrollingAsync(page, forward, Math.Abs(e.Delta.Y));
         }
+        else TrackSelectionWheel(_logText, e, loading: false);
     }
 
     private void OnLogScrollbarScrolled(object? sender, ScrollEventArgs e)
@@ -98,14 +179,15 @@ internal sealed partial class LogView
         if (page.Rows.Count == 0 || GetTextScrollAnchor(_logText, _logScrollViewer, forward ? steps : -steps) is not { } anchor)
             return null;
 
-        // shortcut: bound the overlap even when a viewport is filled by a very long line.
-        const int overlapBytes = 2 * LogDataReader.DefaultPageBytes;
-        const int overlapRows = LogDataReader.MaximumPageSize - LogDataReader.DefaultPageSize;
-        var (index, textIndex) = FindScrollOverlap(page.Rows, anchor, forward, row => row.Text.Length, row => row.StartsWithinLine,
+        // shortcut: keep an active selection within a bounded window; larger ranges would need file-backed selection.
+        var dragging = IsDraggingSelection(_logText);
+        var overlapBytes = dragging ? LogDataReader.MaximumPageBytes - LogDataReader.DefaultPageBytes : 2 * LogDataReader.DefaultPageBytes;
+        var overlapRows = dragging ? LogDataReader.MaximumPageSize - LogDataReader.DefaultPageSize : 3 * LogDataReader.DefaultPageSize;
+        var keep = FindScrollOverlap(_logText, page.Rows, anchor, forward, row => row.Text.Length, row => row.StartsWithinLine,
             (i, _) => forward
                 ? page.Rows.Count - i <= overlapRows && page.NextOffset - page.Rows[i].StartOffset <= overlapBytes
                 : i < overlapRows && page.Rows[i].EndOffset - page.StartOffset <= overlapBytes);
-        return new(page, forward, anchor, index, textIndex);
+        return new(page, forward, anchor, keep);
     }
 
     private static TextScrollAnchor? GetTextScrollAnchor(TextBox text, ScrollViewer? scroll, double steps)
@@ -135,9 +217,17 @@ internal sealed partial class LogView
             Math.Max(1, scroll.SmallChange.Height) * Math.Clamp(steps, -1, 1));
     }
 
-    private static (int Index, int TextIndex) FindScrollOverlap<T>(IReadOnlyList<T> rows, TextScrollAnchor anchor,
+    private ScrollOverlap FindScrollOverlap<T>(TextBox text, IReadOnlyList<T> rows, TextScrollAnchor anchor,
         bool forward, Func<T, int> length, Func<T, bool> continuation, Func<int, int, bool> fits)
     {
+        if (rows.Count == 0) return default;
+        var first = anchor.First;
+        var last = anchor.Last;
+        if (text.SelectionStart != text.SelectionEnd || IsDraggingSelection(text))
+        {
+            first = Math.Min(first, Math.Min(text.SelectionStart, text.SelectionEnd));
+            last = Math.Max(last, Math.Max(text.SelectionStart, text.SelectionEnd));
+        }
         var keep = 0;
         var keepText = 0;
         var textIndex = 0;
@@ -145,12 +235,12 @@ internal sealed partial class LogView
         {
             var end = textIndex + length(rows[i - 1]);
             textIndex = end + (continuation(rows[i]) ? 0 : Environment.NewLine.Length);
-            if (forward ? textIndex > anchor.First && fits(i - 1, keepText)
-                : textIndex > anchor.Last || !fits(i, textIndex + length(rows[i]))) break;
+            if (forward ? textIndex > first && fits(i - 1, keepText)
+                : textIndex > last || !fits(i, textIndex + length(rows[i]))) break;
             keep = i;
             keepText = textIndex;
         }
-        return (forward || rows.Count == 0 ? keep : keep + 1, keepText);
+        return forward ? new(keep, keepText, text.Text?.Length ?? 0) : new(keep + 1, 0, keepText + length(rows[keep]));
     }
 
     private static (LogPage Page, int TextIndex) ReadScrolledPage(LogDataReader reader, ScrollAnchor anchor,
@@ -161,10 +251,10 @@ internal sealed partial class LogView
         {
             var next = reader.ReadPage(old.NextOffset, cancellationToken: token);
             if (next.Rows.Count == 0 || next.StartOffset != old.NextOffset) return (old, anchor.Text.First);
-            var kept = old.Rows.Skip(anchor.KeepIndex);
-            var start = anchor.KeepIndex == 0 ? old.StartOffset : old.Rows[anchor.KeepIndex].StartOffset;
+            var kept = old.Rows.Skip(anchor.Keep.Index);
+            var start = anchor.Keep.Index == 0 ? old.StartOffset : old.Rows[anchor.Keep.Index].StartOffset;
             return (next with { Rows = [.. kept, .. next.Rows], StartOffset = start },
-                Math.Max(0, anchor.Text.First - anchor.KeepTextIndex));
+                Math.Max(0, anchor.Text.First - anchor.Keep.Start));
         }
 
         var startBefore = Math.Max(firstOffset, reader.GetPreviousPageOffset(old.StartOffset, token));
@@ -172,7 +262,7 @@ internal sealed partial class LogView
         if (previous.Rows.Count == 0) return (old, anchor.Text.First);
         if (previous.NextOffset != old.StartOffset)
             return (reader.ReadPage(startBefore, cancellationToken: token), -1);
-        var keptRows = old.Rows.Take(anchor.KeepIndex).ToArray();
+        var keptRows = old.Rows.Take(anchor.Keep.Index).ToArray();
         var prefixLength = previous.Rows.Sum(row => row.Text.Length)
             + (previous.Rows.Skip(1).Count(row => !row.StartsWithinLine) + (keptRows[0].StartsWithinLine ? 0 : 1)) * Environment.NewLine.Length;
         var nextOffset = keptRows.Length == old.Rows.Count ? old.NextOffset : keptRows[^1].EndOffset;

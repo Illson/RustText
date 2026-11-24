@@ -118,6 +118,114 @@ public sealed class LogUiTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public Task MouseSelectionSurvivesScrollingAcrossLogBlocks(bool filtered, bool backward) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "scroll-selection.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(1, 320).Select(n => $"[ERR] row-{n:D4} payload\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            window.Height = 420;
+            if (filtered)
+            {
+                await InvokeTask(log, "ShowLevelFilterAsync");
+                ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            }
+            var text = (TextBox)Field(log, filtered ? "_filteredLogText" : "_logText");
+            var viewerField = filtered ? "_filteredLogScrollViewer" : "_logScrollViewer";
+            var firstBlock = filtered ? 100 : 80;
+            var boundary = $"row-{(backward ? firstBlock : firstBlock + 1):D4}";
+            Point At(double x, double y) => text.TranslatePoint(new Point(x, y), window)!.Value;
+            await HeadlessTests.WaitForAsync(() => text.Text?.StartsWith("[ERR] row-0001", StringComparison.Ordinal) == true
+                && Field(log, viewerField) is ScrollViewer { ScrollBarMaximum.Y: > 200 });
+            if (backward)
+            {
+                var next = (Button)Field(log, "_nextButton");
+                await HeadlessTests.WaitForAsync(() => next.IsEnabled);
+                next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await HeadlessTests.WaitForAsync(() => FirstRowNumber(text.Text) == firstBlock + 1);
+            }
+            window.MouseMove(At(9, 22));
+            await HeadlessTests.WaitForAsync(() => window.InputHitTest(At(9, 22)) is Visual hit && text.IsVisualAncestorOf(hit));
+            var scroll = (ScrollViewer)Field(log, viewerField);
+            scroll.Offset = new Vector(0, backward ? 150 : scroll.ScrollBarMaximum.Y - 150);
+            window.UpdateLayout();
+            var start = At(9, backward ? 112 : 22);
+            var end = At(130, backward ? 43 : 89);
+            window.MouseDown(start, MouseButton.Left);
+            window.MouseMove(end, RawInputModifiers.LeftMouseButton);
+            var original = text.SelectedText;
+            Assert.NotEmpty(original);
+            var anchor = text.Text![text.SelectionStart..].Split(Environment.NewLine)[0];
+            Assert.Contains("row-", anchor);
+
+            window.MouseWheel(end, new Vector(0, backward ? 1 : -1), RawInputModifiers.LeftMouseButton);
+            await HeadlessTests.WaitForAsync(() => text.SelectedText.Length > original.Length);
+
+            for (var i = 0; i < 30 && !text.Text!.Contains(boundary, StringComparison.Ordinal); i++)
+            {
+                window.MouseWheel(end, new Vector(0, backward ? 1 : -1), RawInputModifiers.LeftMouseButton);
+                await Task.Delay(16);
+            }
+            await HeadlessTests.WaitForAsync(() => text.Text?.Contains(boundary, StringComparison.Ordinal) == true
+                && text.SelectedText.Length > original.Length);
+            end = At(130, backward ? 30 : 115);
+            window.MouseMove(end, RawInputModifiers.LeftMouseButton);
+            window.MouseUp(end, MouseButton.Left);
+            Assert.True(text.SelectedText.Length > original.Length);
+            Assert.StartsWith(anchor, text.Text![text.SelectionStart..]);
+            window.KeyPress(Key.C, RawInputModifiers.Control, PhysicalKey.C, "c");
+            window.KeyRelease(Key.C, RawInputModifiers.Control, PhysicalKey.C, "c");
+            var clipboard = await window.Clipboard!.TryGetDataAsync();
+            Assert.Equal(text.SelectedText, await clipboard!.TryGetTextAsync());
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task LiveAppendWaitsForMouseSelectionToFinish(bool filtered) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "live-selection.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(1, 10).Select(n => $"[ERR] row-{n:D4}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true, FollowEnd: true));
+        try
+        {
+            if (filtered)
+            {
+                await InvokeTask(log, "ShowLevelFilterAsync");
+                ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            }
+            var text = (TextBox)Field(log, filtered ? "_filteredLogText" : "_logText");
+            await HeadlessTests.WaitForAsync(() => text.Text?.EndsWith("row-0010", StringComparison.Ordinal) == true);
+            Point At(double y) => text.TranslatePoint(new Point(55, y), window)!.Value;
+            window.MouseMove(At(20));
+            await HeadlessTests.WaitForAsync(() => window.InputHitTest(At(20)) is Visual hit && text.IsVisualAncestorOf(hit));
+            window.MouseDown(At(20), MouseButton.Left);
+            window.MouseMove(At(72), RawInputModifiers.LeftMouseButton);
+            var selected = text.SelectedText;
+            Assert.NotEmpty(selected);
+
+            var length = log.FileLength;
+            await File.AppendAllTextAsync(path, "[ERR] row-0011\n");
+            typeof(LogView).GetMethod("OnRefreshTimerTick", Private)!.Invoke(log, [null, EventArgs.Empty]);
+            Assert.Equal(length, log.FileLength);
+            Assert.Equal(selected, text.SelectedText);
+            Assert.DoesNotContain("row-0011", text.Text);
+
+            window.MouseUp(At(72), MouseButton.Left);
+            await HeadlessTests.WaitForAsync(() => text.Text?.EndsWith("row-0011", StringComparison.Ordinal) == true);
+            Assert.Equal(selected, text.SelectedText);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public Task WheelKeepsVisibleRowsWhenLoadingAnAdjacentLogPage(bool wrap) => HeadlessTests.RunAsync(async profile =>

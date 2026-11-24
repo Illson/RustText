@@ -17,7 +17,7 @@ internal sealed partial class LogDataReader
     internal const int MaximumPageBytes = 1024 * 1024;
     private const int MaximumFrameBytes = 64 * 1024;
     internal const int DefaultPageSize = 80;
-    internal const int MaximumPageSize = 4 * DefaultPageSize;
+    internal const int MaximumPageSize = 2_048;
     internal const int DefaultFrameBytes = 16 * 1024;
     private const int IndexBufferBytes = 256 * 1024;
     internal const int DefaultPageBytes = 128 * 1024;

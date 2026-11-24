@@ -891,6 +891,12 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
         };
         _logText.AddHandler(KeyDownEvent, OnLogKeyDown, RoutingStrategies.Tunnel);
+        foreach (var text in new[] { _logText, _filteredLogText })
+        {
+            text.AddHandler(PointerPressedEvent, TrackSelectionPointer, RoutingStrategies.Tunnel, handledEventsToo: true);
+            text.AddHandler(PointerMovedEvent, TrackSelectionPointer, RoutingStrategies.Tunnel, handledEventsToo: true);
+            text.AddHandler(PointerReleasedEvent, TrackSelectionPointer, RoutingStrategies.Tunnel, handledEventsToo: true);
+        }
         _logText.PropertyChanged += (_, e) =>
         {
             if (e.Property == TextBox.CaretIndexProperty || e.Property == TextBox.SelectionStartProperty
@@ -1045,6 +1051,12 @@ internal sealed partial class LogView : UserControl, IDisposable
             if (scrollAnchor is { } pending && (ReferenceEquals(page, pending.Page)
                 || !ReferenceEquals(_page, pending.Page) || _levelFilterViewport?.IsVisible == true
                 || Math.Abs((_logScrollViewer?.Offset.Y ?? 0) - pending.Text.Offset) > 1)) return;
+            ScrollSelection? selection = null;
+            if (scrollAnchor is { } scrolled && !TryKeepScrollSelection(_logText,
+                scrollIndex < 0 ? new ScrollOverlap(0, 0, -1) : scrolled.Keep,
+                scrolled.Forward ? -scrolled.Keep.Start : scrollIndex - scrolled.Text.First, out selection,
+                limitReached: page.Rows.Count > LogDataReader.MaximumPageSize
+                    || page.NextOffset - page.StartOffset > LogDataReader.MaximumPageBytes)) return;
             // The user can still type in the current page while the next one is being read.
             if (EditsPagesByDefault && HasPendingEdit)
             {
@@ -1081,6 +1093,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                     displayText.Append(row.Text);
                 }
                 _logText.Text = displayText.ToString();
+                selection?.Restore(_logText);
                 _levelBands.SetPage(page);
             }
             Dispatcher.UIThread.Post(() =>
@@ -1094,6 +1107,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                     _ => 0
                 };
                 scroll.Offset = new Vector(scroll.Offset.X, y);
+                if (scrollAnchor is not null) QueueSelectionAtPointer(_logText);
             }, DispatcherPriority.Loaded);
             var rows = page.Rows.Count == 0 ? 0 : 1 + page.Rows.Skip(1).Count(row => !row.StartsWithinLine);
             _countLabel.Text = $"Строк на странице · {LineNumbers.Format(rows)}";
@@ -1926,6 +1940,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
         if (_closed || _busy || _pageWrite is not null || !_autoRefresh
+            || IsDraggingSelection(_levelFilterViewport?.IsVisible == true ? _filteredLogText : _logText)
             || (_pageEdit is not null && PreserveExternalPageEdit is null))
         {
             return;
