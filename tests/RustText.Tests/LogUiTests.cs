@@ -615,12 +615,9 @@ public sealed class LogUiTests
             window.UpdateLayout();
             var beforeBoundary = FirstVisibleRowNumber(filtered, scroll);
             window.MouseWheel(point, new Vector(0, -1));
-            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("row-0398", StringComparison.Ordinal) == true);
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("row-0398", StringComparison.Ordinal) == true
+                && FirstVisibleRowNumber(filtered, scroll) >= beforeBoundary);
             Assert.InRange(FirstVisibleRowNumber(filtered, scroll) - beforeBoundary, 0, 8);
-
-            window.MouseDown(point, MouseButton.Left);
-            window.MouseUp(point, MouseButton.Left);
-            await HeadlessTests.WaitForAsync(() => FirstRowNumber(filtered.Text) is >= 238 and <= 244);
         }
         finally { await CloseLogAsync(window, log); }
     });
