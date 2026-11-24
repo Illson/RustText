@@ -7,6 +7,7 @@ using Avalonia.Media;
 using AvaloniaEdit;
 using AvaloniaEdit.Rendering;
 using RustText.Demo;
+using RustText.Demo.Editor;
 using Xunit;
 
 namespace RustText.Tests;
@@ -125,6 +126,7 @@ public sealed class ViceCityThemeTests
                 var selectedText = editor.SelectedText;
                 window.FindControl<Button>("CaptionMinimize")!.Focus();
                 Assert.False(area.IsKeyboardFocusWithin);
+                AssertCaretPixels(window, editor, visible: false);
                 Assert.Same(FocusTheme.InactiveEditorSelection, area.SelectionBrush);
                 Assert.Same(FocusTheme.InactiveEditorSelectionOutline, area.SelectionBorder);
                 Assert.True(Contrast(FocusTheme.Text.Color, FocusTheme.InactiveEditorSelection.Color) >= 4.5);
@@ -139,14 +141,62 @@ public sealed class ViceCityThemeTests
             }
         });
 
-    private static void AssertCaretPixels(MainWindow window, TextEditor editor)
+    [Fact]
+    public Task RoutedTypingMovesThePaintedCaretButPasteSnaps() => HeadlessTests.RunAsync(_ =>
+    {
+        var editor = new TextEditor { Text = "start", Background = FocusTheme.Editor };
+        var area = editor.TextArea;
+        var clock = new ManualClock();
+        EditorCaret.Attach(area, clock);
+        var layer = Assert.Single(area.TextView.Layers.OfType<EditorCaret>());
+        var window = new Window { Content = editor, Width = 640, Height = 400 };
+        window.Show();
+        try
+        {
+            area.Focus();
+            editor.CaretOffset = editor.Text.Length;
+            AssertCaretPixels(window, editor);
+            var start = area.Caret.CalculateCaretRectangle().Translate(-area.TextView.ScrollOffset);
+
+            window.KeyTextInput("   ");
+            Assert.Equal("start   ", editor.Text);
+            Assert.Equal(8, editor.CaretOffset);
+            AssertCaretPixels(window, editor, visible: layer.MotionEnabled, position: start);
+            AssertCaretPixels(window, editor, visible: !layer.MotionEnabled);
+
+            clock.Ticks += TimeSpan.FromMilliseconds(100).Ticks;
+            layer.InvalidateVisual();
+            AssertCaretPixels(window, editor);
+
+            // The page editor's clipboard path calls this overload, not the routed input event.
+            area.PerformTextInput("  ");
+            Assert.Equal(10, editor.CaretOffset);
+            AssertCaretPixels(window, editor);
+
+            area.OverstrikeMode = true;
+            AssertCaretPixels(window, editor, visible: false);
+            area.OverstrikeMode = false;
+            AssertCaretPixels(window, editor);
+        }
+        finally { window.Close(); }
+        return Task.CompletedTask;
+    });
+
+    private sealed class ManualClock : TimeProvider
+    {
+        public long Ticks { get; set; }
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => Ticks;
+    }
+
+    private static void AssertCaretPixels(Window window, TextEditor editor, bool visible = true, Rect? position = null)
     {
         window.UpdateLayout();
         using var frame = window.CaptureRenderedFrame();
         Assert.NotNull(frame);
         var area = editor.TextArea;
         var view = area.TextView;
-        var caret = area.Caret.CalculateCaretRectangle().Translate(-view.ScrollOffset);
+        var caret = position ?? area.Caret.CalculateCaretRectangle().Translate(-view.ScrollOffset);
         var origin = view.TranslatePoint(default, window)!.Value;
         var scale = window.RenderScaling;
         var x = (int)Math.Round(origin.X * scale) + (int)Math.Round(caret.X * scale);
@@ -157,7 +207,7 @@ public sealed class ViceCityThemeTests
             frame.CopyPixels(new PixelRect(x, y, 2, 1), buffer, 8, 8);
             for (var offset = 0; offset < 8; offset += 4)
             {
-                Assert.True(PixelMatches(buffer, offset, FocusTheme.EditorCaret.Color));
+                Assert.Equal(visible, PixelMatches(buffer, offset, FocusTheme.EditorCaret.Color));
             }
         }
         finally { Marshal.FreeHGlobal(buffer); }
