@@ -111,9 +111,10 @@ def fixture(kernel):
                 rows = ["repeat"] * int(command[1:])
             elif command == "control":
                 rows = ["control"]
-            elif command == "wrap-start":
+            elif command in ("wrap-start", "wrap-start-space"):
                 width = console_info(kernel, handle)[0]
-                write_text(kernel, handle, "[INFO] ".ljust(width, "x"))
+                padding = " " if command == "wrap-start-space" else ""
+                write_text(kernel, handle, "[INFO] ".ljust(width - len(padding), "x") + padding)
                 print(f"ok {width}", flush=True)
                 continue
             elif command == "wrap-end":
@@ -305,11 +306,12 @@ def run(executable):
         expect(worker_lines, ["control"])
         idle(worker_lines)
 
-        width = send_fixture(fixture_process, fixture_lines, "wrap-start")
-        expect(worker_lines, ["[INFO] ".ljust(width, "x") + "\0"])
-        send_fixture(fixture_process, fixture_lines, "wrap-end", 2)
-        expect(worker_lines, ["tail/segment", "[ERROR] separate"])
-        idle(worker_lines)
+        for command, padding in (("wrap-start", ""), ("wrap-start-space", " ")):
+            width = send_fixture(fixture_process, fixture_lines, command)
+            expect(worker_lines, ["[INFO] ".ljust(width - len(padding), "x") + padding + "\0"])
+            send_fixture(fixture_process, fixture_lines, "wrap-end", 2)
+            expect(worker_lines, ["tail/segment", "[ERROR] separate"])
+            idle(worker_lines)
 
         fixture_process.stdin.close()
         if fixture_process.wait(timeout=5) or worker.wait(timeout=5):

@@ -191,10 +191,12 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
                         if ((cell.Attributes & TrailingCharacterCell) != 0) continue;
                         text[length++] = cell.Character is 0 or '\r' or '\n' ? ' ' : (char)cell.Character;
                     }
-                    // shortcut: infer wrapping from the occupied right edge until Win32 exposes wrap metadata.
-                    var mayWrap = length > 0 && text[length - 1] != ' ';
+                    var fullLength = length;
                     while (length > 0 && text[length - 1] == ' ') length--;
-                    rows[start - first + row] = new ConsoleScreenRow(new string(text, 0, length), mayWrap);
+                    // shortcut: the last blank may be a printed space; use native wrap metadata if it becomes available.
+                    var mayWrap = length > 0 && fullLength - length <= 1;
+                    rows[start - first + row] = new ConsoleScreenRow(
+                        new string(text, 0, mayWrap ? fullLength : length), mayWrap);
                 }
             }
         }

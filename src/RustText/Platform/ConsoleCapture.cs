@@ -72,14 +72,14 @@ internal sealed class ConsoleCapture : IDisposable
             using var disconnect = token.Register(worker.StandardInput.BaseStream.Dispose);
             using var output = worker.StandardOutput;
             using var writer = new StreamWriter(_file, Utf8, leaveOpen: true);
-            var openLine = false;
+            string? pendingJoin = null;
             while (await output.ReadLineAsync(token).ConfigureAwait(false) is { } header)
             {
                 if (!int.TryParse(header, NumberStyles.None, CultureInfo.InvariantCulture, out var count))
                     throw new IOException(header);
-                var (completed, nextOpenLine) =
-                    await CopyFrameAsync(output, writer, count, MaximumCaptureBytes, token, openLine).ConfigureAwait(false);
-                openLine = nextOpenLine;
+                var (completed, nextJoin) =
+                    await CopyFrameAsync(output, writer, count, MaximumCaptureBytes, token, pendingJoin).ConfigureAwait(false);
+                pendingJoin = nextJoin;
                 _ready.TrySetResult();
                 if (!completed) return new IOException("Достигнут предел захвата (256 МиБ). Собранный текст доступен для поиска.");
             }
@@ -122,8 +122,8 @@ internal sealed class ConsoleCapture : IDisposable
         }
     }
 
-    internal static async Task<(bool Completed, bool OpenLine)> CopyFrameAsync(TextReader source,
-        StreamWriter writer, int count, long maximumBytes, CancellationToken token, bool openLine = false)
+    internal static async Task<(bool Completed, string? PendingJoin)> CopyFrameAsync(TextReader source,
+        StreamWriter writer, int count, long maximumBytes, CancellationToken token, string? pendingJoin = null)
     {
         var length = writer.BaseStream.Length;
         var newlineBytes = writer.Encoding.GetByteCount(writer.NewLine);
@@ -131,24 +131,29 @@ internal sealed class ConsoleCapture : IDisposable
         {
             var row = await source.ReadLineAsync(token).ConfigureAwait(false)
                 ?? throw new IOException("Поток вывода консоли прервался.");
-            var mayWrap = row.EndsWith(RightEdgeMarker);
-            if (mayWrap) row = row[..^1];
-            // A full-width row can also be followed by an explicit record header.
-            var startsRecord = openLine && LogLevels.StartsRecord(row);
-            length += (long)writer.Encoding.GetByteCount(row) + (startsRecord ? newlineBytes : 0)
-                + (mayWrap ? 0 : newlineBytes);
+            string? nextJoin = null;
+            if (row.EndsWith(RightEdgeMarker))
+            {
+                // Keep the edge space only if the next row actually continues this one.
+                nextJoin = row.Length > 1 && row[^2] == ' ' ? " " : "";
+                row = row[..^(1 + nextJoin.Length)];
+            }
+            var separator = pendingJoin is null || row.Length == 0 ? ""
+                : LogLevels.StartsRecord(row) ? writer.NewLine : pendingJoin;
+            length += (long)writer.Encoding.GetByteCount(row) + writer.Encoding.GetByteCount(separator)
+                + (nextJoin is null ? newlineBytes : 0);
             if (length > maximumBytes)
             {
                 await writer.FlushAsync(token).ConfigureAwait(false);
-                return (false, openLine);
+                return (false, pendingJoin);
             }
-            if (startsRecord) await writer.WriteAsync(writer.NewLine.AsMemory(), token).ConfigureAwait(false);
-            if (mayWrap) await writer.WriteAsync(row.AsMemory(), token).ConfigureAwait(false);
-            else await writer.WriteLineAsync(row.AsMemory(), token).ConfigureAwait(false);
-            openLine = mayWrap;
+            if (separator.Length > 0) await writer.WriteAsync(separator.AsMemory(), token).ConfigureAwait(false);
+            if (nextJoin is null) await writer.WriteLineAsync(row.AsMemory(), token).ConfigureAwait(false);
+            else await writer.WriteAsync(row.AsMemory(), token).ConfigureAwait(false);
+            pendingJoin = nextJoin;
         }
         await writer.FlushAsync(token).ConfigureAwait(false);
-        return (true, openLine);
+        return (true, pendingJoin);
     }
 
     public void Dispose()
