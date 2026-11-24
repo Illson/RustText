@@ -700,9 +700,9 @@ public sealed class LogUiTests
 
             var gutter = (TextBlock)Field(log, "_lineGutterText");
             await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("[INFO] next", StringComparison.Ordinal) == true
-                && gutter.Text?.EndsWith("3", StringComparison.Ordinal) == true && log.KnownLineCount == 3);
+                && gutter.Text?.EndsWith("3", StringComparison.Ordinal) == true);
             Assert.Equal(firstPart + tail + Environment.NewLine + "[INFO] next", filtered.Text);
-            Assert.Equal(3L, log.KnownLineCount);
+            Assert.Equal("Строк на странице · 3", ((TextBlock)Field(log, "_countLabel")).Text);
             var labels = gutter.Text!.Split(Environment.NewLine, StringSplitOptions.None);
             Assert.True(labels.Length > 2);
             Assert.Equal("1", labels[0]);
