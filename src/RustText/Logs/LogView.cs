@@ -556,7 +556,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         _verticalLogScrollbar.SetOwner(null);
         _draggedPage = null;
         _file.Dispose();
-        _console?.Dispose();
         _logText.Text = string.Empty;
         _lineGutterText.Text = string.Empty;
         _fileLabel.Text = string.Empty;

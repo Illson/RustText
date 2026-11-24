@@ -939,6 +939,11 @@ public partial class MainWindow
     private async Task ToggleLogModeAsync(WorkTab tab)
     {
         if (_closing || _workspaceSwitchPending || tab.Saving || tab.Closing || tab.Loading || tab.CheckingSession) return;
+        if (tab.Console is { } capture)
+        {
+            ToggleConsoleLogMode(tab, capture);
+            return;
+        }
         if (tab.Deferred is not null) await ActivateDeferredAsync(tab);
         if (tab.Deferred is not null || !_tabs.ContainsKey(tab.Id) || tab.Loading) return;
         tab.Loading = true;
@@ -1448,7 +1453,10 @@ public partial class MainWindow
         public MultiCaretEditing? MultiCaret { get; set; }
         public LogView? Log { get; set; }
         public ShellTab? Shell { get; set; }
-        public bool IsTransient => ProxyChecker is not null || Shell is not null || Log?.IsConsole == true;
+        public ConsoleCapture? Console { get; set; }
+        public ConsoleTextView? ConsoleText => Item.Content as ConsoleTextView;
+        public string? ConsoleDisconnectStatus { get; set; }
+        public bool IsTransient => ProxyChecker is not null || Shell is not null || Console is not null;
         public bool IsLog => PendingFileOpenMode is FileOpenMode.PagedEditor or FileOpenMode.Log
             || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
         public bool OpensAsLog => IsLog && !(Log?.EditsPagesByDefault

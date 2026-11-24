@@ -81,27 +81,53 @@ public partial class MainWindow
             return;
         }
 
+        var tab = AddConsoleTab(capture);
+        var error = await capture.Completion;
+        if (!ReferenceEquals(tab.Console, capture) || capture.IsDisposed) return;
+        tab.ConsoleDisconnectStatus = error is null
+            ? "Подключённый процесс завершил работу."
+            : $"Подключение к консоли завершено с ошибкой. {error.Message}";
+        tab.Log?.ReportConsoleDisconnected(tab.ConsoleDisconnectStatus);
+        tab.ConsoleText?.ReportDisconnected(tab.ConsoleDisconnectStatus);
+    }
+
+    private WorkTab AddConsoleTab(ConsoleCapture capture)
+    {
         var tab = AddTab(select: false);
-        tab.CustomTitle = title;
+        tab.CustomTitle = capture.Title;
+        tab.Console = capture;
         try
         {
             AttachLog(tab, capture.Path, TextEncodingKind.Utf8, new LogTabState(FollowEnd: true), console: capture);
             Select(tab);
+            return tab;
         }
         catch
         {
             RemoveTab(tab);
-            capture.Dispose();
             throw;
         }
+    }
 
-        var log = tab.Log;
-        if (log is null) return;
-        var error = await capture.Completion;
-        if (error is null && capture.IsDisposed) return;
-        var status = error is null
-            ? "Подключённый процесс завершил работу."
-            : $"Подключение к консоли завершено с ошибкой. {error.Message}";
-        log.ReportConsoleDisconnected(status);
+    private void ToggleConsoleLogMode(WorkTab tab, ConsoleCapture capture)
+    {
+        if (tab.Log is { } log)
+        {
+            var view = new ConsoleTextView(capture.Path, _fontSize, log.WordWrap);
+            if (tab.ConsoleDisconnectStatus is { } status) view.ReportDisconnected(status);
+            log.Close();
+            tab.Log = null;
+            tab.OpeningPage = false;
+            tab.Item.Content = view;
+            UpdateTab(tab);
+            if (ReferenceEquals(tab, ActiveTab)) view.Editor.Focus();
+        }
+        else if (tab.ConsoleText is { } view)
+        {
+            AttachLog(tab, capture.Path, TextEncodingKind.Utf8, new LogTabState(FollowEnd: true, WordWrap: view.Editor.WordWrap),
+                console: capture);
+            view.Dispose();
+            if (tab.ConsoleDisconnectStatus is { } status) tab.Log!.ReportConsoleDisconnected(status);
+        }
     }
 }
