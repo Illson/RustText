@@ -169,8 +169,10 @@ public sealed class EncryptedTabDialogTests
         }
     });
 
-    [Fact]
-    public Task EncryptingFromBlockedFallbackDoesNotDeleteTheLatestDrafts() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task EncryptingFromBlockedFallbackDoesNotDeleteTheLatestDrafts(bool corrupt) => HeadlessTests.RunAsync(async profile =>
     {
         var storage = StorageService.OpenDefault();
         var a = new SessionTab(10, null, TextEncodingKind.Utf8);
@@ -181,7 +183,9 @@ public sealed class EncryptedTabDialogTests
         var target = Path.Combine(profile, "old.rte");
         try
         {
-            using (new FileStream(storage.GetDraftPath(latest.Tabs[1])!, FileMode.Open, FileAccess.Read, FileShare.None))
+            var neighbor = storage.GetDraftPath(latest.Tabs[1])!;
+            if (corrupt) await File.WriteAllTextAsync(neighbor, "damaged B");
+            using (corrupt ? null : new FileStream(neighbor, FileMode.Open, FileAccess.Read, FileShare.None))
             {
                 window.Show();
                 await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished"));
@@ -191,8 +195,10 @@ public sealed class EncryptedTabDialogTests
             var saving = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
             if (!saving.IsCompleted) SubmitTestPassword(GetCreateDialog(window));
             await saving;
-            var checkpoint = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
-            Assert.Equal(new[] { "new A", "note B" }, await Task.WhenAll(checkpoint.Tabs.Select(tab => storage.LoadDraftAsync(tab))));
+            var checkpoint = Assert.IsType<SessionState>(await ReadCheckpointAsync(storage, "latest"));
+            Assert.Equal(new[] { a.Id, b.Id }, checkpoint.Tabs.Select(tab => tab.Id));
+            Assert.Equal("new A", await storage.LoadDraftAsync(checkpoint.Tabs[0]));
+            Assert.Equal(corrupt ? "damaged B" : "note B", await File.ReadAllTextAsync(neighbor));
             var previous = Assert.IsType<SessionState>(await ReadCheckpointAsync(storage, "previous"));
             Assert.Equal("old A", await storage.LoadDraftAsync(Assert.Single(previous.Tabs)));
             Assert.True(File.Exists(storage.GetDraftPath(latest.Tabs[0])));

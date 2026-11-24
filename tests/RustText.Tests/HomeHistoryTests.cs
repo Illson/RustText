@@ -304,6 +304,41 @@ public sealed class HomeHistoryTests
         Assert.Equal("keep this note", await storage.LoadDraftAsync(recovered.Tabs[1]));
     });
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task DamagedLatestDraftLeavesItsHealthyNeighborAvailableAfterRestart(bool missing) => HeadlessTests.RunAsync(async _ =>
+    {
+        var storage = StorageService.OpenDefault();
+        var a = new SessionTab(101, null, TextEncodingKind.Utf8);
+        var b = new SessionTab(102, null, TextEncodingKind.Utf8);
+        await storage.SaveSessionAsync(new([a]), new Dictionary<long, string> { [a.Id] = "old A" });
+        var latest = await storage.SaveSessionAsync(new([a, b]), new Dictionary<long, string> { [a.Id] = "new A", [b.Id] = "note B" });
+        var path = storage.GetDraftPath(latest.Tabs[0])!;
+        if (missing) File.Delete(path);
+        else await File.WriteAllTextAsync(path, "damaged");
+        var pointerPath = Path.Combine(storage.RootDirectory, "session", "latest.json");
+        var pointer = await File.ReadAllTextAsync(pointerPath);
+
+        for (var launch = 0; launch < 2; launch++)
+        {
+            var window = await OpenWorkspaceAsync();
+            try
+            {
+                Assert.Equal("old A", ActiveEditor(window)?.Text);
+                var history = Assert.IsType<List<SessionTab>>(Field(window, "_closedTabs"));
+                var recovered = Assert.Single(history);
+                Assert.Equal(b.Id, recovered.Id);
+                await CallAsync(window, "RestoreClosedAsync", recovered);
+                Assert.Equal("note B", ActiveEditor(window)?.Text);
+                await CallAsync(window, "SaveSessionAsync");
+            }
+            finally { await CloseAsync(window); }
+            Assert.Equal(pointer, await File.ReadAllTextAsync(pointerPath));
+            Assert.Equal("note B", await storage.LoadDraftAsync(latest.Tabs[1]));
+        }
+    });
+
     [Fact]
     public Task LockedPreviousPointerDoesNotHideLatestHistoryOrPruneItsDraft() => HeadlessTests.RunAsync(async _ =>
     {
@@ -627,12 +662,17 @@ public sealed class HomeHistoryTests
             var current = (await File.ReadAllTextAsync(Path.Combine(checkpoints, "latest.json"))).Trim();
             Assert.Single((await storage.LoadSessionAsync())!.Tabs);
             var manifest = Path.Combine(checkpoints, current, "manifest.json");
-            await File.WriteAllTextAsync(manifest, "corrupt checkpoint");
-            var backup = (await storage.LoadSessionAsync())!;
-            Assert.Empty(backup.Tabs);
-            var recovered = Assert.Single(backup.ClosedTabs!);
-            Assert.Equal(kept.Id, recovered.Id);
-            Assert.Equal("keep this draft", await storage.LoadDraftAsync(recovered));
+            var original = await File.ReadAllBytesAsync(manifest);
+            try
+            {
+                await File.WriteAllTextAsync(manifest, "corrupt checkpoint");
+                var backup = (await storage.LoadSessionAsync())!;
+                Assert.Empty(backup.Tabs);
+                var recovered = Assert.Single(backup.ClosedTabs!);
+                Assert.Equal(kept.Id, recovered.Id);
+                Assert.Equal("keep this draft", await storage.LoadDraftAsync(recovered));
+            }
+            finally { await File.WriteAllBytesAsync(manifest, original); }
 
             await CloseAsync(window);
             var reopened = (await storage.LoadSessionAsync())!;

@@ -29,7 +29,7 @@ public partial class MainWindow
     private bool _mountingSessionTabs;
     private bool _emptyStartupPreserveAllHistory;
     private SessionTab[] _emptyHistoryBaseline = [];
-    private const string FallbackSessionWarning = "Последний снимок недоступен. Открыт предыдущий, файлы оставлены без изменений. Перезапустите приложение после восстановления доступа.";
+    private const string FallbackSessionWarning = "Последний снимок не удалось прочитать полностью. Открыт предыдущий, файлы оставлены без изменений. Сохраните нужные черновики в отдельные файлы.";
 
     private async Task RestoreSessionAsync()
     {

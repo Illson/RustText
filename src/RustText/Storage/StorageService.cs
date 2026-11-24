@@ -168,15 +168,25 @@ internal sealed class StorageService
         var current = Path.Combine(_checkpoints, "latest.json");
         var backup = Path.Combine(_checkpoints, "previous.json");
         var readBlocked = false;
+        SessionState? rejectedLatest = null;
         foreach (var (path, isLatest) in new[] { (current, true), (backup, false) })
         {
             SessionState? verified;
             try
             {
-                if (await ReadCheckpointAsync(path, cancellationToken).ConfigureAwait(false) is not { } state) continue;
+                if (await ReadCheckpointAsync(path, cancellationToken).ConfigureAwait(false) is not { } state)
+                {
+                    if (isLatest && File.Exists(current)) readBlocked = true;
+                    continue;
+                }
                 cancellationToken.ThrowIfCancellationRequested();
                 if (showPendingTabs is not null) await showPendingTabs(state).ConfigureAwait(false);
                 verified = await ValidateSessionDraftsAsync(state, allowBackup: !isLatest, cancellationToken).ConfigureAwait(false);
+                if (isLatest && verified is null)
+                {
+                    readBlocked = true;
+                    rejectedLatest = state;
+                }
             }
             catch (Exception error) when (IsCheckpointReadFailure(error))
             {
@@ -184,12 +194,29 @@ internal sealed class StorageService
                 continue;
             }
             if (verified is null) continue;
+            if (rejectedLatest is not null)
+                verified = await RecoverOmittedDraftsAsync(verified, rejectedLatest, cancellationToken).ConfigureAwait(false);
             CacheSession(verified, isLatest, readBlocked);
             return verified;
         }
         var legacy = readBlocked || HasSessionCheckpoint ? null : await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
         CacheSession(legacy, isLatest: false, readBlocked);
         return legacy;
+    }
+
+    private async Task<SessionState> RecoverOmittedDraftsAsync(SessionState fallback, SessionState rejected, CancellationToken token)
+    {
+        var ids = fallback.Tabs.Concat(fallback.ClosedTabs ?? []).Select(tab => tab.Id).ToHashSet();
+        var closed = new List<SessionTab>(fallback.ClosedTabs ?? []);
+        foreach (var tab in rejected.Tabs.Concat(rejected.ClosedTabs ?? []))
+        {
+            token.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(tab.DraftRef) || ids.Contains(tab.Id)
+                || !await IsValidDraftAsync(tab, token).ConfigureAwait(false)) continue;
+            ids.Add(tab.Id);
+            closed.Add(tab);
+        }
+        return fallback with { ClosedTabs = closed };
     }
 
     public async Task<SessionState> SaveSessionAsync(SessionState state, IReadOnlyDictionary<long, string>? drafts = null, CancellationToken cancellationToken = default)
@@ -209,7 +236,7 @@ internal sealed class StorageService
         // Startup and explicit loads always validate every referenced draft. Within this process,
         // successful checkpoints are immutable and already validated, so a benign save can reuse
         // the validated manifest without reading every large draft again.
-        // A fallback opened during a read error cannot be used for writing, even if the lock is gone.
+        // The rejected checkpoint may still reference good drafts that are absent from the fallback.
         var fallbackState = CheckpointReadBlocked
             || (_cachedSession is not null || !HasSessionCheckpoint) && CachedFilesAreUnchanged()
             ? _cachedSession
