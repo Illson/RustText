@@ -47,12 +47,7 @@ public partial class MainWindow
             _themeMenu.Items.Add(item);
         }
         _themeMenu.Items.Add(new Separator());
-        _smoothCaretMenu = Command("Плавный курсор", () => Run(async () =>
-        {
-            try { await SaveWorkspaceSettingsAsync(settings => settings with { SmoothCaret = !settings.SmoothCaret }); }
-            finally { RefreshThemeMenu(); }
-        }));
-        _smoothCaretMenu.ToggleType = MenuItemToggleType.CheckBox;
+        _smoothCaretMenu = new MenuItem { Header = "Плавный курсор", ToggleType = MenuItemToggleType.CheckBox };
         _themeMenu.Items.Add(_smoothCaretMenu);
         _themeMenu.Items.Add(BuildGlassMenuItem());
         _themeMenu.PropertyChanged += (_, change) =>
@@ -189,10 +184,23 @@ public partial class MainWindow
         }
     }
 
+    private void SmoothCaretMenuChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property != MenuItem.IsCheckedProperty) return;
+        var enabled = _smoothCaretMenu.IsChecked;
+        Run(async () =>
+        {
+            try { await SaveWorkspaceSettingsAsync(settings => settings with { SmoothCaret = enabled }); }
+            finally { RefreshThemeMenu(); }
+        });
+    }
+
     private void RefreshThemeMenu()
     {
         _themeMenu.IsEnabled = _workspace.SettingsReady;
+        _smoothCaretMenu.PropertyChanged -= SmoothCaretMenuChanged;
         _smoothCaretMenu.IsChecked = Settings.SmoothCaret;
+        _smoothCaretMenu.PropertyChanged += SmoothCaretMenuChanged;
         SetValue(EditorCaret.SmoothProperty, Settings.SmoothCaret);
         var selected = SelectedTheme;
         for (var index = 0; index < ThemeOptions.Length; index++)

@@ -28,6 +28,23 @@ public sealed class LogUiTests
 
     private static TextEditor PageEditor(LogView log) => (TextEditor)Field(log, "_pageEditor");
 
+    [Fact]
+    public Task NewPageEditorUsesTheWindowsCaretPreference() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "caret.log");
+        await File.WriteAllTextAsync(path, "abc\nabc");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            window.SetValue(EditorCaret.SmoothProperty, false);
+            await InvokeTask(log, "TogglePageEditAsync");
+            var area = PageEditor(log).TextArea;
+            Assert.True(area.Focus());
+            Assert.False(Assert.Single(area.TextView.Layers.OfType<EditorCaret>()).MotionEnabled);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
     [Theory]

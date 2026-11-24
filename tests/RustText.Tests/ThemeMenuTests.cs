@@ -143,7 +143,8 @@ public sealed class ThemeMenuTests
             var cursor = Assert.Single(Options(first), item => item.ToggleType == MenuItemToggleType.CheckBox);
             Assert.Equal("Плавный курсор", cursor.Header);
             Assert.True(cursor.IsChecked);
-            cursor.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            var peer = Avalonia.Automation.Peers.ControlAutomationPeer.CreatePeerForElement(cursor)!;
+            Assert.IsAssignableFrom<Avalonia.Automation.Provider.IToggleProvider>(peer).Toggle();
             await HeadlessTests.WaitForAsync(() => !cursor.IsChecked && !second.GetValue(EditorCaret.SmoothProperty));
             Assert.False((await storage.LoadSettingsAsync()).SmoothCaret);
             var editor = Assert.Single(first.GetVisualDescendants().OfType<AvaloniaEdit.TextEditor>());
