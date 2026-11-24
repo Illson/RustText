@@ -2,12 +2,15 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using RustText.Demo.Logs;
 
 namespace RustText.Demo.Platform;
 
 internal sealed class ConsoleCapture : IDisposable
 {
     private const string WorkerArgument = "--read-console-buffer";
+    // ConsoleScreenBuffer removes embedded NULs, so the worker can use one as a row suffix.
+    private const char RightEdgeMarker = '\0';
     private const long MaximumCaptureBytes = 256L * 1024 * 1024;
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(10);
@@ -69,11 +72,14 @@ internal sealed class ConsoleCapture : IDisposable
             using var disconnect = token.Register(worker.StandardInput.BaseStream.Dispose);
             using var output = worker.StandardOutput;
             using var writer = new StreamWriter(_file, Utf8, leaveOpen: true);
+            var openLine = false;
             while (await output.ReadLineAsync(token).ConfigureAwait(false) is { } header)
             {
                 if (!int.TryParse(header, NumberStyles.None, CultureInfo.InvariantCulture, out var count))
                     throw new IOException(header);
-                var completed = await CopyFrameAsync(output, writer, count, MaximumCaptureBytes, token).ConfigureAwait(false);
+                var (completed, nextOpenLine) =
+                    await CopyFrameAsync(output, writer, count, MaximumCaptureBytes, token, openLine).ConfigureAwait(false);
+                openLine = nextOpenLine;
                 _ready.TrySetResult();
                 if (!completed) return new IOException("Достигнут предел захвата (256 МиБ). Собранный текст доступен для поиска.");
             }
@@ -116,8 +122,8 @@ internal sealed class ConsoleCapture : IDisposable
         }
     }
 
-    internal static async Task<bool> CopyFrameAsync(TextReader source, StreamWriter writer, int count, long maximumBytes,
-        CancellationToken token)
+    internal static async Task<(bool Completed, bool OpenLine)> CopyFrameAsync(TextReader source,
+        StreamWriter writer, int count, long maximumBytes, CancellationToken token, bool openLine = false)
     {
         var length = writer.BaseStream.Length;
         var newlineBytes = writer.Encoding.GetByteCount(writer.NewLine);
@@ -125,16 +131,24 @@ internal sealed class ConsoleCapture : IDisposable
         {
             var row = await source.ReadLineAsync(token).ConfigureAwait(false)
                 ?? throw new IOException("Поток вывода консоли прервался.");
-            length += (long)writer.Encoding.GetByteCount(row) + newlineBytes;
+            var mayWrap = row.EndsWith(RightEdgeMarker);
+            if (mayWrap) row = row[..^1];
+            // A full-width row can also be followed by an explicit record header.
+            var startsRecord = openLine && LogLevels.StartsRecord(row);
+            length += (long)writer.Encoding.GetByteCount(row) + (startsRecord ? newlineBytes : 0)
+                + (mayWrap ? 0 : newlineBytes);
             if (length > maximumBytes)
             {
                 await writer.FlushAsync(token).ConfigureAwait(false);
-                return false;
+                return (false, openLine);
             }
-            await writer.WriteLineAsync(row.AsMemory(), token).ConfigureAwait(false);
+            if (startsRecord) await writer.WriteAsync(writer.NewLine.AsMemory(), token).ConfigureAwait(false);
+            if (mayWrap) await writer.WriteAsync(row.AsMemory(), token).ConfigureAwait(false);
+            else await writer.WriteLineAsync(row.AsMemory(), token).ConfigureAwait(false);
+            openLine = mayWrap;
         }
         await writer.FlushAsync(token).ConfigureAwait(false);
-        return true;
+        return (true, openLine);
     }
 
     public void Dispose()
@@ -182,7 +196,12 @@ internal sealed class ConsoleCapture : IDisposable
                     if (initial || rows.Length > 0)
                     {
                         output.WriteLine(rows.Length.ToString(CultureInfo.InvariantCulture));
-                        foreach (var row in rows) output.WriteLine(row);
+                        foreach (var row in rows)
+                        {
+                            output.Write(row.Text);
+                            if (row.MayWrap) output.Write(RightEdgeMarker);
+                            output.WriteLine();
+                        }
                         output.Flush();
                         initial = false;
                     }

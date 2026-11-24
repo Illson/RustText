@@ -85,7 +85,7 @@ public partial class MainWindow
         tab.CustomTitle = title;
         try
         {
-            AttachLog(tab, capture.Path, TextEncodingKind.Utf8, new LogTabState(FollowEnd: true), console: capture);
+            AttachLog(tab, capture.Path, TextEncodingKind.Utf8, new LogTabState(FollowEnd: true, WordWrap: true), console: capture);
             Select(tab);
         }
         catch

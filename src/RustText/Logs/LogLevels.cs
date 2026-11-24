@@ -30,6 +30,9 @@ internal static partial class LogLevels
     internal static bool IsLogPath(string? path) =>
         string.Equals(Path.GetExtension(path), ".log", StringComparison.OrdinalIgnoreCase);
 
+    internal static bool StartsRecord(string text) => DatedHeader().IsMatch(text)
+        || HeaderLevel().Match(text, 0, Math.Min(text.Length, 256)) is { Success: true, Index: 0 };
+
     internal static bool HasLogRecords(string path, TextEncodingKind? encoding, CancellationToken token)
     {
         const int sampleBytes = 16 * 1024;

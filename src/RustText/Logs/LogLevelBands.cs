@@ -16,6 +16,8 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
 
     private long _nextOffset = -1;
 
+    internal IReadOnlyList<int> RowStarts => _starts;
+
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
