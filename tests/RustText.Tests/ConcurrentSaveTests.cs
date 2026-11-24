@@ -96,6 +96,27 @@ public sealed class ConcurrentSaveTests
     }
 
     [Fact]
+    public async Task ReplacementThatFindsANewerFileKeepsTheDisplacedBytes()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "note.txt");
+        var staged = Path.Combine(directory.Path, "staged.tmp");
+        await File.WriteAllTextAsync(path, "original");
+        await File.WriteAllTextAsync(staged, "editor edit");
+        using var original = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        File.Move(path, Path.Combine(directory.Path, "old.txt"));
+        await File.WriteAllTextAsync(path, "external edit");
+
+        var error = Assert.Throws<IOException>(() => DocumentFiles.PublishReplacement(staged, path,
+            backup => File.ReadAllText(backup) == "original"));
+
+        var savedExternal = Assert.Single(Directory.GetFiles(directory.Path, ".rusttext-replaced-*.bak"));
+        Assert.Contains(savedExternal, error.Message);
+        Assert.Equal("external edit", await File.ReadAllTextAsync(savedExternal));
+        Assert.Equal("editor edit", await File.ReadAllTextAsync(path));
+    }
+
+    [Fact]
     public async Task FailedSaveWithStaleStampLeavesExternalContentAndAllowsRetry()
     {
         using var directory = new TempDirectory();

@@ -4,19 +4,20 @@ internal readonly record struct FilterCursor(long Offset, LogLevel ContinuedLeve
     long? SourceLine = null, long RelativeLine = 0);
 internal readonly record struct FilterRow(string Text, LogLevel Level, bool Continuation, long? SourceLine,
     long RelativeLine, long StartOffset, long EndOffset);
-internal sealed record FilterPage(List<FilterRow> Rows, FilterCursor? Next);
+internal sealed record FilterPage(List<FilterRow> Rows, FilterCursor? Next, FilterCursor Tail = default);
 
 internal static class LogLevelFilter
 {
     internal static FilterPage Read(Func<long, CancellationToken, IEnumerable<LogRow>> read,
-        FilterCursor start, LogLevel levels, CancellationToken token)
+        FilterCursor start, LogLevel levels, CancellationToken token, List<FilterRow>? prefix = null)
     {
-        var rows = new List<FilterRow>();
+        var rows = prefix ?? [];
         var current = start.ContinuedLevel;
         var sourceLine = start.SourceLine;
         var relativeLine = start.RelativeLine;
         var isFirstRow = true;
-        var characters = 0;
+        var characters = prefix?.Sum(row => row.Text.Length) ?? 0;
+        var tail = start;
         foreach (var row in read(start.Offset, token))
         {
             token.ThrowIfCancellationRequested();
@@ -27,14 +28,15 @@ internal static class LogLevelFilter
             }
             isFirstRow = false;
             if (!row.StartsWithinLine) current = LogLevels.Classify(row.Text);
+            tail = new FilterCursor(row.StartOffset, current, sourceLine, relativeLine);
             if ((levels & current) == 0) continue;
             if (rows.Count >= 100 || characters >= LogDataReader.DefaultPageBytes)
-                return new(rows, new FilterCursor(row.StartOffset, current, sourceLine, relativeLine));
+                return new(rows, tail);
             rows.Add(new FilterRow(row.Text, current, row.StartsWithinLine, sourceLine, relativeLine,
                 row.StartOffset, row.EndOffset));
             characters += row.Text.Length;
         }
-        return new(rows, null);
+        return new(rows, null, tail);
     }
 
     internal static IEnumerable<LogRow> FileRows(LogDataReader reader, long offset, long length, CancellationToken token)

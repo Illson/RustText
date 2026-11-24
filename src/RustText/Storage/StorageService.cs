@@ -58,19 +58,23 @@ internal sealed class StorageService
     private DraftArchiveService? _draftArchive;
     public DraftArchiveService DraftArchive => _draftArchive ??= new(_root);
     public IReadOnlyList<DraftArchiveEntry> ArchivedHistory => _draftArchive?.HistoryEntries ?? [];
-    internal static StorageService OpenWorkspace(string profileBaseDirectory, string workspaceId, string windowId)
+    internal static StorageService OpenWorkspace(string profileBaseDirectory, string workspaceId, string windowId) =>
+        workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId && windowId == WorkspaceCatalogStore.PrimaryWindowId
+            ? new(profileBaseDirectory, hasProfileOverride: false)
+            : new(profileBaseDirectory, hasProfileOverride: true, WorkspaceRootDirectory(profileBaseDirectory, workspaceId, windowId));
+
+    internal static string WorkspaceRootDirectory(string profileBaseDirectory, string workspaceId, string windowId)
     {
-        var catalog = new WorkspaceCatalogStore(profileBaseDirectory);
         if (workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId && windowId == WorkspaceCatalogStore.PrimaryWindowId)
-            return new StorageService(profileBaseDirectory, hasProfileOverride: false);
+            return Path.Combine(profileBaseDirectory, "dotnet-demo");
+        var catalog = new WorkspaceCatalogStore(profileBaseDirectory);
         var workspaceDirectory = catalog.GetWorkspaceDirectory(workspaceId);
         var windowDirectory = windowId == WorkspaceCatalogStore.PrimaryWindowId ? "primary"
             : windowId.StartsWith("window:", StringComparison.Ordinal)
                 && Guid.TryParseExact(windowId.AsSpan("window:".Length), "N", out var windowGuid)
                 ? windowGuid.ToString("N")
                 : throw new InvalidDataException("Идентификатор окна некорректен.");
-        return new StorageService(profileBaseDirectory, hasProfileOverride: true,
-            Path.Combine(workspaceDirectory, "windows", windowDirectory, "dotnet-demo"));
+        return Path.Combine(workspaceDirectory, "windows", windowDirectory, "dotnet-demo");
     }
 
     public string RootDirectory => _root;
@@ -155,7 +159,7 @@ internal sealed class StorageService
                 return verified;
             }
         }
-        var legacy = await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
+        var legacy = HasSessionCheckpoint ? null : await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
         CacheSession(legacy, isLatest: false);
         return legacy;
     }
@@ -177,9 +181,12 @@ internal sealed class StorageService
         // Startup and explicit loads always validate every referenced draft. Within this process,
         // successful checkpoints are immutable and already validated, so a benign save can reuse
         // the validated manifest without reading every large draft again.
-        var fallbackState = _hasCachedSession && CachedFilesAreUnchanged()
+        var fallbackState = _hasCachedSession && (_cachedSession is not null || !HasSessionCheckpoint) && CachedFilesAreUnchanged()
             ? _cachedSession
             : await LoadSessionAsync(cancellationToken).ConfigureAwait(false);
+        if (fallbackState is null && HasSessionCheckpoint)
+            throw new InvalidDataException("Сохранённый сеанс не удалось проверить. Его файлы оставлены без изменений.");
+
         var fallbackDrafts = (fallbackState?.Tabs ?? [])
             .Concat(fallbackState?.ClosedTabs ?? [])
             .Where(tab => tab.DraftRef is not null)
@@ -221,7 +228,9 @@ internal sealed class StorageService
                 tabs.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
                     : await PreserveDraftReferenceAsync(tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var closed = new List<SessionTab>();
-            foreach (var tab in (state.ClosedTabs ?? []).Take(preserveAllClosedTabs ? int.MaxValue : MaxClosedTabs))
+            var closedTabs = (state.ClosedTabs ?? []).ToList();
+            if (!preserveAllClosedTabs) TrimClosedBookmarks(closedTabs, drafts);
+            foreach (var tab in closedTabs)
                 closed.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
                     : await PreserveDraftReferenceAsync(tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var snapshot = state with { Tabs = tabs, ClosedTabs = closed };
@@ -271,6 +280,12 @@ internal sealed class StorageService
             if (!committed) try { Directory.Delete(checkpoint, recursive: true); } catch { }
             throw;
         }
+    }
+
+    internal static int TrimClosedBookmarks(List<SessionTab> tabs, IReadOnlyDictionary<long, Func<TextReader>>? drafts = null)
+    {
+        var remaining = MaxClosedTabs;
+        return tabs.RemoveAll(tab => tab.DraftRef is null && drafts?.ContainsKey(tab.Id) != true && remaining-- <= 0);
     }
 
     public async Task<SessionTab> ResolveCurrentDraftAsync(SessionTab tab, CancellationToken cancellationToken = default)

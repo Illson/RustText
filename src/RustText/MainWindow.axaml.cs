@@ -640,7 +640,8 @@ public partial class MainWindow : Window
 
         if (_validatingStartupSession)
         {
-            if (_tabs.Values.Any(tab => !tab.CheckingSession && (tab.Dirty || tab.Saving || tab.Log?.HasPendingEdit == true)))
+            if (_windowId != WorkspaceCatalogStore.PrimaryWindowId && HasRestorableWindowAssignment()
+                || _tabs.Values.Any(tab => !tab.CheckingSession && (tab.Dirty || tab.Saving || tab.Log?.HasPendingEdit == true)))
             {
                 _closeAfterStartupValidation = true;
                 e.Cancel = true;
@@ -732,11 +733,8 @@ public partial class MainWindow : Window
                     await RememberClosedAsync(tab, preserveUnsavedText: true, deferHistoryLimit: true);
 
                 await SaveWorkspaceSessionAsync(excludeWindow: this);
-                if (_closedTabs.Count > 100 && !(_startEmpty && _emptyStartupPreserveAllHistory))
-                {
-                    _closedTabs.RemoveRange(100, _closedTabs.Count - 100);
+                if (!PreserveEmptyHistory(SessionStorage) && StorageService.TrimClosedBookmarks(_closedTabs) > 0)
                     RefreshHistoryMenus();
-                }
             }
             else
             {

@@ -7,24 +7,42 @@ namespace RustText.Demo.Editor;
 // Match.Result expands the text. This companion records where each emitted line break came from.
 internal sealed partial class ReplacementLineEndings
 {
-    [GeneratedRegex(@"\$\$|\$(?:[&`'+_]|[0-9]+|\{\w+\})", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\$\$|\$(?:[&`'+_]|[0-9]+|\{[\w\u200C\u200D]+\})", RegexOptions.CultureInvariant)]
     private static partial Regex ReplacementTokens();
+
+    private const int BeforeMatch = -1;
+    private const int AfterMatch = -2;
+    private const int WholeInput = -3;
+    private const int Unknown = -4;
+
+    internal readonly record struct Reference(int Index, int Length, int GroupNumber)
+    {
+        public Range Source(Match match, int sourceLength)
+        {
+            if (GroupNumber == BeforeMatch) return 0..match.Index;
+            if (GroupNumber == AfterMatch) return (match.Index + match.Length)..sourceLength;
+            if (GroupNumber == WholeInput) return 0..sourceLength;
+            var group = match.Groups[GroupNumber];
+            return group.Index..(group.Index + group.Length);
+        }
+    }
 
     private readonly string _source;
     private readonly string _template;
     private readonly ImmutableList<LineEndingKind> _original;
     private readonly Action _checkOperation;
     private readonly List<int> _breakEnds = [];
-    private readonly List<(Match Token, Func<Match, Range> Source)> _references = [];
+    private readonly IReadOnlyList<Reference> _references;
     private bool _previousWasCr;
     public ImmutableList<LineEndingKind>.Builder Result { get; } = ImmutableList.CreateBuilder<LineEndingKind>();
 
-    public ReplacementLineEndings(string source, ImmutableList<LineEndingKind> original, Regex? regex,
-        string template, bool expandGroups, Action checkOperation)
+    public ReplacementLineEndings(string source, ImmutableList<LineEndingKind> original, string template,
+        IReadOnlyList<Reference> references, Action checkOperation)
     {
         _source = source;
         _original = original;
         _template = template;
+        _references = references;
         _checkOperation = checkOperation;
 
         for (var offset = 0; offset < source.Length;)
@@ -36,37 +54,44 @@ internal sealed partial class ReplacementLineEndings
             _breakEnds.Add(offset++);
             if ((_breakEnds.Count & 0x3fff) == 0) checkOperation();
         }
-
-        if (!expandGroups) return;
-        foreach (Match token in ReplacementTokens().Matches(template))
-        {
-            // Consume $$ as one token so its second dollar cannot start a reference.
-            if (token.Value == "$$") continue;
-            Func<Match, Range>? range = token.Value switch
-            {
-                "$`" => m => 0..m.Index,
-                "$'" => m => (m.Index + m.Length)..source.Length,
-                "$_" => _ => 0..source.Length,
-                "$&" => CaptureRange(0),
-                "$+" => CaptureRange(regex!.GetGroupNumbers()[^1]),
-                _ => NamedOrNumberedRange(regex!, token.Value)
-            };
-            if (range is not null) _references.Add((token, range));
-        }
     }
 
-    private static Func<Match, Range> CaptureRange(int number) => match =>
+    internal static (int LiteralLength, List<Reference> References) Analyze(Regex regex, string template, Action checkOperation)
     {
-        var group = match.Groups[number];
-        return group.Index..(group.Index + group.Length);
-    };
+        var references = new List<Reference>();
+        var literalLength = template.Length;
+        int? lastGroup = null;
+        foreach (var token in ReplacementTokens().EnumerateMatches(template))
+        {
+            checkOperation();
+            var value = template.AsSpan(token.Index + 1, token.Length - 1);
+            if (value[0] == '$')
+            {
+                literalLength--;
+                continue;
+            }
+            var number = value[0] switch
+            {
+                '`' => BeforeMatch,
+                '\'' => AfterMatch,
+                '_' => WholeInput,
+                '&' => 0,
+                '+' => lastGroup ??= regex.GetGroupNumbers()[^1],
+                _ => NamedOrNumberedGroup(regex, value)
+            };
+            if (number == Unknown) continue;
+            references.Add(new(token.Index, token.Length, number));
+            literalLength -= token.Length;
+        }
+        return (literalLength, references);
+    }
 
-    private static Func<Match, Range>? NamedOrNumberedRange(Regex regex, string token)
+    private static int NamedOrNumberedGroup(Regex regex, ReadOnlySpan<char> name)
     {
-        var name = token[1] == '{' ? token[2..^1] : token[1..];
+        if (name[0] == '{') name = name[1..^1];
         var number = int.TryParse(name, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
-            ? parsed : regex.GroupNumberFromName(name);
-        return number >= 0 && regex.GroupNameFromNumber(number).Length != 0 ? CaptureRange(number) : null;
+            ? parsed : regex.GroupNumberFromName(name.ToString());
+        return number >= 0 && regex.GroupNameFromNumber(number).Length != 0 ? number : Unknown;
     }
 
     public void AppendSource(int start, int end)
@@ -96,13 +121,13 @@ internal sealed partial class ReplacementLineEndings
 
         var offset = 0;
         var initialCount = Result.Count;
-        foreach (var (token, sourceRange) in _references)
+        foreach (var reference in _references)
         {
             // Literal breaks retain their ordinal style in the replaced span even next to a group.
-            Append(_template.AsSpan(offset, token.Index - offset), first + (Result.Count - initialCount), limit);
-            var range = sourceRange(match);
+            Append(_template.AsSpan(offset, reference.Index - offset), first + (Result.Count - initialCount), limit);
+            var range = reference.Source(match, _source.Length);
             AppendSource(range.Start.Value, range.End.Value);
-            offset = token.Index + token.Length;
+            offset = reference.Index + reference.Length;
         }
         Append(_template.AsSpan(offset), first + (Result.Count - initialCount), limit);
     }

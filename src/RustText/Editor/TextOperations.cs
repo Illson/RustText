@@ -17,6 +17,7 @@ internal sealed record ReplaceAllResult(string Text, int Count, ImmutableList<Li
 internal static class TextOperations
 {
     internal const int JsonByteLimit = 64 * 1024 * 1024;
+    internal const int MaximumEditorCharacters = 8 * 1024 * 1024;
     internal const long AutomaticSearchMaxBytes = 1024L * 1024 * 1024;
     private static readonly TimeSpan SearchBudget = TimeSpan.FromMilliseconds(400);
 
@@ -138,13 +139,25 @@ internal static class TextOperations
 
         StringBuilder? builder = null;
         ReplacementLineEndings? endings = null;
+        var maxLength = Math.Max(text.Length, MaximumEditorCharacters);
         var count = 0;
         var previousEnd = 0;
+        var (literalLength, references) = expandGroups
+            ? ReplacementLineEndings.Analyze(matcher.Expression!, replacement, CheckOperation)
+            : (replacement.Length, []);
         if (expandGroups)
         {
             for (var match = matcher.Expression!.Match(text); match.Success; match = match.NextMatch())
             {
                 CheckOperation();
+                var length = (long)literalLength;
+                foreach (var reference in references)
+                {
+                    var range = reference.Source(match, text.Length);
+                    length += range.End.Value - range.Start.Value;
+                    CheckLength(length);
+                }
+                CheckLength((long)(builder?.Length ?? 0) + match.Index - previousEnd + length);
                 var inserted = match.Result(replacement);
                 Append(match.Index, match.Length, inserted);
                 endings?.AppendReplacement(match, inserted);
@@ -161,21 +174,25 @@ internal static class TextOperations
         }
 
         if (builder is null) return new ReplaceAllResult(text, 0, originalEndings);
+        CheckLength((long)builder.Length + text.Length - previousEnd);
         builder.Append(text.AsSpan(previousEnd));
         endings?.AppendSource(previousEnd, text.Length);
         return new ReplaceAllResult(builder.ToString(), count, endings?.Result.ToImmutable());
 
         void Append(int index, int length, string inserted)
         {
+            CheckLength((long)(builder?.Length ?? 0) + index - previousEnd + inserted.Length);
             builder ??= new StringBuilder(text.Length);
             if (originalEndings is not null)
-                endings ??= new ReplacementLineEndings(text, originalEndings, matcher.Expression, replacement, expandGroups, CheckOperation);
+                endings ??= new ReplacementLineEndings(text, originalEndings, replacement, references, CheckOperation);
             builder.Append(text.AsSpan(previousEnd, index - previousEnd));
             builder.Append(inserted);
             endings?.AppendSource(previousEnd, index);
             previousEnd = index + length;
             count++;
         }
+
+        void CheckLength(long length) => CheckReplacementLength(length, maxLength);
 
         void CheckOperation()
         {
@@ -197,8 +214,9 @@ internal static class TextOperations
         token.ThrowIfCancellationRequested();
         if (count == 0) return new(text, 0);
 
-        var length = checked((int)(text.Length + (long)count * (replacement.Length - matcher.Literal!.Length)));
-        var result = string.Create(length, (text, matcher, replacement, started, token), static (destination, state) =>
+        var length = text.Length + (long)count * (replacement.Length - matcher.Literal!.Length);
+        CheckReplacementLength(length, Math.Max(text.Length, MaximumEditorCharacters));
+        var result = string.Create((int)length, (text, matcher, replacement, started, token), static (destination, state) =>
         {
             var previousEnd = 0;
             var written = 0;
@@ -220,6 +238,12 @@ internal static class TextOperations
         token.ThrowIfCancellationRequested();
         CheckBudget(started);
         return new(result, count);
+    }
+
+    private static void CheckReplacementLength(long length, int maximum)
+    {
+        if (length > maximum)
+            throw new InvalidDataException("Результат замены превышает лимит редактора. Замените текст частями.");
     }
 
     private static void CheckBudget(long started)

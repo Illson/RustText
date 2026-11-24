@@ -180,6 +180,7 @@ public partial class MainWindow
                 })), primary: true);
                 var remove = FocusButton(Button("Удалить", () => Run(async () =>
                 {
+                    if (!await ConfirmForgetDraftAsync(ArchivedDraftDisplayName(entry), dialog)) return;
                     await RemoveArchivedDraftAsync(storage, entry);
                     await RefreshAsync();
                 })));

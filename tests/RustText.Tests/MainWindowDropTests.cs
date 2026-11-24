@@ -47,6 +47,37 @@ public sealed class MainWindowDropTests
     });
 
     [Fact]
+    public Task BrokenRecentHistoryDoesNotBlockOpeningOrSavingTheFile() => HeadlessTests.RunAsync(async profile =>
+    {
+        var recent = Path.Combine(StorageService.OpenDefault().RootDirectory, "recent-files.json");
+        await File.WriteAllTextAsync(recent, "{");
+        var path = Path.Combine(profile, "note.md");
+        await File.WriteAllTextAsync(path, "original");
+        var window = new MainWindow([]);
+        window.Show();
+        try
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            await HeadlessTests.WaitForAsync(() => (bool)typeof(MainWindow).GetField("_restoreFinished", flags)!.GetValue(window)!);
+            await window.ReceivePathsAsync([path], activate: false);
+            var tab = Assert.Single(Tabs(window), tab => Equals(TabPath(tab), path));
+            var editor = Assert.IsType<AvaloniaEdit.TextEditor>(TabEditor(tab));
+            Assert.Equal("original", editor.Text);
+            Assert.Contains("недавних", window.FindControl<TextBlock>("StatusText")!.Text);
+
+            editor.Text = "changed";
+            await (Task)typeof(MainWindow).GetMethod("SaveAsync", flags)!.Invoke(window, [false])!;
+            Assert.Equal("changed", await File.ReadAllTextAsync(path));
+            Assert.Equal("{", await File.ReadAllTextAsync(recent));
+        }
+        finally
+        {
+            window.Close();
+            await HeadlessTests.WaitForAsync(() => !window.IsVisible);
+        }
+    });
+
+    [Fact]
     public Task PreviouslyOpenedTxtLogReopensAutomaticallyWithoutLevelMarkers() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "recent-log.txt");

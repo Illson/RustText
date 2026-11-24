@@ -268,6 +268,133 @@ public sealed class HomeHistoryTests
     });
 
     [Fact]
+    public Task UnreadableDraftAtStartupDoesNotReplaceCheckpointOrPruneSibling() => HeadlessTests.RunAsync(async _ =>
+    {
+        var storage = StorageService.OpenDefault();
+        var committed = await storage.SaveSessionAsync(
+            new SessionState([new(101, null, TextEncodingKind.Utf8), new(102, null, TextEncodingKind.Utf8)]),
+            new Dictionary<long, string> { [101] = "temporarily locked", [102] = "keep this note" });
+        var latest = Path.Combine(storage.RootDirectory, "session", "latest.json");
+        var pointer = await File.ReadAllTextAsync(latest);
+        using (var locked = new FileStream(storage.GetDraftPath(committed.Tabs[0])!, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var window = await OpenWorkspaceAsync();
+            try
+            {
+                await CallAsync(window, "SaveSessionAsync");
+                Assert.Contains("без изменений", window.FindControl<TextBlock>("StatusText")!.Text);
+                await Assert.ThrowsAsync<InvalidDataException>(() => StorageService.OpenDefault().SaveSessionAsync(new([])));
+            }
+            finally { await CloseAsync(window); }
+            Assert.Equal(pointer, await File.ReadAllTextAsync(latest));
+            Assert.Equal("keep this note", await storage.LoadDraftAsync(committed.Tabs[1]));
+        }
+
+        var recovered = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
+        Assert.Equal("temporarily locked", await storage.LoadDraftAsync(recovered.Tabs[0]));
+        Assert.Equal("keep this note", await storage.LoadDraftAsync(recovered.Tabs[1]));
+    });
+
+    [Fact]
+    public Task ClosingBookmarksDoesNotEvictSavedDrafts() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenDefault();
+        var bookmarks = Enumerable.Range(1, 100).Select(id =>
+            new SessionTab(id, Path.Combine(profile, $"bookmark-{id}.txt"), TextEncodingKind.Utf8)).ToList();
+        var draft = new SessionTab(101, null, TextEncodingKind.Utf8);
+        bookmarks.Add(draft);
+        await storage.SaveSessionAsync(new SessionState([], bookmarks), new Dictionary<long, string> { [101] = "keep the old note" });
+        var path = Path.Combine(profile, "another.txt");
+        await File.WriteAllTextAsync(path, "plain text");
+
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await window.ReceivePathsAsync([path], activate: false);
+            await CallAsync(window, "CloseTabAsync", ActiveTab(window));
+            await CallAsync(window, "SaveSessionAsync");
+        }
+        finally { await CloseAsync(window); }
+
+        var restored = (await storage.LoadSessionAsync())!.ClosedTabs!;
+        Assert.Equal(100, restored.Count(tab => tab.DraftRef is null));
+        Assert.DoesNotContain(restored, tab => tab.Id == 100);
+        Assert.Equal("keep the old note", await storage.LoadDraftAsync(Assert.Single(restored, tab => tab.Id == draft.Id)));
+    });
+
+    [Fact]
+    public Task ArchiveDialogRequiresConfirmationBeforeDeletingDraft() => HeadlessTests.RunAsync(async _ =>
+    {
+        var storage = StorageService.OpenDefault();
+        var draft = await storage.SaveClosedDraftAsync(new SessionTab(25, null, TextEncodingKind.Utf8), "archived note");
+        await storage.DraftArchive.ArchiveAsync(draft, storage.GetDraftPath(draft)!);
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            var showing = CallAsync(window, "ShowDraftArchiveAsync");
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
+            var archive = Assert.Single(window.OwnedWindows);
+            archive.UpdateLayout();
+            var delete = archive.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "Удалить"));
+
+            foreach (var choice in new[] { "Отмена", "Удалить" })
+            {
+                Click(delete);
+                var confirm = Assert.Single(archive.OwnedWindows);
+                Assert.Single(await storage.DraftArchive.GetEntriesAsync());
+                confirm.UpdateLayout();
+                Click(confirm.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, choice)));
+            }
+            await HeadlessTests.WaitForAsync(() => !archive.GetVisualDescendants().OfType<Button>().Any(button => Equals(button.Content, "Удалить")));
+            Assert.Empty(await storage.DraftArchive.GetEntriesAsync());
+            archive.Close();
+            await showing;
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
+    public Task DuplicatingAnArchiveOnlyWorkspaceCopiesItsDraft() => HeadlessTests.RunAsync(async profile =>
+    {
+        var catalog = new WorkspaceCatalogStore(profile);
+        var source = await catalog.CreateAsync("Archived only");
+        var store = StorageService.OpenWorkspace(profile, source.Id, WorkspaceCatalogStore.PrimaryWindowId);
+        var draft = await store.SaveClosedDraftAsync(new SessionTab(42, null, TextEncodingKind.Utf8), "only in the archive");
+        var archived = await store.DraftArchive.ArchiveAsync(draft, store.GetDraftPath(draft)!);
+        Assert.False(store.HasSessionCheckpoint);
+
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            var manage = CallAsync(window, "ShowWorkspacesAsync");
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
+            var parent = Assert.Single(window.OwnedWindows);
+            var duplicate = CallAsync(window, "DuplicateWorkspaceAsync", source, parent);
+            var prompt = Assert.Single(window.OwnedWindows, item => !ReferenceEquals(item, parent));
+            prompt.UpdateLayout();
+            Click(prompt.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "OK")));
+            await duplicate;
+            await manage;
+
+            var copy = Assert.Single((await catalog.LoadAsync()).Workspaces, entry => entry.Name == "Archived only (копия)");
+            var destination = StorageService.OpenWorkspace(profile, copy.Id, WorkspaceCatalogStore.PrimaryWindowId);
+            var restored = Assert.Single(await destination.DraftArchive.GetEntriesAsync());
+            Assert.Equal(archived.Id, restored.Id);
+            Assert.Equal("only in the archive", await destination.LoadDraftAsync(await destination.DraftArchive.RestoreAsync(restored)));
+            Assert.Single(await store.DraftArchive.GetEntriesAsync());
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            await CloseAsync(window);
+        }
+    });
+
+    [Fact]
     public Task HistoryCanCollapseAndRemoveEntriesWithoutDeletingAnOrdinaryFile() => HeadlessTests.RunAsync(async profile =>
     {
         var storage = StorageService.OpenForTesting(profile);

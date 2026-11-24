@@ -80,7 +80,7 @@ public sealed class EmptyUntitledHistoryTests
         });
 
     [Fact]
-    public Task MoreThanOneHundredFilteredEmptyHistoryEntriesDoNotDisableScratchHistoryCap() =>
+    public Task ScratchHistoryKeepsMoreThanOneHundredNonemptyDrafts() =>
         HeadlessTests.RunAsync(async _ =>
         {
             var window = await OpenWorkspaceAsync();
@@ -99,7 +99,7 @@ public sealed class EmptyUntitledHistoryTests
                     await CallAsync(window, "CloseTabAsync", ActiveTab(window));
                 }
 
-                Assert.Equal(100, ClosedTabs(window).Count);
+                Assert.Equal(101, ClosedTabs(window).Count);
                 Assert.All(ClosedTabs(window), tab => Assert.NotNull(tab.DraftRef));
             }
             finally { if (window.IsVisible) await CloseAsync(window); }
@@ -156,9 +156,9 @@ public sealed class EmptyUntitledHistoryTests
 
                 restarted = await OpenWorkspaceAsync();
                 var history = ClosedTabs(restarted);
-                var onlyDraft = Assert.Single(history, tab => tab.Path is null);
-                Assert.Equal(expectedText, await Assert.IsType<StorageService>(Read(restarted, "SessionStorage", Private))
-                    .LoadDraftAsync(onlyDraft));
+                var storage = Assert.IsType<StorageService>(Read(restarted, "SessionStorage", Private));
+                var texts = await Task.WhenAll(history.Where(tab => tab.Path is null).Select(tab => storage.LoadDraftAsync(tab)));
+                Assert.Equal(new[] { "independent source anchor", expectedText }.Order(), texts.Order());
             }
             finally
             {

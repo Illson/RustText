@@ -42,6 +42,43 @@ public sealed class ExternalEncodingRefreshTests
     });
 
     [Fact]
+    public Task AutoRefreshKeepsDirtyTextWhenJoiningAnEditorInTheNewEncoding() => HeadlessTests.RunAsync(async profile =>
+    {
+        var workspace = await new WorkspaceCatalogStore(profile).CreateAsync("Second editor");
+        var path = Path.Combine(profile, "encoding-change.txt");
+        await File.WriteAllTextAsync(path, "original");
+        var first = await OpenEditorWindowAsync(path, null);
+        MainWindow? second = null;
+        try
+        {
+            var tab = Property(first, "ActiveTab")!;
+            var refresh = typeof(MainWindow).GetMethod("SetTabAutoRefresh", Private)!;
+            refresh.Invoke(first, [tab, false]);
+            ((TextEditor)Property(tab, "Editor")!).Text = "unsaved edits";
+            await File.WriteAllTextAsync(path, "новый файл", Encoding.Unicode);
+
+            await InvokeTask(first, "OpenWorkspaceWindowAsync", workspace.Id);
+            second = Assert.IsType<MainWindow>(typeof(MainWindow).GetMethod("FindOtherWindow", Private)!.Invoke(first, null));
+            await HeadlessTests.WaitForAsync(() => (bool)Field(second, "_restoreFinished"));
+            await second.ReceivePathsAsync([path], activate: false);
+            var newEditor = (TextEditor)Property(Property(second, "ActiveTab")!, "Editor")!;
+            refresh.Invoke(first, [tab, true]);
+
+            await HeadlessTests.WaitForAsync(() => Property(tab, "Editor") is TextEditor editor
+                && ReferenceEquals(editor.Document, newEditor.Document));
+            var tabs = ((System.Collections.IDictionary)Field(first, "_tabs")).Values.Cast<object>();
+            var draft = Assert.Single(tabs, item => Property(item, "Path") is null);
+            Assert.Equal("unsaved edits", ((TextEditor)Property(draft, "Editor")!).Text);
+            Assert.Equal("новый файл", newEditor.Text);
+        }
+        finally
+        {
+            if (second is not null) await CloseWindowAsync(second);
+            await CloseWindowAsync(first);
+        }
+    });
+
+    [Fact]
     public Task RestoredAutoDetectedEditorTracksANewBomEncoding() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "auto-encoding.txt");

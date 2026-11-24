@@ -18,7 +18,7 @@ public sealed record FileStamp(long Length, DateTime LastWriteUtc, string Sha256
     internal static async Task<FileStamp> CaptureAsync(FileStream stream, CancellationToken cancellationToken)
     {
         var length = stream.Length;
-        var modified = File.GetLastWriteTimeUtc(stream.Name);
+        var modified = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
         stream.Position = 0;
         var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
         return new(length, modified, hash);
@@ -52,7 +52,7 @@ public static class DocumentFiles
         await using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var length = stream.Length;
         if (length > MaximumDocumentBytes) throw new IOException("Файл больше лимита редактора (50 МиБ).");
-        var modified = File.GetLastWriteTimeUtc(fullPath);
+        var modified = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
         var bytes = GC.AllocateUninitializedArray<byte>(checked((int)length));
         await stream.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
@@ -102,7 +102,13 @@ public static class DocumentFiles
                 if (current != expectedStamp)
                     throw new IOException("Файл изменился на диске. Сохранение отменено, чтобы не затереть внешние изменения.");
                 cancellationToken.ThrowIfCancellationRequested();
-                File.Replace(temporary, fullPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                PublishReplacement(temporary, fullPath, backup =>
+                {
+                    using var replaced = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+                        64 * 1024, FileOptions.SequentialScan);
+                    return replaced.Length == current.Length && File.GetLastWriteTimeUtc(replaced.SafeFileHandle) == current.LastWriteUtc
+                        && Convert.ToHexString(SHA256.HashData(replaced)) == current.Sha256;
+                }, ignoreMetadataErrors: true);
             }
             return stamp;
         }
@@ -110,6 +116,28 @@ public static class DocumentFiles
         {
             try { File.Delete(temporary); } catch (FileNotFoundException) { }
         }
+    }
+
+    internal static void PublishReplacement(string staged, string target, Func<string, bool> matchesExpected, bool ignoreMetadataErrors = false)
+    {
+        var backup = Path.Combine(Path.GetDirectoryName(target)!, $".rusttext-replaced-{Guid.NewGuid():N}.bak");
+        try { File.Replace(staged, target, backup, ignoreMetadataErrors); }
+        catch (Exception error) when ((error is IOException or UnauthorizedAccessException) && File.Exists(backup))
+        {
+            throw new IOException($"Не удалось заменить файл. Копия заменяемого файла: {backup}", error);
+        }
+
+        // Another editor can rename the target while the original is open. Verify what was actually replaced.
+        try
+        {
+            if (!matchesExpected(backup)) throw new IOException("Файл изменился во время замены.");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw new IOException($"Не удалось подтвердить замену файла. Предыдущее содержимое сохранено: {backup}", error);
+        }
+        try { File.Delete(backup); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     internal static FileStream AcquireSaveLock(string targetPath)

@@ -110,23 +110,39 @@ internal sealed partial class LogView
         _ = LoadFilteredPageAsync(new FilterCursor(_hiddenOffset));
     }
 
-    private async Task LoadFilteredPageAsync(FilterCursor cursor)
+    private Task RefreshAppendedFilterAsync()
+    {
+        if (_levelFilterViewport?.IsVisible != true || _filterReading is not null
+            || _filteredPage is not { } page || _filterSnapshotLength >= _fileStamp.Length)
+            return Task.CompletedTask;
+
+        if (page.Next is null) return LoadFilteredPageAsync(page.Tail, page);
+        _filterSnapshotLength = _fileStamp.Length;
+        UpdateFilteredMinimap(page);
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadFilteredPageAsync(FilterCursor cursor, FilterPage? previous = null)
     {
         if (_closed || _levelFilter is null) return;
         _filterReading?.Cancel();
         _filterReading?.Dispose();
         var reading = new CancellationTokenSource();
         _filterReading = reading;
+        var token = reading.Token;
         var generation = ++_filterGeneration;
-        _filterCurrent = cursor;
+        if (previous is null) _filterCurrent = cursor;
         _filterNext = null;
         // A re-entrant click must not see enabled navigation while the old text is being cleared.
         RefreshButtons();
-        _filteredLogText.Text = string.Empty;
-        _filteredSourceLineNumbers = [];
-        _filteredPage = null;
-        _lineGutterText.Text = string.Empty;
-        _filterStatus.Text = _levelFilter.SelectedLevels == 0 ? "Выберите уровень" : "Поиск по логу…";
+        if (previous is null)
+        {
+            _filteredLogText.Text = string.Empty;
+            _filteredSourceLineNumbers = [];
+            _filteredPage = null;
+            _lineGutterText.Text = string.Empty;
+            _filterStatus.Text = _levelFilter.SelectedLevels == 0 ? "Выберите уровень" : "Поиск по логу…";
+        }
         if (_levelFilter.SelectedLevels == 0)
         {
             _filterReading = null;
@@ -136,7 +152,6 @@ internal sealed partial class LogView
         }
         var stamp = _fileStamp;
         var dataGeneration = _dataGeneration;
-        _filterSnapshotLength = stamp.Length;
         var originalDigest = _observedDigest;
         var encoding = _reader.Encoding;
         var levels = _levelFilter.SelectedLevels;
@@ -151,15 +166,19 @@ internal sealed partial class LogView
                     && originalDigest.AsSpan().SequenceEqual(reader.ComputeBookmarkDigest(stamp.Length))))
                     throw new IOException("Файл изменился. Закройте фильтр и повторите попытку.");
                 var sourceLine = cursor.SourceLine ?? (cursor.Offset < reader.PreambleLength
-                    ? 1 : FindLineNumber(reader, cursor.Offset, reading.Token));
+                    ? 1 : FindLineNumber(reader, cursor.Offset, token));
                 var start = cursor with { SourceLine = sourceLine };
+                // The last frame may not be a complete line yet. Keep earlier results and reread that frame.
+                var prefix = previous?.Rows.Where(row => row.StartOffset < cursor.Offset).ToList();
                 IEnumerable<LogRow> ReadRows(long offset, CancellationToken token) =>
                     LogLevelFilter.FileRows(reader, offset, stamp.Length, token);
-                return LogLevelFilter.Read(ReadRows, start, levels, reading.Token);
-            }, reading.Token);
+                return LogLevelFilter.Read(ReadRows, start, levels, token, prefix);
+            }, token);
             if (reading.IsCancellationRequested || generation != _filterGeneration || dataGeneration != _dataGeneration || _closed
                 || !_levelFilterOpen || _levelFilterViewport?.IsVisible != true) return;
-            _filteredLogText.Text = _filteredLevelBands?.SetFilteredPage(page) ?? string.Empty;
+            _filterSnapshotLength = stamp.Length;
+            if (previous is null || !page.Rows.SequenceEqual(previous.Rows))
+                _filteredLogText.Text = _filteredLevelBands?.SetFilteredPage(page) ?? string.Empty;
             _filteredPage = page;
             UpdateFilteredLineGutter(page);
             UpdateFilteredMinimap(page);
