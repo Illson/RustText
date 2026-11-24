@@ -46,11 +46,14 @@ public sealed class MainWindowDropTests
         }
     });
 
-    [Fact]
-    public Task BrokenRecentHistoryDoesNotBlockOpeningOrSavingTheFile() => HeadlessTests.RunAsync(async profile =>
+    [Theory]
+    [InlineData("{")]
+    [InlineData("[null]")]
+    [InlineData("[{}]")]
+    public Task BrokenRecentHistoryDoesNotBlockOpeningOrSavingTheFile(string brokenJson) => HeadlessTests.RunAsync(async profile =>
     {
         var recent = Path.Combine(StorageService.OpenDefault().RootDirectory, "recent-files.json");
-        await File.WriteAllTextAsync(recent, "{");
+        await File.WriteAllTextAsync(recent, brokenJson);
         var path = Path.Combine(profile, "note.md");
         await File.WriteAllTextAsync(path, "original");
         var window = new MainWindow([]);
@@ -68,7 +71,10 @@ public sealed class MainWindowDropTests
             editor.Text = "changed";
             await (Task)typeof(MainWindow).GetMethod("SaveAsync", flags)!.Invoke(window, [false])!;
             Assert.Equal("changed", await File.ReadAllTextAsync(path));
-            Assert.Equal("{", await File.ReadAllTextAsync(recent));
+            await (Task)typeof(MainWindow).GetMethod("ShowHomeAsync", flags)!.Invoke(window, null)!;
+            Assert.Contains("недавних", window.FindControl<TextBlock>("StatusText")!.Text);
+            Assert.Contains(window.GetVisualDescendants().OfType<TextBlock>(), text => text.Text == "История файлов");
+            Assert.Equal(brokenJson, await File.ReadAllTextAsync(recent));
         }
         finally
         {

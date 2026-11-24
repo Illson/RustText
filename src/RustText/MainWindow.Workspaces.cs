@@ -261,7 +261,7 @@ public partial class MainWindow
             ? _workspace.GetStorage(WorkspaceCatalogStore.DefaultWorkspaceId, EmptyStartupWindowId)
             : _workspace.GetStorage(workspaceId, targetWindowId, _shareDefaultSession);
         var targetState = cachedView is null ? await targetStorage.LoadSessionAsync(_lifetime.Token) : null;
-        if (cachedView is null && targetState is null && targetStorage.HasSessionCheckpoint)
+        if (cachedView is null && targetState is null && (targetStorage.HasSessionCheckpoint || targetStorage.CheckpointReadBlocked))
         {
             _workspace.UnavailableSessions.Add(StorageCacheKey(targetStorage));
             throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
@@ -283,7 +283,8 @@ public partial class MainWindow
             }
         }
 
-        _workspaceLoadWarning = null;
+        if (targetStorage.CheckpointReadBlocked) _workspace.UnavailableSessions.Add(StorageCacheKey(targetStorage));
+        _workspaceLoadWarning = targetStorage.CheckpointReadBlocked ? FallbackSessionWarning : null;
         await SaveWorkspaceSessionAsync(excludeWindow: null);
         if (!enteringEmpty)
         {
@@ -323,6 +324,7 @@ public partial class MainWindow
         if (enteringEmpty)
         {
             if (targetState is not null) AddEmptyStartupHistory(targetState);
+            else _emptyHistoryBaseline = [];
             await ShowHomeAsync();
         }
         else if (targetState is not null)
@@ -340,6 +342,7 @@ public partial class MainWindow
             await ShowHomeAsync();
         }
         RefreshHistoryMenus();
+        if (_workspaceLoadWarning is not null) SetStatus(_workspaceLoadWarning);
     }
 
     private Task EnterEmptyStartupAsync() => SwitchWorkspaceAsync(EmptyStartupWindowId);
@@ -385,16 +388,13 @@ public partial class MainWindow
         if (name is null) return;
         if (source.Id == _workspaceId) await SaveWorkspaceSessionAsync(excludeWindow: null);
         var sourceStorage = _workspace.GetStorage(source.Id, _windowId, _shareDefaultSession);
-        if (_windowId != WorkspaceCatalogStore.PrimaryWindowId && !sourceStorage.HasSessionCheckpoint
-            && (await sourceStorage.DraftArchive.GetEntriesAsync(_lifetime.Token)).Count == 0)
-            sourceStorage = _workspace.GetStorage(source.Id, WorkspaceCatalogStore.PrimaryWindowId);
+        var primary = _workspace.GetStorage(source.Id, WorkspaceCatalogStore.PrimaryWindowId);
+        var sessionSource = sourceStorage.HasSessionCheckpoint ? sourceStorage : primary;
         var (copy, catalog) = await _workspace.CatalogStore.CreateWithCatalogAsync(name, GetWorkspaceThemeKey(source.Id), _lifetime.Token,
             symbol: source.Symbol, color: source.Color);
         try
         {
-            await CopyWorkspaceSessionAsync(sourceStorage, _workspace.GetStorage(copy.Id, _windowId), includeArchive: true);
-            if (_windowId != WorkspaceCatalogStore.PrimaryWindowId)
-                await CopyWorkspaceSessionAsync(sourceStorage, _workspace.GetStorage(copy.Id, WorkspaceCatalogStore.PrimaryWindowId), includeArchive: true);
+            await CopyWorkspaceAsync(copy.Id, sessionSource, primary, sourceStorage);
         }
         catch
         {
@@ -414,9 +414,8 @@ public partial class MainWindow
             symbol: current?.Symbol, color: current?.Color);
         try
         {
-            await CopyWorkspaceSessionAsync(SessionStorage, _workspace.GetStorage(created.Id, _windowId), includeArchive: true);
-            if (_windowId != WorkspaceCatalogStore.PrimaryWindowId)
-                await CopyWorkspaceSessionAsync(SessionStorage, _workspace.GetStorage(created.Id, WorkspaceCatalogStore.PrimaryWindowId), includeArchive: true);
+            var primary = _startEmpty ? SessionStorage : _workspace.GetStorage(_workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+            await CopyWorkspaceAsync(created.Id, SessionStorage, primary, SessionStorage);
         }
         catch
         {
@@ -443,13 +442,25 @@ public partial class MainWindow
             window.RefreshWorkspaceButton();
     }
 
-    private async Task CopyWorkspaceSessionAsync(StorageService source, StorageService destination, bool includeArchive = false)
+    private async Task CopyWorkspaceAsync(string workspaceId, StorageService sessionSource, params StorageService[] archiveSources)
+    {
+        foreach (var windowId in new[] { WorkspaceCatalogStore.PrimaryWindowId, _windowId }.Distinct())
+        {
+            var destination = _workspace.GetStorage(workspaceId, windowId);
+            await CopyWorkspaceSessionAsync(sessionSource, destination);
+            foreach (var source in archiveSources.Distinct())
+                foreach (var entry in await source.DraftArchive.GetEntriesAsync(_lifetime.Token))
+                    await source.DraftArchive.CopyEntryToAsync(entry, destination.DraftArchive, _lifetime.Token);
+        }
+    }
+
+    private async Task CopyWorkspaceSessionAsync(StorageService source, StorageService destination)
     {
         if (ReferenceEquals(source, destination)) return;
         var state = await source.LoadSessionAsync(_lifetime.Token);
         if (state is null)
         {
-            if (source.HasSessionCheckpoint)
+            if (source.HasSessionCheckpoint || source.CheckpointReadBlocked)
                 throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
         }
         else
@@ -463,9 +474,6 @@ public partial class MainWindow
             }
             await destination.SaveSessionWithDraftReadersAsync(state with { DetachedDrafts = null }, readers, _lifetime.Token);
         }
-        if (includeArchive)
-            foreach (var entry in await source.DraftArchive.GetEntriesAsync(_lifetime.Token))
-                await source.DraftArchive.CopyEntryToAsync(entry, destination.DraftArchive, _lifetime.Token);
     }
 
     private async Task DeleteWorkspaceAsync(WorkspaceEntry workspace, Window dialog)

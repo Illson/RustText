@@ -11,15 +11,19 @@ public sealed class EmptyUntitledHistoryTests
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
-    [Fact]
-    public Task ClosingAndRestartingDoesNotPromoteEmptyUntitledTabsToHistory() =>
+    [Theory]
+    [InlineData(WorkspaceStartupMode.LastUsed)]
+    [InlineData(WorkspaceStartupMode.Empty)]
+    public Task ClosingAndRestartingDoesNotPromoteEmptyUntitledTabsToHistory(WorkspaceStartupMode startupMode) =>
         HeadlessTests.RunAsync(async profile =>
         {
+            await StorageService.OpenDefault().SaveSettingsAsync(new UserSettings { WorkspaceStartupMode = startupMode });
             MainWindow? window = null;
             MainWindow? restarted = null;
             try
             {
                 window = await OpenWorkspaceAsync();
+                ((Avalonia.Threading.DispatcherTimer)Field(window, "_checkpoint")).Stop();
                 Invoke(window, "NewTab", "");
                 var empty = ActiveTab(window);
                 Assert.Empty(Read<TextEditor>(empty, "Editor").Text);
@@ -32,6 +36,7 @@ public sealed class EmptyUntitledHistoryTests
                 await CallAsync(window, "CloseTabAsync", whitespaceTab);
                 var closed = Assert.Single(ClosedTabs(window));
                 var storage = Assert.IsType<StorageService>(Read(window, "SessionStorage", Private));
+                Assert.False(storage.HasSessionCheckpoint);
                 Assert.Equal(whitespace, await storage.LoadDraftAsync(closed));
 
                 await CloseAsync(window);

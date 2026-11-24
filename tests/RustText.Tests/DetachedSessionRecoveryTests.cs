@@ -573,6 +573,61 @@ public sealed class DetachedSessionRecoveryTests
         });
 
     [Fact]
+    public Task FailedPrimaryRestoreKeepsBothPrimaryDraftsAndSecondWindowAssignment() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var catalog = new WorkspaceCatalogStore(profile);
+            var workspace = await catalog.CreateAsync("Primary restore retry");
+            const string secondId = "window:00000000000000000000000000000001";
+            await catalog.SetWindowWorkspaceAsync(WorkspaceCatalogStore.PrimaryWindowId, workspace.Id);
+            await catalog.SetWindowWorkspaceAsync(secondId, workspace.Id);
+            var primaryStore = StorageService.OpenWorkspace(profile, workspace.Id, WorkspaceCatalogStore.PrimaryWindowId);
+            var primarySnapshot = await primaryStore.SaveSessionAsync(
+                new SessionState([new(10, null, TextEncodingKind.Utf8), new(11, null, TextEncodingKind.Utf8)]),
+                new Dictionary<long, string> { [10] = "primary A", [11] = "primary B" });
+            var secondStore = StorageService.OpenWorkspace(profile, workspace.Id, secondId);
+            await secondStore.SaveSessionAsync(new SessionState([new(12, null, TextEncodingKind.Utf8)]),
+                new Dictionary<long, string> { [12] = "second window" });
+            var latest = Path.Combine(primaryStore.RootDirectory, "session", "latest.json");
+            var pointer = await File.ReadAllTextAsync(latest);
+
+            MainWindow? primary = null;
+            MainWindow? second = null;
+            MainWindow? restarted = null;
+            try
+            {
+                using (new FileStream(primaryStore.GetDraftPath(primarySnapshot.Tabs[0])!, FileMode.Open, FileAccess.Read, FileShare.None))
+                    primary = await OpenWindowAsync();
+                Assert.Empty(Tabs(primary));
+                Assert.Contains("без изменений", primary.FindControl<TextBlock>("StatusText")!.Text);
+                second = Assert.IsType<MainWindow>(Invoke(primary, "FindOtherWindow"));
+                await HeadlessTests.WaitForAsync(() => (bool)Field(second, "_restoreFinished"));
+
+                second.Close();
+                await HeadlessTests.WaitForAsync(() => !second.IsVisible ||
+                    second.FindControl<TextBlock>("StatusText")?.Text?.StartsWith("Не удалось записать сессию.", StringComparison.Ordinal) == true);
+                Assert.Equal(pointer, await File.ReadAllTextAsync(latest));
+                Assert.True(second.IsVisible);
+                Assert.Equal(workspace.Id, (await catalog.LoadAsync()).WindowAssignments[secondId]);
+
+                await CloseAsync(primary);
+                await CloseAsync(second);
+                restarted = await OpenWindowAsync();
+                Assert.Null(Invoke(restarted, "FindOtherWindow"));
+                Assert.Equal(2, Tabs(restarted).Count);
+                var checkpoint = Assert.IsType<SessionState>(await primaryStore.LoadSessionAsync());
+                Assert.Equal(new[] { "primary A", "primary B" }, await Task.WhenAll(checkpoint.Tabs.Select(tab => primaryStore.LoadDraftAsync(tab))));
+                Assert.Equal("second window", (await RestoreClosedTextAsync(restarted, Assert.Single(ClosedTabs(restarted)))).Text);
+            }
+            finally
+            {
+                if (primary is { IsVisible: true }) await CloseAsync(primary);
+                if (second is { IsVisible: true }) await CloseAsync(second);
+                if (restarted is { IsVisible: true }) await CloseAsync(restarted);
+            }
+        });
+
+    [Fact]
     public Task UnreadablePrimaryCheckpointKeepsDetachedDraftOpenForCloseRetry() =>
         HeadlessTests.RunAsync(async profile =>
         {

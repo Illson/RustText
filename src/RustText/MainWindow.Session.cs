@@ -28,6 +28,8 @@ public partial class MainWindow
     private bool _validatingStartupSession;
     private bool _mountingSessionTabs;
     private bool _emptyStartupPreserveAllHistory;
+    private SessionTab[] _emptyHistoryBaseline = [];
+    private const string FallbackSessionWarning = "Последний снимок недоступен. Открыт предыдущий, файлы оставлены без изменений. Перезапустите приложение после восстановления доступа.";
 
     private async Task RestoreSessionAsync()
     {
@@ -98,7 +100,7 @@ public partial class MainWindow
         finally { _validatingStartupSession = false; }
         if (_closed) return;
 
-        if (state is null && (_pendingSession is not null || SessionStorage.HasSessionCheckpoint))
+        if (state is null && (_pendingSession is not null || SessionStorage.HasSessionCheckpoint || SessionStorage.CheckpointReadBlocked))
         {
             _workspace.UnavailableSessions.Add(WorkspaceCacheKey);
             _workspaceLoadWarning ??= "Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.";
@@ -109,6 +111,11 @@ public partial class MainWindow
             return;
         }
 
+        if (SessionStorage.CheckpointReadBlocked)
+        {
+            _workspace.UnavailableSessions.Add(WorkspaceCacheKey);
+            if (state is not null) _workspaceLoadWarning = FallbackSessionWarning;
+        }
         _closedTabs.RemoveAll(tab => IsKnownEmptyUntitledDraft(tab, SessionStorage));
         if (state is not null && !_startEmpty) RestoreDetachedDraftTracking(SessionStorage, _workspaceId, state);
         if (Settings.WordWrap is null || Settings.FontSize is null)
@@ -125,12 +132,7 @@ public partial class MainWindow
 
         if (_startEmpty)
         {
-            if (state is not null)
-            {
-                _workspaceLoadWarning = null;
-                AddEmptyStartupHistory(state);
-            }
-            else _workspaceLoadWarning = null;
+            if (state is not null) AddEmptyStartupHistory(state);
             RefreshHistoryMenus();
             return;
         }
@@ -183,6 +185,7 @@ public partial class MainWindow
             if (existingIds.Add(tab.Id)) _closedTabs.Add(tab);
         }
         if (!_emptyStartupPreserveAllHistory) StorageService.TrimClosedBookmarks(_closedTabs);
+        _emptyHistoryBaseline = [.. _closedTabs];
     }
 
     private static bool IsKnownEmptyUntitledDraft(SessionTab tab, StorageService storage)
@@ -393,7 +396,7 @@ public partial class MainWindow
                 if (pending.Count == 0 && complete is null) continue;
 
                 var saved = await source.LoadSessionAsync(token);
-                if (saved is null && source.HasSessionCheckpoint)
+                if (source.CheckpointReadBlocked || saved is null && source.HasSessionCheckpoint)
                     throw new InvalidDataException("Не удалось прочитать черновики закрываемого окна. Сеанс оставлен без изменений.");
                 var drafts = (saved?.Tabs ?? []).Concat(saved?.ClosedTabs ?? [])
                     .Where(tab => tab.DraftRef is not null && (complete is not null || pending.Contains(tab.Id)))
@@ -441,12 +444,18 @@ public partial class MainWindow
         SessionTab[] drafts, CancellationToken token)
     {
         var primary = recovery.PrimaryStorage;
+        var cacheKey = StorageCacheKey(primary);
+        if (_workspace.UnavailableSessions.Contains(cacheKey) && SessionViews(primary, null).Any())
+            throw new InvalidDataException("Основное окно не восстановило сеанс. Закройте его перед повторным закрытием этого окна.");
         var checkpoint = await primary.LoadSessionAsync(token);
-        if (checkpoint is null && primary.HasSessionCheckpoint)
+        if (primary.CheckpointReadBlocked || checkpoint is null && primary.HasSessionCheckpoint)
             throw new InvalidDataException("Не удалось прочитать основной сеанс рабочего пространства для восстановления черновика.");
         checkpoint ??= new SessionState([]);
 
         var liveViews = SessionViews(primary, null).ToList();
+        if (liveViews.Count > 0 && (_workspace.UnavailableSessions.Contains(cacheKey)
+            || liveViews.Any(view => view.Owner._validatingStartupSession)))
+            throw new InvalidDataException("Основное окно ещё не восстановило сеанс.");
         var liveHistory = liveViews.Count > 0 ? _workspace.GetClosedTabs(primary) : null;
         var existing = liveHistory ?? checkpoint.ClosedTabs ?? [];
         _workspace.NextId = Math.Max(_workspace.NextId, checkpoint.Tabs.Concat(checkpoint.ClosedTabs ?? []).Concat(existing)
@@ -486,7 +495,7 @@ public partial class MainWindow
             var updated = checkpoint with { ClosedTabs = [.. recovered, .. existing.Where(tab => !readers.ContainsKey(tab.Id))] };
             await primary.SaveSessionWithDraftReadersAsync(updated, readers, token);
         }
-        _workspace.SetLastCheckpoint(StorageCacheKey(primary), null);
+        _workspace.SetLastCheckpoint(cacheKey, null);
     }
 
     private async Task SaveWorkspaceSessionAsync(MainWindow? excludeWindow, SessionTab? forgetClosedTab = null)
@@ -509,14 +518,19 @@ public partial class MainWindow
                     if (isActive && forgetClosedTab is not null)
                         throw new IOException("Сеанс недоступен. История оставлена без изменений.");
                     if (_closing && SessionViews(storage, null).Where(view => ReferenceEquals(view.Owner, this))
-                        .Any(view => view.View.Tabs.Values.Any(tab => tab.Dirty || tab.Recovery is not null || tab.Deferred?.DraftRef is not null)))
+                        .SelectMany(view => view.View.Tabs.Values).Any(tab =>
+                            (tab.Dirty || tab.Recovery is not null || tab.Deferred?.DraftRef is not null)
+                            && (tab.Revision != 0 || !storage.HasFallbackDraft(tab.Id, (tab.Recovery ?? tab.Deferred)?.DraftRef))))
                         throw new IOException("Сеанс недоступен. Сохраните новые правки в отдельные файлы перед закрытием окна.");
                     continue;
                 }
-                if (isActive && _startEmpty && _tabs.Count == 0 && forgetClosedTab is null) continue;
+                var empty = isActive && _startEmpty && _tabs.Count == 0;
+                if (empty && forgetClosedTab is null && _closedTabs.SequenceEqual(_emptyHistoryBaseline)) continue;
                 var views = SessionViews(storage, isActive ? excludeWindow : null).ToList();
                 if (views.Count == 0) continue;
-                await SaveSessionViewsAsync(storage, views, isActive ? forgetClosedTab : null, isActive && _closing);
+                var saved = await SaveSessionViewsAsync(storage, views, isActive ? forgetClosedTab : null, isActive && _closing);
+                if (empty && saved is { Tabs.Count: 0, ClosedTabs: { } history })
+                    _emptyHistoryBaseline = [.. history];
             }
         }
         finally { _workspace.SaveGate.Release(); }
@@ -905,6 +919,8 @@ public partial class MainWindow
             await _workspace.SaveGate.WaitAsync(token);
             try
             {
+                if (_workspace.UnavailableSessions.Contains(WorkspaceCacheKey))
+                    throw new IOException("Сеанс недоступен. Сохраните правки в отдельный файл.");
                 var current = tab.Recovery ?? throw new IOException("Черновик недоступен.");
                 var edited = SessionStorage.AdoptEditedDraft(current, temporary, hash) with { DraftOffset = offset, LineCount = null };
                 AttachPagedDraftEditor(tab, edited, SessionStorage.GetDraftPath(edited)!, caret, focusEditor);
