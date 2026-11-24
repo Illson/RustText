@@ -1044,7 +1044,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
             if (scrollAnchor is { } pending && (ReferenceEquals(page, pending.Page)
                 || !ReferenceEquals(_page, pending.Page) || _levelFilterViewport?.IsVisible == true
-                || Math.Abs((_logScrollViewer?.Offset.Y ?? 0) - pending.Offset) > 1)) return;
+                || Math.Abs((_logScrollViewer?.Offset.Y ?? 0) - pending.Text.Offset) > 1)) return;
             // The user can still type in the current page while the next one is being read.
             if (EditsPagesByDefault && HasPendingEdit)
             {
@@ -1087,7 +1087,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             {
                 if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
                 if (position == PagePosition.FollowEnd && !FollowEnd) return;
-                var y = scrollAnchor is { } anchor ? ResolveScrollAnchor(scroll, anchor, scrollIndex) : position switch
+                var y = scrollAnchor is { } anchor ? ResolveScrollAnchor(_logText, scroll, anchor.Text, scrollIndex) : position switch
                 {
                     PagePosition.End or PagePosition.FollowEnd => scroll.ScrollBarMaximum.Y,
                     PagePosition.Preserve => previousY,

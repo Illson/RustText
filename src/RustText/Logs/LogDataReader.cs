@@ -501,7 +501,7 @@ internal sealed partial class LogDataReader
     public long GetEndOffset(CancellationToken cancellationToken = default) =>
         GetPreviousPageOffset(_file.Length, cancellationToken);
 
-    public long GetPreviousPageOffset(long endOffset, CancellationToken cancellationToken = default)
+    public long GetPreviousPageOffset(long endOffset, CancellationToken cancellationToken = default, bool fullBlock = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var length = Math.Clamp(endOffset, 0, _file.Length);
@@ -516,8 +516,14 @@ internal sealed partial class LogDataReader
         var buffer = ArrayPool<byte>.Shared.Rent(scanLength);
         try
         {
-            var read = ReadWindowInto(_file.SafeFileHandle, aligned, buffer.AsSpan(0, scanLength), cancellationToken);
-            return FindPreviousPageStart(buffer.AsSpan(0, read), aligned, cancellationToken);
+            var handle = _file.SafeFileHandle;
+            var read = ReadWindowInto(handle, aligned, buffer.AsSpan(0, scanLength), cancellationToken);
+            var bytes = buffer.AsSpan(0, read);
+            if (!fullBlock) return FindPreviousPageStart(bytes, aligned, cancellationToken);
+            if (aligned <= _bomLength || IsNewlineBefore(handle, aligned)) return aligned;
+            var ending = FindLineEnding(bytes);
+            var after = ending.Index + ending.Length;
+            return ending.Index >= 0 && after < read ? aligned + after : aligned;
         }
         finally
         {

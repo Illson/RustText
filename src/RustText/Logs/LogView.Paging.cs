@@ -12,13 +12,19 @@ internal sealed partial class LogView
 {
     private LogPage? _draggedPage;
 
-    private sealed record ScrollAnchor(LogPage Page, bool Forward, double Offset, double ViewportY,
-        double Step, int TextIndex, int KeepIndex, int KeepTextIndex);
+    private readonly record struct TextScrollAnchor(int First, int Last, double Offset, double ViewportY, double Step);
+    private sealed record ScrollAnchor(LogPage Page, bool Forward, TextScrollAnchor Text, int KeepIndex, int KeepTextIndex);
 
     private void OnLogPointerWheel(object? sender, PointerWheelEventArgs e)
     {
-        if (e.Delta.Y == 0 || e.KeyModifiers != KeyModifiers.None || Math.Abs(e.Delta.Y) < Math.Abs(e.Delta.X)
-            || !IsLogTextSource(e.Source as Visual)) return;
+        if (e.Delta.Y == 0 || e.KeyModifiers != KeyModifiers.None || Math.Abs(e.Delta.Y) < Math.Abs(e.Delta.X)) return;
+        if (_levelFilterViewport?.IsVisible == true)
+        {
+            if (e.Source is Visual source && (ReferenceEquals(_filteredLogText, source) || _filteredLogText.IsVisualAncestorOf(source))
+                && TryContinueFilteredScroll(e.Delta.Y)) e.Handled = true;
+            return;
+        }
+        if (!IsLogTextSource(e.Source as Visual)) return;
 
         StopFollowingEnd();
         var forward = e.Delta.Y < 0;
@@ -89,10 +95,24 @@ internal sealed partial class LogView
 
     private ScrollAnchor? GetScrollAnchor(LogPage page, bool forward, double steps)
     {
-        if (_logScrollViewer is not { Presenter: { } viewport } scroll || scroll.Viewport.Height <= 0
-            || _logText.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault() is not { } presenter
-            || presenter.TranslatePoint(default, viewport) is not { } origin) return null;
+        if (page.Rows.Count == 0 || GetTextScrollAnchor(_logText, _logScrollViewer, forward ? steps : -steps) is not { } anchor)
+            return null;
 
+        // shortcut: bound the overlap even when a viewport is filled by a very long line.
+        const int overlapBytes = 2 * LogDataReader.DefaultPageBytes;
+        const int overlapRows = LogDataReader.MaximumPageSize - LogDataReader.DefaultPageSize;
+        var (index, textIndex) = FindScrollOverlap(page.Rows, anchor, forward, row => row.Text.Length, row => row.StartsWithinLine,
+            (i, _) => forward
+                ? page.Rows.Count - i <= overlapRows && page.NextOffset - page.Rows[i].StartOffset <= overlapBytes
+                : i < overlapRows && page.Rows[i].EndOffset - page.StartOffset <= overlapBytes);
+        return new(page, forward, anchor, index, textIndex);
+    }
+
+    private static TextScrollAnchor? GetTextScrollAnchor(TextBox text, ScrollViewer? scroll, double steps)
+    {
+        if (scroll is not { Presenter: { } viewport, Viewport.Height: > 0 }
+            || text.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault() is not { } presenter
+            || presenter.TranslatePoint(default, viewport) is not { } origin) return null;
         var y = origin.Y;
         var first = -1;
         var last = 0;
@@ -111,27 +131,26 @@ internal sealed partial class LogView
             }
             y += line.Height;
         }
-        if (first < 0) return null;
+        return first < 0 ? null : new(first, last, scroll.Offset.Y, firstY,
+            Math.Max(1, scroll.SmallChange.Height) * Math.Clamp(steps, -1, 1));
+    }
 
-        // shortcut: retain the visible rows within a two-page byte budget, even for very long lines.
-        const int overlapBytes = 2 * LogDataReader.DefaultPageBytes;
-        const int overlapRows = LogDataReader.MaximumPageSize - LogDataReader.DefaultPageSize;
+    private static (int Index, int TextIndex) FindScrollOverlap<T>(IReadOnlyList<T> rows, TextScrollAnchor anchor,
+        bool forward, Func<T, int> length, Func<T, bool> continuation, Func<int, int, bool> fits)
+    {
         var keep = 0;
         var keepText = 0;
         var textIndex = 0;
-        for (var i = 1; i < page.Rows.Count; i++)
+        for (var i = 1; i < rows.Count; i++)
         {
-            textIndex += page.Rows[i - 1].Text.Length + (page.Rows[i].StartsWithinLine ? 0 : Environment.NewLine.Length);
-            var row = page.Rows[i];
-            var fits = forward
-                ? page.Rows.Count - i + 1 <= overlapRows && page.NextOffset - page.Rows[i - 1].StartOffset <= overlapBytes
-                : i < overlapRows && row.EndOffset - page.StartOffset <= overlapBytes;
-            if (forward ? textIndex > first && fits : textIndex > last || !fits) break;
+            var end = textIndex + length(rows[i - 1]);
+            textIndex = end + (continuation(rows[i]) ? 0 : Environment.NewLine.Length);
+            if (forward ? textIndex > anchor.First && fits(i - 1, keepText)
+                : textIndex > anchor.Last || !fits(i, textIndex + length(rows[i]))) break;
             keep = i;
             keepText = textIndex;
         }
-        var step = Math.Max(1, scroll.SmallChange.Height) * Math.Min(steps, 1);
-        return new(page, forward, scroll.Offset.Y, firstY, forward ? step : -step, first, forward ? keep : keep + 1, keepText);
+        return (forward || rows.Count == 0 ? keep : keep + 1, keepText);
     }
 
     private static (LogPage Page, int TextIndex) ReadScrolledPage(LogDataReader reader, ScrollAnchor anchor,
@@ -141,16 +160,16 @@ internal sealed partial class LogView
         if (anchor.Forward)
         {
             var next = reader.ReadPage(old.NextOffset, cancellationToken: token);
-            if (next.Rows.Count == 0 || next.StartOffset != old.NextOffset) return (old, anchor.TextIndex);
+            if (next.Rows.Count == 0 || next.StartOffset != old.NextOffset) return (old, anchor.Text.First);
             var kept = old.Rows.Skip(anchor.KeepIndex);
             var start = anchor.KeepIndex == 0 ? old.StartOffset : old.Rows[anchor.KeepIndex].StartOffset;
             return (next with { Rows = [.. kept, .. next.Rows], StartOffset = start },
-                Math.Max(0, anchor.TextIndex - anchor.KeepTextIndex));
+                Math.Max(0, anchor.Text.First - anchor.KeepTextIndex));
         }
 
         var startBefore = Math.Max(firstOffset, reader.GetPreviousPageOffset(old.StartOffset, token));
         var previous = reader.ReadPage(startBefore, cancellationToken: token, endOffset: old.StartOffset);
-        if (previous.Rows.Count == 0) return (old, anchor.TextIndex);
+        if (previous.Rows.Count == 0) return (old, anchor.Text.First);
         if (previous.NextOffset != old.StartOffset)
             return (reader.ReadPage(startBefore, cancellationToken: token), -1);
         var keptRows = old.Rows.Take(anchor.KeepIndex).ToArray();
@@ -158,14 +177,14 @@ internal sealed partial class LogView
             + (previous.Rows.Skip(1).Count(row => !row.StartsWithinLine) + (keptRows[0].StartsWithinLine ? 0 : 1)) * Environment.NewLine.Length;
         var nextOffset = keptRows.Length == old.Rows.Count ? old.NextOffset : keptRows[^1].EndOffset;
         return (old with { Rows = [.. previous.Rows, .. keptRows], StartOffset = previous.StartOffset, NextOffset = nextOffset,
-            HasMore = nextOffset < old.FileLength }, prefixLength + anchor.TextIndex);
+            HasMore = nextOffset < old.FileLength }, prefixLength + anchor.Text.First);
     }
 
-    private double ResolveScrollAnchor(ScrollViewer scroll, ScrollAnchor anchor, int textIndex)
+    private static double ResolveScrollAnchor(TextBox text, ScrollViewer scroll, TextScrollAnchor anchor, int textIndex)
     {
         if (textIndex < 0) return scroll.ScrollBarMaximum.Y;
         if (scroll.Presenter is not { } viewport
-            || _logText.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault() is not { } presenter
+            || text.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault() is not { } presenter
             || presenter.TranslatePoint(default, viewport) is not { } origin) return scroll.Offset.Y;
         var y = presenter.TextLayout.HitTestTextPosition(textIndex).Y;
         return scroll.Offset.Y + origin.Y + y - anchor.ViewportY + anchor.Step;
