@@ -6,29 +6,14 @@ namespace RustText.Demo.Editor;
 
 internal sealed class LineGenerator(string template, long rows)
 {
-    internal const long TabByteLimit = 8 * 1024 * 1024;
-    internal const long TabLineLimit = 50_000;
     private const string Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static readonly Regex Placeholders = new(@"\{(int_from_[^{}]*|guid|rand_string(?:_[^{}]*)?)\}",
         RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(400));
 
     private readonly Part[] _parts = Parse(template, rows);
 
-    public long EstimateBytes()
-    {
-        checked
-        {
-            return _parts.Sum(part => part.ByteCount) * rows + rows - 1;
-        }
-    }
-
     public async Task<string> GenerateTextAsync(IProgress<double>? progress, CancellationToken token)
     {
-        if (EstimateBytes() > TabByteLimit || rows > TabLineLimit)
-        {
-            throw new InvalidDataException("Результат превышает ограничение для вкладки. Сохраните его в файл.");
-        }
-
         using var writer = new StringWriter(CultureInfo.InvariantCulture);
         await GenerateAsync(writer, progress, token);
         return writer.ToString();
@@ -125,7 +110,7 @@ internal sealed class LineGenerator(string template, long rows)
             var token = match.Groups[1].Value;
             if (token == "guid")
             {
-                parts.Add(new Part("", PartKind.Guid, 0, 36));
+                parts.Add(new Part("", PartKind.Guid, 0));
             }
             else if (token.StartsWith("int_from_", StringComparison.Ordinal))
             {
@@ -134,9 +119,8 @@ internal sealed class LineGenerator(string template, long rows)
                     throw new ArgumentException("В {int_from_N} укажите целое начальное число.");
                 }
 
-                var end = checked(start + (count - 1));
-                var bytes = Math.Max(start.ToString(CultureInfo.InvariantCulture).Length, end.ToString(CultureInfo.InvariantCulture).Length);
-                parts.Add(new Part("", PartKind.Integer, start, bytes));
+                _ = checked(start + (count - 1));
+                parts.Add(new Part("", PartKind.Integer, start));
             }
             else
             {
@@ -146,7 +130,7 @@ internal sealed class LineGenerator(string template, long rows)
                     throw new ArgumentException("В {rand_string_N} укажите неотрицательную целую длину.");
                 }
 
-                parts.Add(new Part("", PartKind.Random, length, length));
+                parts.Add(new Part("", PartKind.Random, length));
             }
 
             offset = match.Index + match.Length;
@@ -160,10 +144,10 @@ internal sealed class LineGenerator(string template, long rows)
     {
         if (text.Length != 0)
         {
-            parts.Add(new Part(text, PartKind.Text, 0, Encoding.UTF8.GetByteCount(text)));
+            parts.Add(new Part(text, PartKind.Text, 0));
         }
     }
 
-    private readonly record struct Part(string Text, PartKind Kind, long Number, long ByteCount);
+    private readonly record struct Part(string Text, PartKind Kind, long Number);
     private enum PartKind { Text, Integer, Guid, Random }
 }

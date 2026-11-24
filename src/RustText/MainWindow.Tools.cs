@@ -348,7 +348,6 @@ public partial class MainWindow
                 }
 
                 var generator = new LineGenerator(template.Text ?? "", rows);
-                export |= generator.EstimateBytes() > LineGenerator.TabByteLimit || rows > LineGenerator.TabLineLimit;
                 generate.IsEnabled = file.IsEnabled = false;
                 progress.IsVisible = true;
                 progress.Value = 0;
@@ -371,6 +370,7 @@ public partial class MainWindow
                 else
                 {
                     var text = await Task.Run(() => generator.GenerateTextAsync(reporter, token), token);
+                    token.ThrowIfCancellationRequested();
                     NewTab(text);
                     status.Text = "Результат открыт в новой вкладке.";
                 }
@@ -378,6 +378,10 @@ public partial class MainWindow
             catch (OperationCanceledException)
             {
                 status.Text = "Генерация отменена.";
+            }
+            catch (OutOfMemoryException) when (!export)
+            {
+                status.Text = "Недостаточно памяти для открытия результата во вкладке.";
             }
             catch (Exception error) when (IsUserError(error))
             {

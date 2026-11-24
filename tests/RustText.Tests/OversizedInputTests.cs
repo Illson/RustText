@@ -64,6 +64,50 @@ public sealed class OversizedInputTests(ITestOutputHelper output)
     });
 
     [Fact]
+    public Task GeneratorOpensAFullUntitledTabWithoutSaving() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "ShowGroups");
+            Invoke(window, "NewTab", "исходный текст");
+            var original = ActiveTab(window);
+            var tabCount = Tabs(window).Count();
+            var pending = (Task)Invoke(window, "ShowGeneratorAsync")!;
+            var dialog = Assert.Single(window.OwnedWindows);
+            try
+            {
+                dialog.UpdateLayout();
+                const int rows = 100_000;
+                var prefix = new string('x', 90);
+                var inputs = dialog.GetVisualDescendants().OfType<TextBox>().ToArray();
+                inputs.Single(box => box.AcceptsReturn).Text = prefix + "{int_from_1}";
+                inputs.Single(box => Equals(box.PlaceholderText, "Количество строк")).Text = "100000";
+                var generate = dialog.GetVisualDescendants().OfType<Button>()
+                    .Single(button => Equals(button.Content, "В новую вкладку"));
+                generate.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await HeadlessTests.WaitForAsync(() => generate.IsEnabled);
+
+                Assert.Equal(tabCount + 1, Tabs(window).Count());
+                var generated = ActiveTab(window);
+                Assert.Null(Property(generated, "Path"));
+                Assert.True(Assert.IsType<bool>(Property(generated, "Dirty")));
+                var editor = Assert.IsType<TextEditor>(Property(generated, "Editor"));
+                Assert.Equal(rows, editor.LineCount);
+                Assert.StartsWith(prefix + "1\n", editor.Text);
+                Assert.EndsWith(prefix + "100000", editor.Text);
+                Assert.Equal("исходный текст", Assert.IsType<TextEditor>(Property(original, "Editor")).Text);
+            }
+            finally
+            {
+                dialog.Close();
+                await pending;
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task ManualDraftLogModeKeepsEditsAcrossCloseAndReturnToEditor() => HeadlessTests.RunAsync(async profile =>
     {
         var window = await OpenWorkspaceAsync();
