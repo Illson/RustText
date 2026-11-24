@@ -64,10 +64,15 @@ public sealed class PortOwnersTests
                 var tabs = Assert.Single(window.GetVisualDescendants().OfType<WorkspaceTabs>());
                 var document = Assert.IsType<TabItem>(tabs.SelectedItem);
                 var menu = window.FindControl<Menu>("TopMenu")!;
-                var open = Menu(Menu(menu, "_Инструменты"), "Найти процесс по порту");
+                var open = Menu(Menu(menu, "_Инструменты"), "Поиск процессов");
                 Click(open);
                 var tab = Assert.IsType<TabItem>(tabs.SelectedItem);
-                var view = Assert.IsType<PortOwnersView>(tab.Content);
+                var finder = Assert.IsType<ProcessFinderView>(tab.Content);
+                var modes = Assert.IsType<TabControl>(finder.Content);
+                var modeItems = modes.Items.Cast<TabItem>().ToArray();
+                Assert.Equal(new[] { "По порту", "По заголовку окна" }, modeItems.Select(item => item.Header));
+                Assert.Same(modeItems[0], modes.SelectedItem);
+                var view = Assert.IsType<PortOwnersView>(modeItems[0].Content);
                 tabs.SelectedItem = document;
                 Click(open);
                 Assert.Same(tab, tabs.SelectedItem);
@@ -92,6 +97,21 @@ public sealed class PortOwnersTests
                     Assert.Equal(child.ProcessName, match.Owner.Name);
                     Assert.True(match.Owner.CanClose);
                 }
+
+                var portResult = results.SelectedItem;
+                modes.SelectedItem = modeItems[1];
+                window.UpdateLayout();
+                var titleSearch = Assert.IsAssignableFrom<Control>(modeItems[1].Content);
+                var titleQuery = Assert.Single(titleSearch.GetVisualDescendants().OfType<TextBox>());
+                titleQuery.Text = $"RustText test title {Guid.NewGuid()}";
+                Click(Assert.Single(titleSearch.GetVisualDescendants().OfType<Button>(), button => Equals(button.Content, "Найти")));
+                Assert.Contains(titleSearch.GetVisualDescendants().OfType<TextBlock>(), label => label.Text == "Окон найдено · 0");
+                Assert.Empty(window.OwnedWindows);
+                Assert.Same(tab, tabs.SelectedItem);
+                modes.SelectedItem = modeItems[0];
+                window.UpdateLayout();
+                Assert.Equal(ports[0].ToString(), input.Text);
+                Assert.Same(portResult, results.SelectedItem);
 
                 Click(stop);
                 Assert.Empty(window.OwnedWindows);

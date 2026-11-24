@@ -1433,8 +1433,8 @@ public partial class MainWindow
         public Group Group { get; set; } = group;
         public TabItem Item { get; } = new();
         public ProxyCheckerView? ProxyChecker => Item.Content as ProxyCheckerView;
-        public PortOwnersView? PortOwners => Item.Content as PortOwnersView;
-        public bool IsTool => ProxyChecker is not null || PortOwners is not null;
+        public ProcessFinderView? ProcessFinder => Item.Content as ProcessFinderView;
+        public bool IsTool => ProxyChecker is not null || ProcessFinder is not null;
         public string? CustomTitle { get; set; }
         public TextBlock LineCountLabel { get; } = new()
         {

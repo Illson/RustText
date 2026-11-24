@@ -88,8 +88,7 @@ public partial class MainWindow
             MenuGroup("Обновления",
                 Command("Проверить обновления…", () => Run(() => CheckUpdatesAsync(manual: true))),
                 Command("История выпусков…", () => Run(ShowReleaseHistoryAsync))),
-            Command("Найти окно процесса…", () => Run(ShowWindowFinderAsync)),
-            Command("Найти процесс по порту", ShowPortOwners),
+            Command("Поиск процессов", ShowProcessFinder),
             Command("Прокси-чекер…", ShowProxyChecker),
             new Separator(),
             Command("Настройки…", () => Run(ShowSettingsAsync))));

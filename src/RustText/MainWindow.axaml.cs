@@ -788,7 +788,7 @@ public partial class MainWindow : Window
     {
         tab.LoadCancellation?.Cancel();
         tab.ProxyChecker?.Dispose();
-        tab.PortOwners?.Dispose();
+        tab.ProcessFinder?.Dispose();
         tab.Log?.Close();
         tab.Log = null;
         tab.Shell?.Dispose();
