@@ -14,9 +14,10 @@ internal sealed partial class LogDataReader
     internal const int MinimapColumns = 32;
     private const int LookaheadBytes = 4;
     private const int MidpointScanBytes = 64 * 1024;
-    private const int MaximumPageBytes = 1024 * 1024;
+    internal const int MaximumPageBytes = 1024 * 1024;
     private const int MaximumFrameBytes = 64 * 1024;
-    private const int DefaultPageSize = 80;
+    internal const int DefaultPageSize = 80;
+    internal const int MaximumPageSize = 4 * DefaultPageSize;
     internal const int DefaultFrameBytes = 16 * 1024;
     private const int IndexBufferBytes = 256 * 1024;
     internal const int DefaultPageBytes = 128 * 1024;
@@ -246,7 +247,7 @@ internal sealed partial class LogDataReader
     private LogPage ReadPage(long offset, int pageSize, int maxFrameBytes, int maxPageBytes,
         CancellationToken cancellationToken, long endOffset, SequentialScan? scan)
     {
-        if (pageSize is < 1 or > 100)
+        if (pageSize is < 1 or > MaximumPageSize)
         {
             throw new ArgumentOutOfRangeException(nameof(pageSize));
         }

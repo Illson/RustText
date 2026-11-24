@@ -994,35 +994,16 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void OnMinimapPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
-        if (e.Delta.Y == 0)
-        {
-            return;
-        }
-
-        if (_levelFilterViewport?.IsVisible == true)
-        {
-            if (_filteredPage is not { Rows.Count: > 0 } filteredPage) return;
-            var first = filteredPage.Rows[0];
-            var last = filteredPage.Rows[^1];
-            var filteredPageBytes = Math.Max(1, last.EndOffset - first.StartOffset);
-            var filteredNext = Math.Clamp(first.StartOffset - (long)Math.Sign(e.Delta.Y) * filteredPageBytes,
-                _hiddenOffset, _filterSnapshotLength);
-            var filteredRange = Math.Max(1, _filterSnapshotLength - _hiddenOffset);
-            _ = NavigateMinimapToRatioAsync((filteredNext - _hiddenOffset) / (double)filteredRange);
-            e.Handled = true;
-            return;
-        }
-
-        if (_page is not { } page) return;
-        var pageBytes = Math.Max(1, page.NextOffset - page.StartOffset);
-        var next = Math.Clamp(page.StartOffset - (long)Math.Sign(e.Delta.Y) * pageBytes, _hiddenOffset, _file.Length);
-        var range = Math.Max(1, _file.Length - _hiddenOffset);
-        _ = NavigateMinimapToRatioAsync((next - _hiddenOffset) / (double)range);
+        var viewer = _levelFilterViewport?.IsVisible == true ? _filteredLogScrollViewer : _logScrollViewer;
+        if (e.Delta.Y == 0 || viewer?.Presenter is not { } presenter || VisualRoot is not Visual root) return;
+        var point = e.GetCurrentPoint(root);
         e.Handled = true;
+        presenter.RaiseEvent(new PointerWheelEventArgs(presenter, e.Pointer, root,
+            point.Position, e.Timestamp, point.Properties, e.KeyModifiers, e.Delta));
     }
 
     private async Task LoadPageAsync(long offset, bool saveHistory = true, PagePosition position = PagePosition.Start,
-        int maxPageBytes = LogDataReader.DefaultPageBytes, FileStamp? expectedPageStamp = null)
+        int maxPageBytes = LogDataReader.DefaultPageBytes, FileStamp? expectedPageStamp = null, ScrollAnchor? scrollAnchor = null)
     {
         if (_closed || _busy || PageNavigationBlocked)
         {
@@ -1038,20 +1019,32 @@ internal sealed partial class LogView : UserControl, IDisposable
             var generation = _dataGeneration;
             var token = _closing.Token;
             var stamp = expectedPageStamp ?? _fileStamp;
-            var (page, firstLine, edit) = await Task.Run(() =>
+            var rowsToRead = LogDataReader.DefaultPageSize;
+            // Reread the whole scrolling window, not just its first block, after an append.
+            if (position == PagePosition.Preserve && _pageEdit is null && _page is { } currentPage)
             {
-                var pageBytes = maxPageBytes;
+                rowsToRead = Math.Max(rowsToRead, currentPage.Rows.Count);
+                maxPageBytes = Math.Max(maxPageBytes, (int)Math.Min(LogDataReader.MaximumPageBytes,
+                    currentPage.NextOffset - currentPage.StartOffset));
+            }
+            var (page, firstLine, edit, scrollIndex) = await Task.Run(() =>
+            {
                 var requested = Math.Max(firstOffset, position == PagePosition.FollowEnd ? reader.GetEndOffset(token) : offset);
-                var result = reader.ReadPage(requested, maxPageBytes: pageBytes, cancellationToken: token);
+                var (result, index) = scrollAnchor is { } anchor
+                    ? ReadScrolledPage(reader, anchor, firstOffset, token)
+                    : (reader.ReadPage(requested, pageSize: rowsToRead, maxPageBytes: maxPageBytes, cancellationToken: token), -1);
                 var first = result.Rows.Count > 0 ? FindLineNumber(reader, result.Rows[0].StartOffset, token) : null;
                 var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token) : null;
-                return (result, first, pageEdit);
+                return (result, first, pageEdit, index);
             }, token);
             if (_closed || generation != _dataGeneration || !ReferenceEquals(reader, _reader)
                 || (position == PagePosition.FollowEnd && !FollowEnd && _page is not null))
             {
                 return;
             }
+            if (scrollAnchor is { } pending && (ReferenceEquals(page, pending.Page)
+                || !ReferenceEquals(_page, pending.Page) || _levelFilterViewport?.IsVisible == true
+                || Math.Abs((_logScrollViewer?.Offset.Y ?? 0) - pending.Offset) > 1)) return;
             // The user can still type in the current page while the next one is being read.
             if (EditsPagesByDefault && HasPendingEdit)
             {
@@ -1094,7 +1087,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             {
                 if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
                 if (position == PagePosition.FollowEnd && !FollowEnd) return;
-                var y = position switch
+                var y = scrollAnchor is { } anchor ? ResolveScrollAnchor(scroll, anchor, scrollIndex) : position switch
                 {
                     PagePosition.End or PagePosition.FollowEnd => scroll.ScrollBarMaximum.Y,
                     PagePosition.Preserve => previousY,

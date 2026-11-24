@@ -118,6 +118,61 @@ public sealed class LogUiTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task WheelKeepsVisibleRowsWhenLoadingAnAdjacentLogPage(bool wrap) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "smooth-scroll.log");
+        var suffix = wrap ? new string('x', 160) : "";
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(1, 320).Select(row => $"row-{row:D4}{suffix}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, WordWrap: wrap));
+        try
+        {
+            log.WordWrap = wrap;
+            var text = (TextBox)Field(log, "_logText");
+            var viewer = (ScrollViewer)Field(log, "_logScrollViewer");
+            await HeadlessTests.WaitForAsync(() => viewer.ScrollBarMaximum.Y > 100);
+            var presenter = text.GetVisualDescendants().OfType<TextPresenter>().Single();
+            Point WheelPoint() => text.TranslatePoint(new Point(100, 80), window)!.Value;
+            window.MouseMove(WheelPoint());
+            await HeadlessTests.WaitForAsync(() => window.InputHitTest(WheelPoint()) is Visual hit && text.IsVisualAncestorOf(hit));
+            int TopRow()
+            {
+                var top = presenter.TranslatePoint(default, viewer.Presenter!)!.Value.Y;
+                foreach (var line in presenter.TextLayout.TextLines)
+                {
+                    if (top + line.Height > 0)
+                    {
+                        var contents = text.Text!;
+                        var index = contents.LastIndexOf("row-", Math.Min(contents.Length - 1, line.FirstTextSourceIndex + 3),
+                            StringComparison.Ordinal);
+                        return int.Parse(contents.AsSpan(index + 4, 4));
+                    }
+                    top += line.Height;
+                }
+                throw new InvalidOperationException("No visible row");
+            }
+
+            viewer.Offset = new Vector(0, viewer.ScrollBarMaximum.Y);
+            window.UpdateLayout();
+            var before = TopRow();
+            window.MouseWheel(WheelPoint(), new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => text.Text?.Contains("row-0081", StringComparison.Ordinal) == true
+                && viewer.ScrollBarMaximum.Y - viewer.Offset.Y > 32);
+            Assert.InRange(TopRow() - before, 0, 4);
+
+            viewer.Offset = default;
+            window.UpdateLayout();
+            before = TopRow();
+            Assert.True(before > 1);
+            window.MouseWheel(WheelPoint(), new Vector(0, 1));
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 0 && viewer.Offset.Y > 0);
+            Assert.InRange(before - TopRow(), 0, 4);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -155,21 +210,51 @@ public sealed class LogUiTests
             }
             else
             {
-                for (var i = 0; i < 60 && Page(log)?.StartOffset == 0; i++)
+                for (var i = 0; i < 60 && Page(log)?.NextOffset == 80 * 9; i++)
                 {
                     window.MouseWheel(WheelPosition(), new Vector(0, -1));
                     await Task.Delay(12);
                 }
             }
-            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 80 * 9);
-            Assert.StartsWith("row-0081", text.Text);
-            Assert.Equal("Строки 81–160", ((TextBlock)Field(log, "_lineNumberLabel")).Text);
+            await HeadlessTests.WaitForAsync(() => Page(log)?.NextOffset == 160 * 9);
+            Assert.Contains("row-0080\r\nrow-0081", text.Text);
+            Assert.EndsWith("row-0160", text.Text);
             var viewer = (ScrollViewer)Field(log, "_logScrollViewer");
-            await HeadlessTests.WaitForAsync(() => viewer.Offset.Y <= 1);
+            viewer.Offset = default;
+            window.UpdateLayout();
             window.MouseWheel(WheelPosition(), new Vector(0, 1));
-            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 0
-                && viewer.Offset.Y >= viewer.Extent.Height - viewer.Viewport.Height - 1);
-            Assert.EndsWith("row-0080", text.Text);
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == 0 && viewer.Offset.Y > 1);
+            Assert.StartsWith("row-0001", text.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task AppendingAtTheEndDoesNotShrinkTheScrolledLogWindow() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "smooth-live-scroll.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Range(1, 140).Select(row => $"row-{row:D4}\n")));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true));
+        try
+        {
+            var text = (TextBox)Field(log, "_logText");
+            var viewer = (ScrollViewer)Field(log, "_logScrollViewer");
+            Point WheelPoint() => text.TranslatePoint(new Point(100, 80), window)!.Value;
+            window.MouseMove(WheelPoint());
+            await HeadlessTests.WaitForAsync(() => window.InputHitTest(WheelPoint()) is Visual hit
+                && text.IsVisualAncestorOf(hit) && viewer.ScrollBarMaximum.Y > 100);
+            viewer.Offset = new Vector(0, viewer.ScrollBarMaximum.Y);
+            window.UpdateLayout();
+            window.MouseWheel(WheelPoint(), new Vector(0, -1));
+            await HeadlessTests.WaitForAsync(() => Page(log) is { HasMore: false, Rows.Count: > 80 });
+
+            var displayed = text.Text;
+            var offset = viewer.Offset.Y;
+            await File.AppendAllTextAsync(path, "row-0141\n");
+            await HeadlessTests.WaitForAsync(() => Page(log)?.HasMore == true && log.FileLength == 141 * 9
+                && !(bool)Field(log, "_busy"));
+            Assert.Equal(displayed, text.Text);
+            Assert.InRange(Math.Abs(viewer.Offset.Y - offset), 0, 1);
         }
         finally { await CloseLogAsync(window, log); }
     });
@@ -513,7 +598,7 @@ public sealed class LogUiTests
     });
 
     [Fact]
-    public Task FilteredMinimapWheelAdvancesFromCurrentFilteredPageInBothDirections() => HeadlessTests.RunAsync(async profile =>
+    public Task FilteredMinimapWheelScrollsInsideTheCurrentPage() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "filtered-wheel.log");
         var contents = string.Concat(Enumerable.Range(0, 480).Select(row =>
@@ -530,34 +615,22 @@ public sealed class LogUiTests
                 && minimap.Bounds.Height > 100);
             var origin = minimap.TranslatePoint(new Point(0, 0), window) ?? throw new InvalidOperationException("Minimap is not attached.");
             var point = origin + new Point(minimap.Bounds.Width / 2, minimap.Bounds.Height / 2);
+            await HeadlessTests.WaitForAsync(() => Field(log, "_filteredLogScrollViewer") is ScrollViewer { ScrollBarMaximum.Y: > 100 });
+            var scroll = (ScrollViewer)Field(log, "_filteredLogScrollViewer");
 
             var firstPage = filtered.Text;
             window.MouseWheel(point, new Vector(0, -1));
-            await WaitForPageChangeAsync(firstPage);
-            var secondPage = filtered.Text;
-            Assert.True(FirstRowNumber(secondPage) > FirstRowNumber(firstPage));
-
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > 0);
+            var firstY = scroll.Offset.Y;
             window.MouseWheel(point, new Vector(0, -1));
-            await WaitForPageChangeAsync(secondPage);
-            var thirdPage = filtered.Text;
-            Assert.True(FirstRowNumber(thirdPage) > FirstRowNumber(secondPage));
-
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > firstY);
             window.MouseWheel(point, new Vector(0, 1));
-            await WaitForPageChangeAsync(thirdPage);
-            Assert.True(FirstRowNumber(filtered.Text) < FirstRowNumber(thirdPage));
+            await HeadlessTests.WaitForAsync(() => Math.Abs(scroll.Offset.Y - firstY) < 1);
+            Assert.Equal(firstPage, filtered.Text);
 
-            var beforeClick = filtered.Text;
             window.MouseDown(point, MouseButton.Left);
             window.MouseUp(point, MouseButton.Left);
-            await WaitForPageChangeAsync(beforeClick);
-            var afterClick = filtered.Text;
-            window.MouseWheel(point, new Vector(0, -1));
-            await WaitForPageChangeAsync(afterClick);
-            Assert.True(FirstRowNumber(filtered.Text) > FirstRowNumber(afterClick));
-
-            // The filtered viewport clears its text while reading a new page.
-            Task WaitForPageChangeAsync(string? previous) => HeadlessTests.WaitForAsync(() =>
-                filtered.Text is { Length: > 0 } current && current != previous);
+            await HeadlessTests.WaitForAsync(() => FirstRowNumber(filtered.Text) > FirstRowNumber(firstPage));
         }
         finally { await CloseLogAsync(window, log); }
     });
@@ -977,10 +1050,11 @@ public sealed class LogUiTests
             var firstMarker = Marker(minimap);
             Assert.True(firstMarker.Height >= 14);
 
-            var beforeWheel = FirstRowNumber(text.Text);
+            var beforeWheel = text.Text;
+            var scroll = (ScrollViewer)Field(log, "_logScrollViewer");
             window.MouseWheel(At(0.5), new Vector(0, -1));
-            await HeadlessTests.WaitForAsync(() => FirstRowNumber(text.Text) > beforeWheel);
-            var afterWheel = FirstRowNumber(text.Text);
+            await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > 0);
+            Assert.Equal(beforeWheel, text.Text);
 
             window.MouseMove(At(0.2));
             window.MouseDown(At(0.2), MouseButton.Left, RawInputModifiers.None);
