@@ -455,6 +455,8 @@ public partial class MainWindow
                 ApplyWorkspaceTheme();
             else if (settings.GlassIntensity != previous.GlassIntensity)
                 ApplyWorkspaceGlass();
+            if (settings.SmoothCaret != previous.SmoothCaret)
+                foreach (var window in _workspace.Windows) window.RefreshThemeMenu();
         }
         finally { _workspace.SettingsGate.Release(); }
     }

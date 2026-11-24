@@ -5,6 +5,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using RustText.Demo.Editor;
 
 namespace RustText.Demo;
 
@@ -18,6 +19,7 @@ public partial class MainWindow
     ];
 
     private MenuItem _themeMenu = null!;
+    private MenuItem _smoothCaretMenu = null!;
     private Slider _glassSlider = null!;
     private TextBlock _glassValue = null!;
     private int? _glassMenuRevision;
@@ -45,6 +47,13 @@ public partial class MainWindow
             _themeMenu.Items.Add(item);
         }
         _themeMenu.Items.Add(new Separator());
+        _smoothCaretMenu = Command("Плавный курсор", () => Run(async () =>
+        {
+            try { await SaveWorkspaceSettingsAsync(settings => settings with { SmoothCaret = !settings.SmoothCaret }); }
+            finally { RefreshThemeMenu(); }
+        }));
+        _smoothCaretMenu.ToggleType = MenuItemToggleType.CheckBox;
+        _themeMenu.Items.Add(_smoothCaretMenu);
         _themeMenu.Items.Add(BuildGlassMenuItem());
         _themeMenu.PropertyChanged += (_, change) =>
         {
@@ -183,6 +192,8 @@ public partial class MainWindow
     private void RefreshThemeMenu()
     {
         _themeMenu.IsEnabled = _workspace.SettingsReady;
+        _smoothCaretMenu.IsChecked = Settings.SmoothCaret;
+        SetValue(EditorCaret.SmoothProperty, Settings.SmoothCaret);
         var selected = SelectedTheme;
         for (var index = 0; index < ThemeOptions.Length; index++)
             ((MenuItem)_themeMenu.Items[index]!).IsChecked = ThemeOptions[index].Theme == selected;

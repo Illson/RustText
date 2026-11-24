@@ -10,13 +10,13 @@ public sealed class EditorCaretTests
     public void BlinkHoldsBetweenSoftFadesAndStartsBrightAfterActivity()
     {
         const double interval = 530;
-        Assert.Equal((1, 370), EditorCaret.BlinkFrame(0, interval));
+        Assert.Equal((1, 410), EditorCaret.BlinkFrame(0, interval));
         Assert.Equal(0.56, EditorCaret.BlinkFrame(450, interval).Opacity, precision: 6);
-        var dim = EditorCaret.BlinkFrame(530, interval);
-        Assert.Equal(0.12, dim.Opacity);
-        Assert.Equal(370, dim.Wait);
+        Assert.Equal((0.12, 410), EditorCaret.BlinkFrame(530, interval));
         Assert.Equal(0.56, EditorCaret.BlinkFrame(980, interval).Opacity, precision: 6);
-        Assert.Equal((1, 370), EditorCaret.BlinkFrame(1060, interval));
+        Assert.Equal((1, 410), EditorCaret.BlinkFrame(1060, interval));
+        Assert.Equal((1, 80), EditorCaret.BlinkFrame(450, interval, smooth: false));
+        Assert.Equal((0, 530), EditorCaret.BlinkFrame(530, interval, smooth: false));
     }
 
     [Fact]

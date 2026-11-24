@@ -1,10 +1,13 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Input;
 using Avalonia.Media;
 using AvaloniaEdit;
+using AvaloniaEdit.Editing;
 using AvaloniaEdit.Rendering;
 using RustText.Demo;
 using RustText.Demo.Editor;
@@ -177,6 +180,23 @@ public sealed class ViceCityThemeTests
             AssertCaretPixels(window, editor, visible: false);
             area.OverstrikeMode = false;
             AssertCaretPixels(window, editor);
+
+            var smooth = layer.MotionEnabled;
+            window.SetValue(EditorCaret.SmoothProperty, false);
+            Assert.False(layer.MotionEnabled);
+            window.KeyTextInput("x");
+            AssertCaretPixels(window, editor);
+            window.SetValue(EditorCaret.SmoothProperty, true);
+            Assert.Equal(smooth, layer.MotionEnabled);
+
+            var timeout = Field<double>(layer, "_blinkTimeout");
+            if (double.IsFinite(timeout))
+            {
+                clock.Ticks += TimeSpan.FromMilliseconds(timeout + 1).Ticks;
+                layer.InvalidateVisual();
+                AssertCaretPixels(window, editor);
+                Assert.False(Field<Avalonia.Threading.DispatcherTimer?>(layer, "_timer")?.IsEnabled == true);
+            }
         }
         finally { window.Close(); }
         return Task.CompletedTask;
@@ -188,6 +208,74 @@ public sealed class ViceCityThemeTests
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;
         public override long GetTimestamp() => Ticks;
     }
+
+    [Fact]
+    public Task RemovingFocusedEditorReleasesItsCursorAndDocument() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = new Window { Width = 640, Height = 400 };
+        window.Show();
+        try
+        {
+            var (layer, document) = OpenAndRemove(window);
+            await HeadlessTests.WaitForAsync(() =>
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                return !layer.IsAlive && !document.IsAlive;
+            });
+        }
+        finally { window.Close(); }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static (WeakReference, WeakReference) OpenAndRemove(Window window)
+        {
+            var editor = new TextEditor { Text = new string('a', 100_000) };
+            EditorCaret.Attach(editor.TextArea);
+            window.Content = editor;
+            editor.TextArea.Focus();
+            using var frame = window.CaptureRenderedFrame();
+            var refs = (new WeakReference(Assert.Single(editor.TextArea.TextView.Layers.OfType<EditorCaret>())),
+                new WeakReference(editor.Document));
+            window.Content = new Button();
+            using var next = window.CaptureRenderedFrame();
+            return refs;
+        }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task NavigationBeforePaintAndColumnTypingSnap(bool column) => HeadlessTests.RunAsync(_ =>
+    {
+        var editor = new TextEditor { Text = "abc\nabc\nabc", Background = FocusTheme.Editor };
+        var area = editor.TextArea;
+        var clock = new ManualClock();
+        EditorCaret.Attach(area, clock);
+        var window = new Window { Content = editor, Width = 640, Height = 400 };
+        window.Show();
+        try
+        {
+            area.Focus();
+            editor.CaretOffset = column ? 9 : 2;
+            if (column)
+                area.Selection = new RectangleSelection(area, new TextViewPosition(1, 2), new TextViewPosition(3, 2));
+            AssertCaretPixels(window, editor);
+            if (!column) editor.CaretOffset = 0;
+            // Deliver navigation and input before another frame can paint the new position.
+            area.RaiseEvent(new TextInputEventArgs { RoutedEvent = InputElement.TextInputEvent, Text = "x" });
+            Assert.Equal(column ? "axbc\naxbc\naxbc" : "xabc\nabc\nabc", editor.Text);
+            AssertCaretPixels(window, editor);
+            if (column)
+            {
+                var layer = Assert.Single(area.TextView.Layers.OfType<EditorCaret>());
+                clock.Ticks += TimeSpan.FromMilliseconds(Field<double>(layer, "_blinkInterval")).Ticks;
+                layer.InvalidateVisual();
+                AssertCaretPixels(window, editor);
+            }
+        }
+        finally { window.Close(); }
+        return Task.CompletedTask;
+    });
 
     private static void AssertCaretPixels(Window window, TextEditor editor, bool visible = true, Rect? position = null)
     {
