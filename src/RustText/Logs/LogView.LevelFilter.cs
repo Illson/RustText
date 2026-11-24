@@ -203,7 +203,7 @@ internal sealed partial class LogView
                     _noFilteredMatchesBefore = cursor.Offset;
                     return;
                 }
-                if (Math.Abs((_filteredLogScrollViewer?.Offset.Y ?? 0) - pending.Text.Offset) > 1) return;
+                if (_filteredLogScrollViewer is not { } view || !AtFilteredScrollEdge(view, pending.Forward)) return;
                 _filterCurrent = CursorAt(page.Rows[0]);
             }
             _filterSnapshotLength = stamp.Length;
@@ -251,6 +251,9 @@ internal sealed partial class LogView
 
     private static FilterCursor CursorAt(FilterRow row) => new(row.StartOffset, row.Level, row.SourceLine, row.RelativeLine);
 
+    private static bool AtFilteredScrollEdge(ScrollViewer view, bool forward) =>
+        forward ? view.Offset.Y >= view.ScrollBarMaximum.Y - 1 : view.Offset.Y <= 1;
+
     private static (FilterPage Page, int TextIndex) PrependFilteredRows(FilterScroll scroll, List<FilterRow> earlier)
     {
         var page = scroll.Page;
@@ -267,9 +270,9 @@ internal sealed partial class LogView
     {
         if (_filterReading is not null || _filteredPage is not { } page || _filteredLogScrollViewer is not { } view) return false;
         var forward = wheel < 0;
+        if (!AtFilteredScrollEdge(view, forward)) return false;
         var start = page.Rows.Count == 0 ? _filterCurrent : CursorAt(page.Rows[0]);
-        if (forward ? _filterNext is null || view.Offset.Y < view.ScrollBarMaximum.Y - 1
-            : view.Offset.Y > 1 || start.Offset <= Math.Max(_hiddenOffset, _noFilteredMatchesBefore)) return false;
+        if (forward ? _filterNext is null : start.Offset <= Math.Max(_hiddenOffset, _noFilteredMatchesBefore)) return false;
         var anchor = GetTextScrollAnchor(_filteredLogText, view, -wheel);
         if (anchor is null && page.Rows.Count > 0) return false;
         var text = anchor ?? new TextScrollAnchor(0, 0, view.Offset.Y, 0, 0);
