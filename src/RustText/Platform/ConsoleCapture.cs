@@ -8,6 +8,7 @@ namespace RustText.Demo.Platform;
 internal sealed class ConsoleCapture : IDisposable
 {
     private const string WorkerArgument = "--read-console-buffer";
+    private const long MaximumCaptureBytes = 256L * 1024 * 1024;
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(10);
     private static readonly Encoding Utf8 = new UTF8Encoding(false);
@@ -72,14 +73,9 @@ internal sealed class ConsoleCapture : IDisposable
             {
                 if (!int.TryParse(header, NumberStyles.None, CultureInfo.InvariantCulture, out var count))
                     throw new IOException(header);
-                for (var index = 0; index < count; index++)
-                {
-                    var row = await output.ReadLineAsync(token).ConfigureAwait(false)
-                        ?? throw new IOException("Поток вывода консоли прервался.");
-                    await writer.WriteLineAsync(row.AsMemory(), token).ConfigureAwait(false);
-                }
-                await writer.FlushAsync(token).ConfigureAwait(false);
+                var completed = await CopyFrameAsync(output, writer, count, MaximumCaptureBytes, token).ConfigureAwait(false);
                 _ready.TrySetResult();
+                if (!completed) return new IOException("Достигнут предел захвата (256 МиБ). Собранный текст доступен для поиска.");
             }
             if (worker is null) throw new IOException("Чтение вывода консоли завершено.");
             await worker.WaitForExitAsync(token).ConfigureAwait(false);
@@ -118,6 +114,27 @@ internal sealed class ConsoleCapture : IDisposable
                 }
             }
         }
+    }
+
+    internal static async Task<bool> CopyFrameAsync(TextReader source, StreamWriter writer, int count, long maximumBytes,
+        CancellationToken token)
+    {
+        var length = writer.BaseStream.Length;
+        var newlineBytes = writer.Encoding.GetByteCount(writer.NewLine);
+        for (var index = 0; index < count; index++)
+        {
+            var row = await source.ReadLineAsync(token).ConfigureAwait(false)
+                ?? throw new IOException("Поток вывода консоли прервался.");
+            length += (long)writer.Encoding.GetByteCount(row) + newlineBytes;
+            if (length > maximumBytes)
+            {
+                await writer.FlushAsync(token).ConfigureAwait(false);
+                return false;
+            }
+            await writer.WriteLineAsync(row.AsMemory(), token).ConfigureAwait(false);
+        }
+        await writer.FlushAsync(token).ConfigureAwait(false);
+        return true;
     }
 
     public void Dispose()

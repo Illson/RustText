@@ -260,10 +260,11 @@ public partial class MainWindow
         var targetStorage = enteringEmpty
             ? _workspace.GetStorage(WorkspaceCatalogStore.DefaultWorkspaceId, EmptyStartupWindowId)
             : _workspace.GetStorage(workspaceId, targetWindowId, _shareDefaultSession);
+        var targetCacheKey = StorageCacheKey(targetStorage);
         var targetState = cachedView is null ? await targetStorage.LoadSessionAsync(_lifetime.Token) : null;
-        if (cachedView is null && targetState is null && targetStorage.HasSessionCheckpoint)
+        if (cachedView is null && targetState is null && (targetStorage.HasSessionCheckpoint || targetStorage.CheckpointReadBlocked))
         {
-            _workspace.UnavailableSessions.Add(StorageCacheKey(targetStorage));
+            _workspace.UnavailableSessions.Add(targetCacheKey);
             throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
         }
         if (cachedView is null && targetState is null && targetWindowId != WorkspaceCatalogStore.PrimaryWindowId)
@@ -283,7 +284,13 @@ public partial class MainWindow
             }
         }
 
-        _workspaceLoadWarning = null;
+        if (targetStorage.CheckpointReadBlocked) _workspace.UnavailableSessions.Add(targetCacheKey);
+        else if (cachedView is null && targetStorage.LoadedLatestCheckpoint
+            && _workspace.UnavailableSessions.Contains(targetCacheKey) && !SessionViews(targetStorage, null).Any())
+            _workspace.UnavailableSessions.Remove(targetCacheKey);
+        _workspaceLoadWarning = targetStorage.CheckpointReadBlocked ? FallbackSessionWarning
+            : _workspace.UnavailableSessions.Contains(targetCacheKey)
+                ? "Сеанс недоступен для записи. Перезапустите приложение после восстановления доступа." : null;
         await SaveWorkspaceSessionAsync(excludeWindow: null);
         if (!enteringEmpty)
         {
@@ -314,6 +321,7 @@ public partial class MainWindow
             else ShowGroups();
             ApplyTextAppearance();
             RefreshHistoryMenus();
+            if (_workspaceLoadWarning is not null) SetStatus(_workspaceLoadWarning);
             return;
         }
 
@@ -323,13 +331,14 @@ public partial class MainWindow
         if (enteringEmpty)
         {
             if (targetState is not null) AddEmptyStartupHistory(targetState);
+            else _emptyHistoryBaseline = [];
             await ShowHomeAsync();
         }
         else if (targetState is not null)
         {
             RestoreDetachedDraftTracking(SessionStorage, _workspaceId, targetState);
-            _closedTabs.AddRange((targetState.ClosedTabs ?? [])
-                .Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)).Take(100));
+            _closedTabs.AddRange((targetState.ClosedTabs ?? []).Where(tab => !IsKnownEmptyUntitledDraft(tab, SessionStorage)));
+            StorageService.TrimClosedBookmarks(_closedTabs);
             MountSessionTabs(targetState, pending: false);
             ApplyTextAppearance();
             if (SelectedIn(_active) is { } selected)
@@ -340,6 +349,7 @@ public partial class MainWindow
             await ShowHomeAsync();
         }
         RefreshHistoryMenus();
+        if (_workspaceLoadWarning is not null) SetStatus(_workspaceLoadWarning);
     }
 
     private Task EnterEmptyStartupAsync() => SwitchWorkspaceAsync(EmptyStartupWindowId);
@@ -385,24 +395,13 @@ public partial class MainWindow
         if (name is null) return;
         if (source.Id == _workspaceId) await SaveWorkspaceSessionAsync(excludeWindow: null);
         var sourceStorage = _workspace.GetStorage(source.Id, _windowId, _shareDefaultSession);
-        var state = await sourceStorage.LoadSessionAsync(_lifetime.Token);
-        if (state is null && _windowId != WorkspaceCatalogStore.PrimaryWindowId)
-        {
-            sourceStorage = _workspace.GetStorage(source.Id, WorkspaceCatalogStore.PrimaryWindowId);
-            state = await sourceStorage.LoadSessionAsync(_lifetime.Token);
-        }
-        if (state is null && sourceStorage.HasSessionCheckpoint)
-            throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
+        var primary = _workspace.GetStorage(source.Id, WorkspaceCatalogStore.PrimaryWindowId);
+        var sessionSource = sourceStorage.HasSessionCheckpoint ? sourceStorage : primary;
         var (copy, catalog) = await _workspace.CatalogStore.CreateWithCatalogAsync(name, GetWorkspaceThemeKey(source.Id), _lifetime.Token,
             symbol: source.Symbol, color: source.Color);
         try
         {
-            if (state is not null)
-            {
-                await CopyWorkspaceSessionAsync(sourceStorage, _workspace.GetStorage(copy.Id, _windowId));
-                if (_windowId != WorkspaceCatalogStore.PrimaryWindowId)
-                    await CopyWorkspaceSessionAsync(sourceStorage, _workspace.GetStorage(copy.Id, WorkspaceCatalogStore.PrimaryWindowId));
-            }
+            await CopyWorkspaceAsync(copy.Id, sessionSource, primary, sourceStorage);
         }
         catch
         {
@@ -422,9 +421,8 @@ public partial class MainWindow
             symbol: current?.Symbol, color: current?.Color);
         try
         {
-            await CopyWorkspaceSessionAsync(SessionStorage, _workspace.GetStorage(created.Id, _windowId));
-            if (_windowId != WorkspaceCatalogStore.PrimaryWindowId)
-                await CopyWorkspaceSessionAsync(SessionStorage, _workspace.GetStorage(created.Id, WorkspaceCatalogStore.PrimaryWindowId));
+            var primary = _startEmpty ? SessionStorage : _workspace.GetStorage(_workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+            await CopyWorkspaceAsync(created.Id, SessionStorage, primary, SessionStorage);
         }
         catch
         {
@@ -451,21 +449,34 @@ public partial class MainWindow
             window.RefreshWorkspaceButton();
     }
 
+    private async Task CopyWorkspaceAsync(string workspaceId, StorageService sessionSource, params StorageService[] archiveSources)
+    {
+        foreach (var windowId in new[] { WorkspaceCatalogStore.PrimaryWindowId, _windowId }.Distinct())
+        {
+            var destination = _workspace.GetStorage(workspaceId, windowId);
+            await CopyWorkspaceSessionAsync(sessionSource, destination);
+            foreach (var source in archiveSources.Distinct())
+                foreach (var entry in await source.DraftArchive.GetEntriesAsync(_lifetime.Token))
+                    await source.DraftArchive.CopyEntryToAsync(entry, destination.DraftArchive, _lifetime.Token);
+        }
+    }
+
     private async Task CopyWorkspaceSessionAsync(StorageService source, StorageService destination)
     {
         if (ReferenceEquals(source, destination)) return;
+        if (_workspace.UnavailableSessions.Contains(StorageCacheKey(source)) && SessionViews(source, null).Any())
+            throw new InvalidDataException("Рабочее пространство недоступно для записи. Перезапустите приложение перед копированием.");
         var state = await source.LoadSessionAsync(_lifetime.Token);
-        if (state is null)
-        {
-            if (source.HasSessionCheckpoint)
-                throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
-            return;
-        }
+        if (source.CheckpointReadBlocked || state is null && source.HasSessionCheckpoint)
+            throw new InvalidDataException("Сохранённое рабочее пространство не удалось прочитать. Его файлы оставлены без изменений.");
+        if (state is null) return;
+
         var readers = new Dictionary<long, Func<TextReader>>();
         foreach (var tab in state.Tabs.Concat(state.ClosedTabs ?? []).Where(item => item.DraftRef is not null))
         {
-            if (source.GetDraftPath(tab) is { } path && File.Exists(path))
-                readers[tab.Id] = () => new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
+            if (source.GetDraftPath(tab) is { } path)
+                readers[tab.Id] = () => new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete),
+                    new System.Text.UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: false);
         }
         await destination.SaveSessionWithDraftReadersAsync(state with { DetachedDrafts = null }, readers, _lifetime.Token);
     }

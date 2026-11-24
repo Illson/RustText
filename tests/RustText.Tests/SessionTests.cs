@@ -65,9 +65,9 @@ public sealed class SessionTests
         var recovered = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
         Assert.Equal("unchanged", await storage.LoadDraftAsync(recovered.Tabs[0]));
         Assert.Equal("first", await storage.LoadDraftAsync(recovered.Tabs[1]));
-        var next = await storage.SaveSessionAsync(recovered, new Dictionary<long, string> { [2] = "third" });
-        Assert.Equal("unchanged", await storage.LoadDraftAsync(next.Tabs[0]));
-        Assert.Equal("third", await storage.LoadDraftAsync(next.Tabs[1]));
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            storage.SaveSessionAsync(recovered, new Dictionary<long, string> { [2] = "third" }));
+        Assert.Equal("second", await storage.LoadDraftAsync(second.Tabs[1]));
     }
 
     [Fact]
@@ -190,7 +190,7 @@ public sealed class SessionTests
     }
 
     [Fact]
-    public async Task SavingWithCorruptLatest_DoesNotReplaceValidPreviousPointer()
+    public async Task SavingWithCorruptLatest_LeavesBothPointersUnchanged()
     {
         using var directory = new TempDirectory();
         var storage = StorageService.OpenForTesting(directory.Path);
@@ -210,12 +210,14 @@ public sealed class SessionTests
 
         var validPrevious = await storage.LoadSessionAsync();
         Assert.NotNull(validPrevious);
-        await storage.SaveSessionAsync(validPrevious, new Dictionary<long, string> { [1] = "third valid" });
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            storage.SaveSessionAsync(validPrevious, new Dictionary<long, string> { [1] = "third valid" }));
 
+        Assert.Equal(latestName, (await File.ReadAllTextAsync(Path.Combine(sessionDirectory, "latest.json"))).Trim());
         Assert.Equal(previousName, (await File.ReadAllTextAsync(Path.Combine(sessionDirectory, "previous.json"))).Trim());
         var restored = await storage.LoadSessionAsync();
         Assert.NotNull(restored);
-        Assert.Equal("third valid", await storage.LoadDraftAsync(restored.Tabs.Single()));
+        Assert.Equal("first valid", await storage.LoadDraftAsync(restored.Tabs.Single()));
         var previousState = await DeserializeCheckpointAsync(Path.Combine(sessionDirectory, previousName));
         var preserved = await storage.LoadDraftAsync(previousState.Tabs.Single());
         Assert.Equal("first valid", preserved);

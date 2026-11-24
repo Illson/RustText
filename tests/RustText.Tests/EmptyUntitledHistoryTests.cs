@@ -11,15 +11,19 @@ public sealed class EmptyUntitledHistoryTests
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
-    [Fact]
-    public Task ClosingAndRestartingDoesNotPromoteEmptyUntitledTabsToHistory() =>
+    [Theory]
+    [InlineData(WorkspaceStartupMode.LastUsed)]
+    [InlineData(WorkspaceStartupMode.Empty)]
+    public Task ClosingAndRestartingDoesNotPromoteEmptyUntitledTabsToHistory(WorkspaceStartupMode startupMode) =>
         HeadlessTests.RunAsync(async profile =>
         {
+            await StorageService.OpenDefault().SaveSettingsAsync(new UserSettings { WorkspaceStartupMode = startupMode });
             MainWindow? window = null;
             MainWindow? restarted = null;
             try
             {
                 window = await OpenWorkspaceAsync();
+                ((Avalonia.Threading.DispatcherTimer)Field(window, "_checkpoint")).Stop();
                 Invoke(window, "NewTab", "");
                 var empty = ActiveTab(window);
                 Assert.Empty(Read<TextEditor>(empty, "Editor").Text);
@@ -32,6 +36,7 @@ public sealed class EmptyUntitledHistoryTests
                 await CallAsync(window, "CloseTabAsync", whitespaceTab);
                 var closed = Assert.Single(ClosedTabs(window));
                 var storage = Assert.IsType<StorageService>(Read(window, "SessionStorage", Private));
+                Assert.False(storage.HasSessionCheckpoint);
                 Assert.Equal(whitespace, await storage.LoadDraftAsync(closed));
 
                 await CloseAsync(window);
@@ -80,7 +85,7 @@ public sealed class EmptyUntitledHistoryTests
         });
 
     [Fact]
-    public Task MoreThanOneHundredFilteredEmptyHistoryEntriesDoNotDisableScratchHistoryCap() =>
+    public Task ScratchHistoryKeepsMoreThanOneHundredNonemptyDrafts() =>
         HeadlessTests.RunAsync(async _ =>
         {
             var window = await OpenWorkspaceAsync();
@@ -99,7 +104,7 @@ public sealed class EmptyUntitledHistoryTests
                     await CallAsync(window, "CloseTabAsync", ActiveTab(window));
                 }
 
-                Assert.Equal(100, ClosedTabs(window).Count);
+                Assert.Equal(101, ClosedTabs(window).Count);
                 Assert.All(ClosedTabs(window), tab => Assert.NotNull(tab.DraftRef));
             }
             finally { if (window.IsVisible) await CloseAsync(window); }
@@ -156,9 +161,9 @@ public sealed class EmptyUntitledHistoryTests
 
                 restarted = await OpenWorkspaceAsync();
                 var history = ClosedTabs(restarted);
-                var onlyDraft = Assert.Single(history, tab => tab.Path is null);
-                Assert.Equal(expectedText, await Assert.IsType<StorageService>(Read(restarted, "SessionStorage", Private))
-                    .LoadDraftAsync(onlyDraft));
+                var storage = Assert.IsType<StorageService>(Read(restarted, "SessionStorage", Private));
+                var texts = await Task.WhenAll(history.Where(tab => tab.Path is null).Select(tab => storage.LoadDraftAsync(tab)));
+                Assert.Equal(new[] { "independent source anchor", expectedText }.Order(), texts.Order());
             }
             finally
             {

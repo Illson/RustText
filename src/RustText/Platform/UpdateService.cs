@@ -34,7 +34,7 @@ public static class UpdateService
     private const int MaximumReleaseHistoryPages = 100;
     private const int MaximumArchiveBytes = 128 * 1024 * 1024;
     private const int MaximumChecksumBytes = 512;
-    private const int MaximumArchiveEntries = 64;
+    private const int MaximumManifestBytes = 8 * 1024;
     private const long MaximumBundleFileBytes = 256L * 1024 * 1024;
     private const long MaximumBundleBytes = 512L * 1024 * 1024;
     private static readonly TimeSpan ParentWaitLimit = TimeSpan.FromMinutes(3);
@@ -63,12 +63,14 @@ public static class UpdateService
         return await CheckLatestAsync(currentVersion, client, cancellationToken).ConfigureAwait(false);
     }
 
-    internal static async Task<UpdateRelease?> CheckLatestAsync(
+    internal static Task<UpdateRelease?> CheckLatestAsync(
         string currentVersion,
         HttpClient client,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        WithDeadlineAsync(client, cancellationToken, token => CheckLatestCoreAsync(currentVersion, client, token));
+
+    private static async Task<UpdateRelease?> CheckLatestCoreAsync(string currentVersion, HttpClient client, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(client);
         var current = ParseVersion(currentVersion, allowTag: false);
         var jsonBytes = await GetLimitedBytesAsync(client, new Uri(ApiUrl), MaximumReleaseJsonBytes, cancellationToken)
             .ConfigureAwait(false);
@@ -128,11 +130,13 @@ public static class UpdateService
     }
 
     /// <summary>Uses a caller-owned HTTP client so release-feed parsing can be tested without network access.</summary>
-    internal static async Task<IReadOnlyList<ReleaseNotes>> GetReleaseHistoryAsync(
+    internal static Task<IReadOnlyList<ReleaseNotes>> GetReleaseHistoryAsync(
         HttpClient client,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        WithDeadlineAsync(client, cancellationToken, token => GetReleaseHistoryCoreAsync(client, token));
+
+    private static async Task<IReadOnlyList<ReleaseNotes>> GetReleaseHistoryCoreAsync(HttpClient client, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(client);
         var releases = new List<ReleaseNotes>();
         for (var page = 1; page <= MaximumReleaseHistoryPages; page++)
         {
@@ -218,15 +222,18 @@ public static class UpdateService
     }
 
     /// <summary>Uses a caller-owned HTTP client; internal so release verification can use an offline fixture handler.</summary>
-    internal static async Task<StagedUpdate> StageAsync(
+    internal static Task<StagedUpdate> StageAsync(
         UpdateRelease release,
         string currentExecutable,
         HttpClient client,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        WithDeadlineAsync(client, cancellationToken, token => StageCoreAsync(release, currentExecutable, client, token));
+
+    private static async Task<StagedUpdate> StageCoreAsync(UpdateRelease release, string currentExecutable, HttpClient client,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(release);
         ArgumentException.ThrowIfNullOrWhiteSpace(currentExecutable);
-        ArgumentNullException.ThrowIfNull(client);
         ValidateRelease(release);
 
         var executablePath = Path.GetFullPath(currentExecutable);
@@ -279,7 +286,8 @@ public static class UpdateService
             var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest, BundleManifestJsonContext.Default.BundleManifest);
             await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "bundle-manifest.json"), manifestBytes, cancellationToken)
                 .ConfigureAwait(false);
-            return new StagedUpdate(release.Version, installDirectory, stagingDirectory, archiveHash);
+            return new StagedUpdate(release.Version, installDirectory, stagingDirectory, archiveHash,
+                Convert.ToHexString(SHA256.HashData(manifestBytes)));
         }
         catch
         {
@@ -302,7 +310,8 @@ public static class UpdateService
         var installDirectory = Path.GetDirectoryName(executablePath)
             ?? throw new InvalidDataException("The installed executable has no parent directory.");
         ValidateStagedUpdate(stagedUpdate, executablePath, installDirectory);
-        VerifyBundleManifest(stagedUpdate.BundleDirectory, stagedUpdate.Version, stagedUpdate.ArchiveSha256);
+        var manifest = ReadManifest(stagedUpdate.StagingDirectory, stagedUpdate.ManifestSha256);
+        VerifyBundleManifest(stagedUpdate.BundleDirectory, manifest);
 
         var helperDirectory = Path.Combine(stagedUpdate.StagingDirectory, "helper");
         Directory.CreateDirectory(helperDirectory);
@@ -337,7 +346,8 @@ public static class UpdateService
                 installDirectory,
                 stagedUpdate.StagingDirectory,
                 parent.Id.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                parentStartTicks.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                parentStartTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                stagedUpdate.ManifestSha256
             }
         }) ?? throw new IOException("Could not start the .NET update helper.");
 
@@ -518,6 +528,20 @@ public static class UpdateService
         return client;
     }
 
+    private static async Task<T> WithDeadlineAsync<T>(HttpClient client, CancellationToken token, Func<CancellationToken, Task<T>> action)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        // HttpClient.Timeout ends at the headers when using ResponseHeadersRead.
+        deadline.CancelAfter(client.Timeout);
+        try { return await action(deadline.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException error) when (!token.IsCancellationRequested
+            && (deadline.IsCancellationRequested || error.InnerException is TimeoutException))
+        {
+            throw new TimeoutException("Истекло время ожидания ответа сервера обновлений.", error);
+        }
+    }
+
     private static async Task<byte[]> GetLimitedBytesAsync(
         HttpClient client,
         Uri uri,
@@ -654,7 +678,7 @@ public static class UpdateService
         await using var archiveStream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read,
             64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
-        if (archive.Entries.Count is not (1 or 4) || archive.Entries.Count > MaximumArchiveEntries)
+        if (archive.Entries.Count is not (1 or 4))
         {
             throw new InvalidDataException("The .NET update archive must contain rusttext.exe, optionally with all three legacy native DLLs.");
         }
@@ -697,7 +721,6 @@ public static class UpdateService
             throw new InvalidDataException("The .NET update archive contains an incomplete legacy bundle.");
         }
 
-        VerifyPeX64(Path.Combine(bundleDirectory, "rusttext.exe"));
         return result.OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
@@ -918,16 +941,9 @@ public static class UpdateService
         }
     }
 
-    private static void VerifyBundleManifest(string bundleDirectory, string version, string archiveSha256)
+    private static void VerifyBundleManifest(string bundleDirectory, BundleManifest manifest)
     {
-        var stageDirectory = Directory.GetParent(bundleDirectory)?.FullName
-            ?? throw new InvalidDataException("The staged bundle has no containing directory.");
-        var manifestPath = Path.Combine(stageDirectory, "bundle-manifest.json");
-        var bytes = File.ReadAllBytes(manifestPath);
-        var manifest = JsonSerializer.Deserialize(bytes, BundleManifestJsonContext.Default.BundleManifest)
-            ?? throw new InvalidDataException("The staged bundle manifest is invalid.");
-        if (manifest.Version != version || !manifest.ArchiveSha256.Equals(archiveSha256, StringComparison.OrdinalIgnoreCase) ||
-            !IsSupportedManifestFileSet(manifest.Files))
+        if (manifest.Files is null || manifest.Files.Any(item => item is null) || !IsSupportedManifestFileSet(manifest.Files))
         {
             throw new InvalidDataException("The staged bundle manifest does not match the release.");
         }
@@ -969,7 +985,7 @@ public static class UpdateService
 
     private static void ApplyFromHelperArguments(string[] args)
     {
-        if (args.Length != 6)
+        if (args.Length != 7)
         {
             throw new InvalidDataException("The .NET update helper arguments are invalid.");
         }
@@ -993,7 +1009,8 @@ public static class UpdateService
         var parentId = int.Parse(args[4], System.Globalization.CultureInfo.InvariantCulture);
         var parentStartTicks = long.Parse(args[5], System.Globalization.CultureInfo.InvariantCulture);
         var targetExecutable = Path.Combine(installDirectory, "rusttext.exe");
-        VerifyBundleManifest(Path.Combine(stageDirectory, "bundle"), ReadBundleVersion(stageDirectory), ReadBundleHash(stageDirectory));
+        var manifest = ReadManifest(stageDirectory, args[6]);
+        VerifyBundleManifest(Path.Combine(stageDirectory, "bundle"), manifest);
 
         using var parent = Process.GetProcessById(parentId);
         if (parent.StartTime.ToUniversalTime().Ticks != parentStartTicks ||
@@ -1016,47 +1033,38 @@ public static class UpdateService
 
         var lockPath = Path.Combine(installDirectory, ".rusttext-dotnet.update.lock");
         using var updateLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        ApplyBundleTransaction(installDirectory, stageDirectory);
+        ApplyBundleTransactionCore(installDirectory, stageDirectory, manifest,
+            StartAndVerifyInstalledApplication,
+            (executable, stage) => StartApplicationWithCleanup(executable, stage).Dispose());
     }
 
-    private static string ReadBundleVersion(string stageDirectory)
+    private static BundleManifest ReadManifest(string stageDirectory, string expectedHash)
     {
-        var manifest = ReadManifest(stageDirectory);
-        return manifest.Version;
-    }
-
-    private static string ReadBundleHash(string stageDirectory)
-    {
-        var manifest = ReadManifest(stageDirectory);
-        return manifest.ArchiveSha256;
-    }
-
-    private static BundleManifest ReadManifest(string stageDirectory)
-    {
-        var bytes = File.ReadAllBytes(Path.Combine(stageDirectory, "bundle-manifest.json"));
+        using var input = File.OpenRead(Path.Combine(stageDirectory, "bundle-manifest.json"));
+        if (input.Length is <= 0 or > MaximumManifestBytes)
+            throw new InvalidDataException("The staged bundle manifest has an invalid size.");
+        var bytes = new byte[(int)input.Length];
+        input.ReadExactly(bytes);
+        if (!Convert.ToHexString(SHA256.HashData(bytes)).Equals(expectedHash, StringComparison.Ordinal))
+            throw new InvalidDataException("The staged bundle manifest changed after download.");
         return JsonSerializer.Deserialize(bytes, BundleManifestJsonContext.Default.BundleManifest)
             ?? throw new InvalidDataException("The staged bundle manifest is invalid.");
     }
 
-    private static void ApplyBundleTransaction(string installDirectory, string stageDirectory)
-    {
-        ApplyBundleTransactionCore(
-            installDirectory,
-            stageDirectory,
-            (executable, stage) => StartAndVerifyInstalledApplication(executable, stage),
-            (executable, stage) => StartApplicationWithCleanup(executable, stage).Dispose());
-    }
-
     internal static void ApplyBundleTransactionForTesting(
-        string installDirectory,
-        string stageDirectory,
+        StagedUpdate staged,
         Action<string, string> verifyStartup,
-        Action<string, string> restartAfterRollback) =>
-        ApplyBundleTransactionCore(installDirectory, stageDirectory, verifyStartup, restartAfterRollback);
+        Action<string, string> restartAfterRollback)
+    {
+        var manifest = ReadManifest(staged.StagingDirectory, staged.ManifestSha256);
+        VerifyBundleManifest(staged.BundleDirectory, manifest);
+        ApplyBundleTransactionCore(staged.InstallDirectory, staged.StagingDirectory, manifest, verifyStartup, restartAfterRollback);
+    }
 
     private static void ApplyBundleTransactionCore(
         string installDirectory,
         string stageDirectory,
+        BundleManifest manifest,
         Action<string, string> verifyStartup,
         Action<string, string> restartAfterRollback)
     {
@@ -1064,7 +1072,6 @@ public static class UpdateService
         ArgumentNullException.ThrowIfNull(restartAfterRollback);
         var bundleDirectory = Path.Combine(stageDirectory, "bundle");
         var backupDirectory = Path.Combine(stageDirectory, "backup");
-        var manifest = ReadManifest(stageDirectory);
         Directory.CreateDirectory(backupDirectory);
         var changed = new List<(string Name, bool HadOriginal)>();
 
@@ -1089,7 +1096,7 @@ public static class UpdateService
                 changed.Add((name, hadOriginal));
             }
 
-            VerifyInstalledBundle(installDirectory, Path.Combine(stageDirectory, "bundle-manifest.json"));
+            VerifyInstalledBundle(installDirectory, manifest);
             verifyStartup(Path.Combine(installDirectory, "rusttext.exe"), stageDirectory);
         }
         catch (Exception updateError)
@@ -1110,10 +1117,8 @@ public static class UpdateService
         }
     }
 
-    private static void VerifyInstalledBundle(string installDirectory, string manifestPath)
+    private static void VerifyInstalledBundle(string installDirectory, BundleManifest manifest)
     {
-        var stageDirectory = Path.GetDirectoryName(manifestPath)!;
-        var manifest = ReadManifest(stageDirectory);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in manifest.Files)
         {

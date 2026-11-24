@@ -373,7 +373,7 @@ internal sealed partial class LogView
         using var publishLock = DocumentFiles.AcquireSaveLock(_path);
         if (ReadFileStamp(_path, source) != edit.Stamp) throw ChangedSincePageRead();
         token.ThrowIfCancellationRequested();
-        File.Replace(temporary, _path, destinationBackupFileName: null);
+        DocumentFiles.PublishReplacement(temporary, _path, backup => ReadFileStamp(backup, source) == edit.Stamp);
         return null;
     }
 

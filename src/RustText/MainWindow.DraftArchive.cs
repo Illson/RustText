@@ -79,6 +79,7 @@ public partial class MainWindow
 
     private async Task ArchiveWorkspaceDraftsAsync(StorageService storage, List<SessionTab> history, bool active)
     {
+        if (_workspace.UnavailableSessions.Contains(StorageCacheKey(storage))) return;
         var settings = Settings.Normalize();
         var token = _lifetime.Token;
         if (await storage.DraftArchive.PruneExpiredAsync(settings.ArchivedDraftRetentionDays, token) > 0 && active)
@@ -180,6 +181,7 @@ public partial class MainWindow
                 })), primary: true);
                 var remove = FocusButton(Button("Удалить", () => Run(async () =>
                 {
+                    if (!await ConfirmForgetDraftAsync(ArchivedDraftDisplayName(entry), dialog)) return;
                     await RemoveArchivedDraftAsync(storage, entry);
                     await RefreshAsync();
                 })));

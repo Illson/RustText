@@ -9,6 +9,27 @@ namespace RustText.Tests;
 public sealed class LogTests
 {
     [Theory]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, "\n")]
+    [InlineData(TextEncodingKind.Utf16BigEndian, "\n")]
+    [InlineData(TextEncodingKind.Utf16LittleEndian, "\r")]
+    [InlineData(TextEncodingKind.Utf16BigEndian, "\r")]
+    public void EndPageFindsTheNewestRowsWithAHalfWrittenUtf16Character(TextEncodingKind encoding, string ending)
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "partial-utf16.log");
+        var text = string.Concat(Enumerable.Range(1, 200).Select(index => $"line-{index:D3}{ending}"));
+        File.WriteAllBytes(path, [.. Encode(text, encoding, true), 0x41]);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, encoding);
+
+        var tail = reader.ReadPage(reader.GetEndOffset());
+        Assert.Equal("line-122", tail.Rows[0].Text);
+        Assert.Equal("line-200", tail.Rows[^2].Text);
+        Assert.Equal("\uFFFD", tail.Rows[^1].Text);
+        Assert.False(tail.HasMore);
+    }
+
+    [Theory]
     [InlineData(TextEncodingKind.Utf8, false)]
     [InlineData(TextEncodingKind.Utf8Bom, true)]
     [InlineData(TextEncodingKind.Utf16LittleEndian, true)]

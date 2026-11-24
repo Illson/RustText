@@ -14,6 +14,87 @@ public sealed class DetachedSessionRecoveryTests
     private static readonly BindingFlags AnyInstance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
     [Fact]
+    public Task ClosingAnIndependentWindowKeepsItsNewDraftsInTheWorkspace() => HeadlessTests.RunAsync(async profile =>
+    {
+        var workspace = await new WorkspaceCatalogStore(profile).CreateAsync("Independent workspace");
+        var primary = await OpenWindowAsync();
+        MainWindow? second = null;
+        try
+        {
+            await CallAsync(primary, "SwitchWorkspaceAsync", workspace.Id);
+            Invoke(primary, "NewTab", "existing note");
+            await CallAsync(primary, "OpenWorkspaceWindowAsync", workspace.Id);
+            second = Assert.IsType<MainWindow>(Invoke(primary, "FindOtherWindow"));
+            await HeadlessTests.WaitForAsync(() => (bool)Field(second, "_restoreFinished"));
+            Invoke(second, "NewTab", "closed in second window");
+            await CallAsync(second, "CloseTabAsync", ActiveTab(second));
+            Invoke(second, "NewTab", "open in second window");
+            await CloseAsync(second);
+
+            var storage = Assert.IsType<StorageService>(Property(primary, "SessionStorage"));
+            var checkpoint = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
+            Assert.Equal("existing note", await storage.LoadDraftAsync(Assert.Single(checkpoint.Tabs)));
+            var texts = await Task.WhenAll(checkpoint.ClosedTabs!.Select(tab => storage.LoadDraftAsync(tab)));
+            Assert.Equal(new[] { "closed in second window", "open in second window" }, texts.Order());
+            Assert.Single((await new WorkspaceCatalogStore(profile).LoadAsync()).WindowAssignments);
+        }
+        finally
+        {
+            if (second is { IsVisible: true }) await CloseAsync(second);
+            if (primary.IsVisible) await CloseAsync(primary);
+        }
+    });
+
+    [Fact]
+    public Task ClosingARestoredWindowRecoversOldDraftsFromItsActiveAndParkedWorkspaces() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var catalog = new WorkspaceCatalogStore(profile);
+            var active = await catalog.CreateAsync("Active independent");
+            var parked = await catalog.CreateAsync("Parked independent");
+            var windowId = "window:" + Guid.NewGuid().ToString("N");
+            await catalog.SetWindowWorkspaceAsync(windowId, active.Id);
+            var activeSource = StorageService.OpenWorkspace(profile, active.Id, windowId);
+            var parkedSource = StorageService.OpenWorkspace(profile, parked.Id, windowId);
+            await activeSource.SaveSessionAsync(new SessionState([new(11, null, TextEncodingKind.Utf8)]),
+                new Dictionary<long, string> { [11] = "unedited draft from older RustText" });
+            var archived = await parkedSource.SaveClosedDraftAsync(new SessionTab(12, null, TextEncodingKind.Utf8), "parked archive");
+            await parkedSource.DraftArchive.ArchiveAsync(archived, parkedSource.GetDraftPath(archived)!);
+
+            var primary = await OpenWindowAsync();
+            var second = Assert.IsType<MainWindow>(Invoke(primary, "FindOtherWindow"));
+            try
+            {
+                await HeadlessTests.WaitForAsync(() => (bool)Field(second, "_restoreFinished"));
+                // The close event must defer if startup validation has not released the session yet.
+                var validating = typeof(MainWindow).GetField("_validatingStartupSession", Private)!;
+                validating.SetValue(second, true);
+                try
+                {
+                    second.Close();
+                    Assert.True(second.IsVisible);
+                    Assert.True((bool)Field(second, "_closeAfterStartupValidation"));
+                }
+                finally { validating.SetValue(second, false); }
+
+                await CloseAsync(second);
+                Assert.DoesNotContain(windowId, (await catalog.LoadAsync()).WindowAssignments.Keys);
+
+                var activeTarget = StorageService.OpenWorkspace(profile, active.Id, WorkspaceCatalogStore.PrimaryWindowId);
+                var checkpoint = Assert.IsType<SessionState>(await activeTarget.LoadSessionAsync());
+                Assert.Equal("unedited draft from older RustText", await activeTarget.LoadDraftAsync(Assert.Single(checkpoint.ClosedTabs!)));
+                var parkedTarget = StorageService.OpenWorkspace(profile, parked.Id, WorkspaceCatalogStore.PrimaryWindowId);
+                var entry = Assert.Single(await parkedTarget.DraftArchive.GetEntriesAsync());
+                Assert.Equal("parked archive", await parkedTarget.LoadDraftAsync(await parkedTarget.DraftArchive.RestoreAsync(entry)));
+            }
+            finally
+            {
+                if (second.IsVisible) await CloseAsync(second);
+                await CloseAsync(primary);
+            }
+        });
+
+    [Fact]
     public Task StoredDraftStaysInItsSourceWhenDraggingAcrossSessionStores() =>
         HeadlessTests.RunAsync(async profile =>
         {
@@ -98,8 +179,8 @@ public sealed class DetachedSessionRecoveryTests
             {
                 var trackedId = (long)Property(ActiveTab(detached), "Id")!;
                 await CallAsync(detached, "CloseTabAsync", ActiveTab(detached));
-                Invoke(source, "NewTab", "untracked private draft");
-                var untrackedId = (long)Property(ActiveTab(source), "Id")!;
+                Invoke(source, "NewTab", "draft from the independent window");
+                var otherId = (long)Property(ActiveTab(source), "Id")!;
                 await CallAsync(source, "CloseTabAsync", ActiveTab(source));
                 var privateHistory = (List<SessionTab>)Field(detached, "_closedTabs");
                 var oldClosedAt = DateTimeOffset.UtcNow.AddHours(-6).ToUnixTimeMilliseconds();
@@ -109,7 +190,7 @@ public sealed class DetachedSessionRecoveryTests
                 Assert.Empty(privateHistory);
                 var privateStorage = Assert.IsType<StorageService>(Property(detached, "SessionStorage"));
                 var entries = await privateStorage.DraftArchive.GetEntriesAsync();
-                Assert.Contains(entries, entry => entry.Tab.Id == untrackedId);
+                Assert.Contains(entries, entry => entry.Tab.Id == otherId);
                 var original = Assert.Single(entries, entry => entry.Tab.Id == trackedId);
 
                 await CloseAsync(detached);
@@ -120,7 +201,10 @@ public sealed class DetachedSessionRecoveryTests
                 Assert.Equal(workspaceId, Field(restarted, "_workspaceId"));
                 Assert.Empty(ClosedTabs(restarted));
                 var storage = Assert.IsType<StorageService>(Property(restarted, "SessionStorage"));
-                var recovered = Assert.Single(await storage.DraftArchive.GetEntriesAsync());
+                var recoveredEntries = await storage.DraftArchive.GetEntriesAsync();
+                Assert.Equal(2, recoveredEntries.Count);
+                Assert.Contains(recoveredEntries, entry => entry.Tab.Id == otherId);
+                var recovered = Assert.Single(recoveredEntries, entry => entry.Tab.Id == trackedId);
                 Assert.Equal(original.ClosedAtMs, recovered.ClosedAtMs);
                 Assert.Equal(original.ArchivedAtMs, recovered.ArchivedAtMs);
                 Assert.Equal(original.Sha256, recovered.Sha256);
@@ -174,8 +258,10 @@ public sealed class DetachedSessionRecoveryTests
                 var assignments = await new WorkspaceCatalogStore(profile).LoadAsync();
                 Assert.DoesNotContain(sourceWindowId, assignments.WindowAssignments.Keys);
 
-                var recovered = Assert.Single(ClosedTabs(restarted));
-                Assert.Equal(draftText + latestEdit, (await RestoreClosedTextAsync(restarted, recovered)).Text);
+                var texts = new List<string>();
+                foreach (var recovered in ClosedTabs(restarted))
+                    texts.Add((await RestoreClosedTextAsync(restarted, recovered)).Text);
+                Assert.Equal(new[] { draftText + latestEdit, otherDraftText }.Order(), texts.Order());
                 Assert.DoesNotContain(WorkspaceWindows(restarted), window => !ReferenceEquals(window, restarted));
             }
             finally
@@ -482,6 +568,61 @@ public sealed class DetachedSessionRecoveryTests
             {
                 if (detached is { IsVisible: true }) await CloseAsync(detached);
                 if (primary is { IsVisible: true }) await CloseAsync(primary);
+                if (restarted is { IsVisible: true }) await CloseAsync(restarted);
+            }
+        });
+
+    [Fact]
+    public Task FailedPrimaryRestoreKeepsBothPrimaryDraftsAndSecondWindowAssignment() =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var catalog = new WorkspaceCatalogStore(profile);
+            var workspace = await catalog.CreateAsync("Primary restore retry");
+            const string secondId = "window:00000000000000000000000000000001";
+            await catalog.SetWindowWorkspaceAsync(WorkspaceCatalogStore.PrimaryWindowId, workspace.Id);
+            await catalog.SetWindowWorkspaceAsync(secondId, workspace.Id);
+            var primaryStore = StorageService.OpenWorkspace(profile, workspace.Id, WorkspaceCatalogStore.PrimaryWindowId);
+            var primarySnapshot = await primaryStore.SaveSessionAsync(
+                new SessionState([new(10, null, TextEncodingKind.Utf8), new(11, null, TextEncodingKind.Utf8)]),
+                new Dictionary<long, string> { [10] = "primary A", [11] = "primary B" });
+            var secondStore = StorageService.OpenWorkspace(profile, workspace.Id, secondId);
+            await secondStore.SaveSessionAsync(new SessionState([new(12, null, TextEncodingKind.Utf8)]),
+                new Dictionary<long, string> { [12] = "second window" });
+            var latest = Path.Combine(primaryStore.RootDirectory, "session", "latest.json");
+            var pointer = await File.ReadAllTextAsync(latest);
+
+            MainWindow? primary = null;
+            MainWindow? second = null;
+            MainWindow? restarted = null;
+            try
+            {
+                using (new FileStream(primaryStore.GetDraftPath(primarySnapshot.Tabs[0])!, FileMode.Open, FileAccess.Read, FileShare.None))
+                    primary = await OpenWindowAsync();
+                Assert.Empty(Tabs(primary));
+                Assert.Contains("без изменений", primary.FindControl<TextBlock>("StatusText")!.Text);
+                second = Assert.IsType<MainWindow>(Invoke(primary, "FindOtherWindow"));
+                await HeadlessTests.WaitForAsync(() => (bool)Field(second, "_restoreFinished"));
+
+                second.Close();
+                await HeadlessTests.WaitForAsync(() => !second.IsVisible ||
+                    second.FindControl<TextBlock>("StatusText")?.Text?.StartsWith("Не удалось записать сессию.", StringComparison.Ordinal) == true);
+                Assert.Equal(pointer, await File.ReadAllTextAsync(latest));
+                Assert.True(second.IsVisible);
+                Assert.Equal(workspace.Id, (await catalog.LoadAsync()).WindowAssignments[secondId]);
+
+                await CloseAsync(primary);
+                await CloseAsync(second);
+                restarted = await OpenWindowAsync();
+                Assert.Null(Invoke(restarted, "FindOtherWindow"));
+                Assert.Equal(2, Tabs(restarted).Count);
+                var checkpoint = Assert.IsType<SessionState>(await primaryStore.LoadSessionAsync());
+                Assert.Equal(new[] { "primary A", "primary B" }, await Task.WhenAll(checkpoint.Tabs.Select(tab => primaryStore.LoadDraftAsync(tab))));
+                Assert.Equal("second window", (await RestoreClosedTextAsync(restarted, Assert.Single(ClosedTabs(restarted)))).Text);
+            }
+            finally
+            {
+                if (primary is { IsVisible: true }) await CloseAsync(primary);
+                if (second is { IsVisible: true }) await CloseAsync(second);
                 if (restarted is { IsVisible: true }) await CloseAsync(restarted);
             }
         });

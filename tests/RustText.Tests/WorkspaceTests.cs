@@ -711,6 +711,41 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task ReloadingAnInitiallyUnreadableWorkspaceAllowsAutosaveAndClose() => HeadlessTests.RunAsync(async profile =>
+    {
+        var workspace = await new WorkspaceCatalogStore(profile).CreateAsync("Retry workspace");
+        var storage = StorageService.OpenWorkspace(profile, workspace.Id, WorkspaceCatalogStore.PrimaryWindowId);
+        var snapshot = await storage.SaveSessionAsync(new([new(10, null, TextEncodingKind.Utf8)]),
+            new Dictionary<long, string> { [10] = "old note" });
+        var window = await OpenWorkspaceAsync();
+        MainWindow? reopened = null;
+        try
+        {
+            using (new FileStream(storage.GetDraftPath(snapshot.Tabs[0])!, FileMode.Open, FileAccess.Read, FileShare.None))
+                await Assert.ThrowsAsync<InvalidDataException>(() => CallAsync(window, "SwitchWorkspaceAsync", workspace.Id));
+            Assert.Equal(WorkspaceCatalogStore.DefaultWorkspaceId, Field(window, "_workspaceId"));
+
+            await CallAsync(window, "SwitchWorkspaceAsync", workspace.Id);
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            Assert.Equal("old note", editor.Text);
+            editor.Text = "autosaved note";
+            await CallAsync(window, "SaveSessionAsync");
+            var saved = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
+            Assert.Equal("autosaved note", await storage.LoadDraftAsync(Assert.Single(saved.Tabs)));
+
+            editor.Text = "note saved on close";
+            await CloseAsync(window);
+            reopened = await OpenWorkspaceAsync();
+            Assert.Equal("note saved on close", Read<TextEditor>(ActiveTab(reopened), "Editor").Text);
+        }
+        finally
+        {
+            if (window.IsVisible) await CloseAsync(window);
+            if (reopened is { IsVisible: true }) await CloseAsync(reopened);
+        }
+    });
+
+    [Fact]
     public Task UpdateNoticeKeepsEditorActiveAndOpensReleaseNotesOnDemand() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "editor.txt");

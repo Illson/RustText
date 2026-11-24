@@ -24,7 +24,6 @@ namespace RustText.Demo;
 public partial class MainWindow
 {
     private const long LargeFilePromptBytes = 100L * 1024 * 1024;
-    private const int MaxEditorCharacters = 8 * 1024 * 1024;
     private const int MaxEditorLineLength = 64 * 1024;
     private static readonly FilePickerFileType TextFiles = new("Текст и логи") { Patterns = ["*.txt", "*.log", "*.json", "*.jsonl", "*.ndjson", "*.xml"] };
     private static readonly FilePickerFileType OpenableFiles = new("Текст, логи и зашифрованные файлы")
@@ -229,8 +228,6 @@ public partial class MainWindow
                 await LoadFileAsync(tab, encoding);
                 onEditorReady?.Invoke(tab);
             }
-
-            await RecordRecentAsync(tab);
         }
         catch
         {
@@ -242,6 +239,7 @@ public partial class MainWindow
             tab.PendingFileOpenMode = null;
             tab.Loading = false;
         }
+        if (await RecordRecentAsync(tab) is { } warning && !_closed) SetStatus(warning);
     }
 
     private enum FileOpenMode { Editor, PagedEditor, Log }
@@ -350,7 +348,7 @@ public partial class MainWindow
         editor.TextArea.TextView.BackgroundRenderers.Add(tab.JsonErrorMarker);
         var undoStack = document.UndoStack;
         var multiCaret = new MultiCaretEditing(editor.TextArea,
-            edits => edits.Sum(edit => (long)edit.Text.Length - edit.Range.Length) <= MaxEditorCharacters, SetStatus);
+            edits => edits.Sum(edit => (long)edit.Text.Length - edit.Range.Length) <= TextOperations.MaximumEditorCharacters, SetStatus);
         tab.MultiCaret = multiCaret;
 
 
@@ -586,7 +584,7 @@ public partial class MainWindow
 
     private static bool IsOversizedEditorText(string text)
     {
-        if (text.Length > MaxEditorCharacters)
+        if (text.Length > TextOperations.MaximumEditorCharacters)
         {
             return true;
         }
@@ -778,14 +776,22 @@ public partial class MainWindow
     private void ReplaceEditorFromDisk(WorkTab tab, TextEditor editor, LoadedDocument loaded, string? diskStatus = null,
         bool preserveEditorChanges = false)
     {
-        if (loaded.Encoding != tab.Encoding && TryShareFileEditor(tab, loaded.Encoding)) return;
-        var views = loaded.Encoding == tab.Encoding ? DocumentViews(tab) : [(this, tab)];
-        var snapshot = new TextDocument(loaded.Text);
         if (preserveEditorChanges)
         {
             var draft = AddExternalDraft(tab, editor.Document);
             RestoreEditorView(draft, CaptureTab(tab));
         }
+        if (loaded.Encoding != tab.Encoding && TryShareFileEditor(tab, loaded.Encoding))
+        {
+            if (diskStatus is not null)
+            {
+                tab.DiskStatus = diskStatus;
+                if (ReferenceEquals(tab, ActiveTab)) UpdateStatus(tab);
+            }
+            return;
+        }
+        var views = loaded.Encoding == tab.Encoding ? DocumentViews(tab) : [(this, tab)];
+        var snapshot = new TextDocument(loaded.Text);
         foreach (var (owner, viewTab) in views)
         {
             var view = owner.CaptureTab(viewTab);
@@ -898,12 +904,12 @@ public partial class MainWindow
             owner.UpdateTab(savedTab);
         }
         if (textIsCurrent) editor.Document.UndoStack.MarkAsOriginalFile();
-        await RecordRecentAsync(tab);
+        var recentWarning = await RecordRecentAsync(tab);
         var postSaveVersionWarning = await CaptureVersionAsync(path, format.Encoding, stamp);
         var versionWarning = preSaveVersionWarning ?? postSaveVersionWarning;
-        SetStatus(versionWarning is null
-            ? $"Сохранено · {path}"
-            : $"Сохранено · {path}. Версию не удалось записать: {versionWarning}");
+        SetStatus($"Сохранено · {path}"
+            + (versionWarning is null ? "" : $". Версию не удалось записать: {versionWarning}")
+            + (recentWarning is null ? "" : $". {recentWarning}"));
     }
 
     private async Task<bool> ResolvePendingPageAsync(WorkTab tab)
@@ -1087,7 +1093,7 @@ public partial class MainWindow
             }
 
             await RememberClosedAsync(tab);
-            await RecordRecentAsync(tab);
+            var recentWarning = await RecordRecentAsync(tab);
 
             var tabs = tab.Group.Tabs;
             if (ReferenceEquals(tabs.SelectedItem, tab.Item) && tabs.Items.Count > 1)
@@ -1101,6 +1107,7 @@ public partial class MainWindow
             {
                 await ShowHomeAsync();
             }
+            if (recentWarning is not null) SetStatus(recentWarning);
         }
         finally
         {

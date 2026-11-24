@@ -18,7 +18,12 @@ public partial class MainWindow
         WorkspaceHost.Background = FocusTheme.Editor;
         SetCaption(null);
         _workspace.Catalog ??= await _workspace.CatalogStore.LoadAsync(_lifetime.Token);
-        _recent = await _storage.GetRecentFilesAsync(_lifetime.Token);
+        string? recentWarning = null;
+        try { _recent = await _storage.GetRecentFilesAsync(_lifetime.Token); }
+        catch (Exception error) when (IsUserError(error))
+        {
+            recentWarning = $"Не удалось прочитать список недавних файлов. {error.Message}";
+        }
         if (!_home || _closed) return;
 
         var search = new TextBox { PlaceholderText = "Поиск по имени или пути" };
@@ -66,7 +71,7 @@ public partial class MainWindow
                 label.Text = DescribeWork(lines, worked).TrimStart(' ', '·');
         };
         Rebuild();
-        SetStatus(_workspaceLoadWarning ?? "История файлов");
+        SetStatus(_workspaceLoadWarning ?? recentWarning ?? "История файлов");
         FormatText.Text = "";
 
         void Rebuild()
@@ -278,7 +283,7 @@ public partial class MainWindow
         finally { _workspace.ClosedTabOperations.Remove(saved.Id); }
     }
 
-    private Task<bool> ConfirmForgetDraftAsync(string name)
+    private Task<bool> ConfirmForgetDraftAsync(string name, Window? owner = null)
     {
         var body = DialogPanel(new TextBlock { Text = $"Сохранённый текст «{name}» будет удалён.", TextWrapping = TextWrapping.Wrap });
         var dialog = Dialog("Удалить черновик?", body);
@@ -287,7 +292,7 @@ public partial class MainWindow
         var delete = Button("Удалить", () => dialog.Close(true));
         delete.Classes.Add("focus-danger");
         body.Children.Add(Row(cancel, delete));
-        return dialog.ShowDialog<bool>(this);
+        return dialog.ShowDialog<bool>(owner ?? this);
     }
 
     private enum HistoryKind { Recent, Closed, Drafts }

@@ -10,6 +10,33 @@ namespace RustText.Tests;
 
 public sealed class TextOperationTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void ReplaceAllRejectsOutputThatExceedsTheEditorLimit(bool regex, bool mixedEndings)
+    {
+        var input = new string('x', 4096);
+        var matcher = new TextMatcher(new("x", regex, true, false));
+        var replacement = regex ? "$_" : new string('y', 4096);
+        Assert.Throws<InvalidDataException>(() => TextOperations.ReplaceAll(input, matcher, replacement, regex,
+            originalEndings: mixedEndings ? System.Collections.Immutable.ImmutableList<LineEndingKind>.Empty : null));
+    }
+
+    [Theory]
+    [InlineData("(x+)", "$1")]
+    [InlineData("(?<a\u200Cb>x+)", "${a\u200Cb}")]
+    public void RegexExpansionIsCheckedBeforeMaterializingOneLargeMatch(string pattern, string substitution)
+    {
+        var input = new string('x', 4096);
+        var matcher = new TextMatcher(new(pattern, true, true, false));
+        Assert.Equal(input, matcher.Expression!.Match(input).Result(substitution));
+        var replacement = string.Concat(Enumerable.Repeat(substitution, 4096));
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Throws<InvalidDataException>(() => TextOperations.ReplaceAll(input, matcher, replacement, true));
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 16 * 1024 * 1024);
+    }
+
     [Fact]
     public void OrdinalEditorMatchesAreNonoverlappingAndWrapFromTheSameOffsets()
     {

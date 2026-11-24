@@ -19,6 +19,7 @@ internal sealed class StorageService
     private readonly SemaphoreSlim _recentGate = new(1, 1);
     private readonly Dictionary<string, (long Length, long LastWriteTicks)> _verifiedBackupFiles = new(StringComparer.OrdinalIgnoreCase);
     private SessionState? _cachedSession;
+    private SessionState? _blockedCheckpointFallback;
     private bool _hasCachedSession;
     private bool _cachedSessionWasLatest;
     private string? _cachedLatestPointer;
@@ -58,25 +59,31 @@ internal sealed class StorageService
     private DraftArchiveService? _draftArchive;
     public DraftArchiveService DraftArchive => _draftArchive ??= new(_root);
     public IReadOnlyList<DraftArchiveEntry> ArchivedHistory => _draftArchive?.HistoryEntries ?? [];
-    internal static StorageService OpenWorkspace(string profileBaseDirectory, string workspaceId, string windowId)
+    internal static StorageService OpenWorkspace(string profileBaseDirectory, string workspaceId, string windowId) =>
+        workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId && windowId == WorkspaceCatalogStore.PrimaryWindowId
+            ? new(profileBaseDirectory, hasProfileOverride: false)
+            : new(profileBaseDirectory, hasProfileOverride: true, WorkspaceRootDirectory(profileBaseDirectory, workspaceId, windowId));
+
+    internal static string WorkspaceRootDirectory(string profileBaseDirectory, string workspaceId, string windowId)
     {
-        var catalog = new WorkspaceCatalogStore(profileBaseDirectory);
         if (workspaceId == WorkspaceCatalogStore.DefaultWorkspaceId && windowId == WorkspaceCatalogStore.PrimaryWindowId)
-            return new StorageService(profileBaseDirectory, hasProfileOverride: false);
+            return Path.Combine(profileBaseDirectory, "dotnet-demo");
+        var catalog = new WorkspaceCatalogStore(profileBaseDirectory);
         var workspaceDirectory = catalog.GetWorkspaceDirectory(workspaceId);
         var windowDirectory = windowId == WorkspaceCatalogStore.PrimaryWindowId ? "primary"
             : windowId.StartsWith("window:", StringComparison.Ordinal)
                 && Guid.TryParseExact(windowId.AsSpan("window:".Length), "N", out var windowGuid)
                 ? windowGuid.ToString("N")
                 : throw new InvalidDataException("Идентификатор окна некорректен.");
-        return new StorageService(profileBaseDirectory, hasProfileOverride: true,
-            Path.Combine(workspaceDirectory, "windows", windowDirectory, "dotnet-demo"));
+        return Path.Combine(workspaceDirectory, "windows", windowDirectory, "dotnet-demo");
     }
 
     public string RootDirectory => _root;
     internal string ProfileBaseDirectory => _profileBaseDirectory;
     internal bool HasSessionCheckpoint => File.Exists(Path.Combine(_checkpoints, "latest.json"))
         || File.Exists(Path.Combine(_checkpoints, "previous.json"));
+    internal bool CheckpointReadBlocked { get; private set; }
+    internal bool LoadedLatestCheckpoint => _cachedSessionWasLatest;
     public static string GetProfileBaseDirectory()
     {
         var overridePath = Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR");
@@ -90,46 +97,63 @@ internal sealed class StorageService
         return Path.Combine(local, "RustText");
     }
 
-    private void CacheSession(SessionState? state, bool isLatest)
+    private void CacheSession(SessionState? state, bool isLatest, bool readBlocked = false)
     {
         _cachedSession = state;
-        _hasCachedSession = true;
+        CheckpointReadBlocked = readBlocked;
+        _hasCachedSession = false;
         _cachedSessionWasLatest = isLatest;
-        var latest = Path.Combine(_checkpoints, "latest.json");
-        var previous = Path.Combine(_checkpoints, "previous.json");
-        _cachedLatestPointer = File.Exists(latest) ? File.ReadAllText(latest).Trim() : null;
-        _cachedPreviousPointer = File.Exists(previous) ? File.ReadAllText(previous).Trim() : null;
-        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var pointer in new[] { _cachedLatestPointer, _cachedPreviousPointer })
+        if (readBlocked)
         {
-            if (pointer is null || Path.GetFileName(pointer) != pointer || !pointer.StartsWith("checkpoint-", StringComparison.Ordinal)) continue;
-            files.Add(Path.Combine(_checkpoints, pointer, "manifest.json"));
+            _blockedCheckpointFallback ??= state;
+            return;
         }
-        if (state is not null)
+        // An unreadable cache dependency must not discard an already validated snapshot.
+        try
         {
-            foreach (var tab in (state.Tabs ?? []).Concat(state.ClosedTabs ?? []))
+            _cachedLatestPointer = ReadCheckpointPointer("latest.json");
+            _cachedPreviousPointer = ReadCheckpointPointer("previous.json");
+            var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pointer in new[] { _cachedLatestPointer, _cachedPreviousPointer })
+            {
+                if (pointer is null || Path.GetFileName(pointer) != pointer || !pointer.StartsWith("checkpoint-", StringComparison.Ordinal)) continue;
+                files.Add(Path.Combine(_checkpoints, pointer, "manifest.json"));
+            }
+            foreach (var tab in (state?.Tabs ?? []).Concat(state?.ClosedTabs ?? []))
             {
                 if (tab.DraftRef is null) continue;
-                try { files.Add(ResolveAnyDraftReference(tab.DraftRef)); }
-                catch (Exception error) when (IsInvalidCheckpointException(error)) { }
+                files.Add(ResolveAnyDraftReference(tab.DraftRef));
             }
+            _cachedFiles = files.ToDictionary(path => path, GetFileSignature, StringComparer.OrdinalIgnoreCase);
+            _hasCachedSession = true;
         }
-        _cachedFiles = files.ToDictionary(path => path, GetFileSignature, StringComparer.OrdinalIgnoreCase);
+        catch (Exception error) when (IsInvalidCheckpointException(error)) { }
     }
 
     internal bool HasCommittedDraft(long id, string sha256) =>
         _cachedSessionWasLatest && _cachedSession?.Tabs.Any(tab => tab.Id == id && tab.DraftRef is not null
             && string.Equals(tab.DraftSha256, sha256, StringComparison.OrdinalIgnoreCase)) == true && CachedFilesAreUnchanged();
 
+    internal bool HasFallbackDraft(long id, string? reference) =>
+        _blockedCheckpointFallback is { } state && state.Tabs.Concat(state.ClosedTabs ?? [])
+            .Any(tab => tab.Id == id && tab.DraftRef is not null && (reference is null || tab.DraftRef == reference));
+
     private bool CachedFilesAreUnchanged()
     {
-        var latestPath = Path.Combine(_checkpoints, "latest.json");
-        var previousPath = Path.Combine(_checkpoints, "previous.json");
-        var latest = File.Exists(latestPath) ? File.ReadAllText(latestPath).Trim() : null;
-        var previous = File.Exists(previousPath) ? File.ReadAllText(previousPath).Trim() : null;
-        return string.Equals(latest, _cachedLatestPointer, StringComparison.Ordinal)
-            && string.Equals(previous, _cachedPreviousPointer, StringComparison.Ordinal)
-            && _cachedFiles.All(entry => GetFileSignature(entry.Key) == entry.Value);
+        if (!_hasCachedSession) return false;
+        try
+        {
+            return string.Equals(ReadCheckpointPointer("latest.json"), _cachedLatestPointer, StringComparison.Ordinal)
+                && string.Equals(ReadCheckpointPointer("previous.json"), _cachedPreviousPointer, StringComparison.Ordinal)
+                && _cachedFiles.All(entry => GetFileSignature(entry.Key) == entry.Value);
+        }
+        catch (Exception error) when (IsInvalidCheckpointException(error)) { return false; }
+    }
+
+    private string? ReadCheckpointPointer(string name)
+    {
+        var path = Path.Combine(_checkpoints, name);
+        return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
     }
 
     private static (long Length, long LastWriteTicks) GetFileSignature(string path)
@@ -143,21 +167,56 @@ internal sealed class StorageService
     {
         var current = Path.Combine(_checkpoints, "latest.json");
         var backup = Path.Combine(_checkpoints, "previous.json");
+        var readBlocked = false;
+        SessionState? rejectedLatest = null;
         foreach (var (path, isLatest) in new[] { (current, true), (backup, false) })
         {
-            if (await ReadCheckpointAsync(path, cancellationToken).ConfigureAwait(false) is { } state)
+            SessionState? verified;
+            try
             {
+                if (await ReadCheckpointAsync(path, cancellationToken).ConfigureAwait(false) is not { } state)
+                {
+                    if (isLatest && File.Exists(current)) readBlocked = true;
+                    continue;
+                }
                 cancellationToken.ThrowIfCancellationRequested();
                 if (showPendingTabs is not null) await showPendingTabs(state).ConfigureAwait(false);
-                var verified = await ValidateSessionDraftsAsync(state, allowBackup: !isLatest, cancellationToken).ConfigureAwait(false);
-                if (verified is null) continue;
-                CacheSession(verified, isLatest);
-                return verified;
+                verified = await ValidateSessionDraftsAsync(state, allowBackup: !isLatest, cancellationToken).ConfigureAwait(false);
+                if (isLatest && verified is null)
+                {
+                    readBlocked = true;
+                    rejectedLatest = state;
+                }
             }
+            catch (Exception error) when (IsCheckpointReadFailure(error))
+            {
+                readBlocked = true;
+                continue;
+            }
+            if (verified is null) continue;
+            if (rejectedLatest is not null)
+                verified = await RecoverOmittedDraftsAsync(verified, rejectedLatest, cancellationToken).ConfigureAwait(false);
+            CacheSession(verified, isLatest, readBlocked);
+            return verified;
         }
-        var legacy = await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
-        CacheSession(legacy, isLatest: false);
+        var legacy = readBlocked || HasSessionCheckpoint ? null : await LoadLegacySessionAsync(cancellationToken).ConfigureAwait(false);
+        CacheSession(legacy, isLatest: false, readBlocked);
         return legacy;
+    }
+
+    private async Task<SessionState> RecoverOmittedDraftsAsync(SessionState fallback, SessionState rejected, CancellationToken token)
+    {
+        var ids = fallback.Tabs.Concat(fallback.ClosedTabs ?? []).Select(tab => tab.Id).ToHashSet();
+        var closed = new List<SessionTab>(fallback.ClosedTabs ?? []);
+        foreach (var tab in rejected.Tabs.Concat(rejected.ClosedTabs ?? []))
+        {
+            token.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(tab.DraftRef) || ids.Contains(tab.Id)
+                || !await IsValidDraftAsync(tab, token).ConfigureAwait(false)) continue;
+            ids.Add(tab.Id);
+            closed.Add(tab);
+        }
+        return fallback with { ClosedTabs = closed };
     }
 
     public async Task<SessionState> SaveSessionAsync(SessionState state, IReadOnlyDictionary<long, string>? drafts = null, CancellationToken cancellationToken = default)
@@ -177,9 +236,14 @@ internal sealed class StorageService
         // Startup and explicit loads always validate every referenced draft. Within this process,
         // successful checkpoints are immutable and already validated, so a benign save can reuse
         // the validated manifest without reading every large draft again.
-        var fallbackState = _hasCachedSession && CachedFilesAreUnchanged()
+        // The rejected checkpoint may still reference good drafts that are absent from the fallback.
+        var fallbackState = CheckpointReadBlocked
+            || (_cachedSession is not null || !HasSessionCheckpoint) && CachedFilesAreUnchanged()
             ? _cachedSession
             : await LoadSessionAsync(cancellationToken).ConfigureAwait(false);
+        if (CheckpointReadBlocked || fallbackState is null && HasSessionCheckpoint)
+            throw new InvalidDataException("Сохранённый сеанс не удалось проверить. Его файлы оставлены без изменений.");
+
         var fallbackDrafts = (fallbackState?.Tabs ?? [])
             .Concat(fallbackState?.ClosedTabs ?? [])
             .Where(tab => tab.DraftRef is not null)
@@ -221,7 +285,9 @@ internal sealed class StorageService
                 tabs.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
                     : await PreserveDraftReferenceAsync(tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var closed = new List<SessionTab>();
-            foreach (var tab in (state.ClosedTabs ?? []).Take(preserveAllClosedTabs ? int.MaxValue : MaxClosedTabs))
+            var closedTabs = (state.ClosedTabs ?? []).ToList();
+            if (!preserveAllClosedTabs) TrimClosedBookmarks(closedTabs, drafts);
+            foreach (var tab in closedTabs)
                 closed.Add(draftRefs.TryGetValue(tab.Id, out var draft) ? tab with { DraftRef = draft.Reference, DraftSha256 = draft.Hash }
                     : await PreserveDraftReferenceAsync(tab, fallbackDrafts.GetValueOrDefault(tab.Id), cancellationToken).ConfigureAwait(false));
             var snapshot = state with { Tabs = tabs, ClosedTabs = closed };
@@ -271,6 +337,12 @@ internal sealed class StorageService
             if (!committed) try { Directory.Delete(checkpoint, recursive: true); } catch { }
             throw;
         }
+    }
+
+    internal static int TrimClosedBookmarks(List<SessionTab> tabs, IReadOnlyDictionary<long, Func<TextReader>>? drafts = null)
+    {
+        var remaining = MaxClosedTabs;
+        return tabs.RemoveAll(tab => tab.DraftRef is null && drafts?.ContainsKey(tab.Id) != true && remaining-- <= 0);
     }
 
     public async Task<SessionTab> ResolveCurrentDraftAsync(SessionTab tab, CancellationToken cancellationToken = default)
@@ -393,7 +465,10 @@ internal sealed class StorageService
             return await ReadLegacyRecentAsync(legacyPath, cancellationToken).ConfigureAwait(false);
         }
         await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-        return await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.ListRecentFileEntry, cancellationToken).ConfigureAwait(false) ?? [];
+        var entries = await JsonSerializer.DeserializeAsync(stream, StorageJsonContext.Default.ListRecentFileEntry, cancellationToken).ConfigureAwait(false);
+        if (entries?.Any(entry => string.IsNullOrWhiteSpace(entry?.Path)) == true)
+            throw new InvalidDataException("В списке недавних файлов есть запись без пути.");
+        return entries ?? [];
     }
 
     public async Task AddRecentAsync(RecentFileEntry entry, CancellationToken cancellationToken = default)
@@ -477,7 +552,8 @@ internal sealed class StorageService
         foreach (var tab in state.Tabs.Concat(state.ClosedTabs ?? []))
         {
             token.ThrowIfCancellationRequested();
-            if (string.IsNullOrWhiteSpace(tab.DraftRef) || await IsValidDraftAsync(tab, token).ConfigureAwait(false)) continue;
+            if (string.IsNullOrWhiteSpace(tab.DraftRef)
+                || await IsValidDraftAsync(tab, token, propagateReadFailure: !allowBackup).ConfigureAwait(false)) continue;
             if (!allowBackup || !HasPrimaryDraft(tab)) return null;
             var backup = tab with { DraftRef = tab.DraftRef + ".bak" };
             if (!await IsValidDraftAsync(backup, token).ConfigureAwait(false)) return null;
@@ -493,7 +569,7 @@ internal sealed class StorageService
         && tab.DraftRef is { } reference && reference.StartsWith("standalone/", StringComparison.Ordinal)
         && reference.EndsWith(".txt", StringComparison.Ordinal);
 
-    private async Task<bool> IsValidDraftAsync(SessionTab tab, CancellationToken token)
+    private async Task<bool> IsValidDraftAsync(SessionTab tab, CancellationToken token, bool propagateReadFailure = false)
     {
         try
         {
@@ -505,7 +581,8 @@ internal sealed class StorageService
             var hash = await SHA256.HashDataAsync(stream, token).ConfigureAwait(false);
             return Convert.ToHexString(hash).Equals(tab.DraftSha256, StringComparison.OrdinalIgnoreCase);
         }
-        catch (Exception error) when (IsInvalidCheckpointException(error)) { return false; }
+        catch (Exception error) when (IsInvalidCheckpointException(error)
+            && !(propagateReadFailure && IsCheckpointReadFailure(error))) { return false; }
     }
 
     private async Task EnsureBackupDraftAsync(SessionTab tab, CancellationToken token)
@@ -548,7 +625,7 @@ internal sealed class StorageService
             var manifest = await FindCheckpointManifestAsync(pointerPath, cancellationToken).ConfigureAwait(false);
             return manifest is null ? null : await ReadSessionManifestAsync(manifest, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception error) when (IsInvalidCheckpointException(error))
+        catch (Exception error) when (IsInvalidCheckpointException(error) && !IsCheckpointReadFailure(error))
         {
             return null;
         }
@@ -595,6 +672,8 @@ internal sealed class StorageService
         CancellationToken token)
     {
         using var writerLock = AcquireSessionLock();
+        if (CheckpointReadBlocked)
+            throw new InvalidDataException("Не удалось проверить сеанс. История оставлена без изменений.");
         var latest = Path.Combine(_checkpoints, "latest.json");
         var previous = Path.Combine(_checkpoints, "previous.json");
         _hasCachedSession = _cachedSessionWasLatest = false;
@@ -641,6 +720,10 @@ internal sealed class StorageService
     private static bool IsInvalidCheckpointException(Exception error) =>
         error is IOException or InvalidDataException or JsonException or InvalidOperationException or FormatException or ArgumentException
             or UnauthorizedAccessException or System.Security.SecurityException or NotSupportedException;
+
+    private static bool IsCheckpointReadFailure(Exception error) =>
+        error is (IOException and not (FileNotFoundException or DirectoryNotFoundException))
+            or UnauthorizedAccessException or System.Security.SecurityException;
 
     private static void EnsureNoReparsePoints(string path, string root)
     {

@@ -304,6 +304,19 @@ public sealed class UpdaterTests
     }
 
     [Fact]
+    public async Task ReleaseCheckTimesOutWhileReadingTheResponseBody()
+    {
+        using var client = new HttpClient(new FixtureHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new StalledResponseStream())
+        })) { Timeout = TimeSpan.FromSeconds(1) };
+
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            UpdateService.CheckLatestAsync("1.0.0", client).WaitAsync(guard.Token));
+    }
+
+    [Fact]
     public async Task SingleExeBundleStagesAndUpdatesWithoutDeletingLegacySidecars()
     {
         using var directory = new TempDirectory();
@@ -325,7 +338,7 @@ public sealed class UpdaterTests
             }
 
             var started = false;
-            UpdateService.ApplyBundleTransactionForTesting(directory.Path, staged.Update.StagingDirectory,
+            UpdateService.ApplyBundleTransactionForTesting(staged.Update,
                 (exe, _) =>
                 {
                     Assert.Equal(updated, File.ReadAllBytes(exe));
@@ -355,7 +368,7 @@ public sealed class UpdaterTests
                     .OrderBy(name => name, StringComparer.Ordinal));
 
             var verified = false;
-            UpdateService.ApplyBundleTransactionForTesting(directory.Path, staged.Update.StagingDirectory,
+            UpdateService.ApplyBundleTransactionForTesting(staged.Update,
                 (exe, _) =>
                 {
                     Assert.Equal(updated, File.ReadAllBytes(exe));
@@ -371,6 +384,21 @@ public sealed class UpdaterTests
     }
 
     [Fact]
+    public async Task ChangedStagingManifestIsRejectedBeforeTheInstallIsTouched()
+    {
+        using var directory = new TempDirectory();
+        var original = GetCurrentPeImage();
+        var staged = await StagePackageAsync(directory.Path, original, MutateUnusedPayloadByte(original), includeLegacyFiles: false);
+        await using var update = staged.Update;
+        await File.AppendAllTextAsync(Path.Combine(update.StagingDirectory, "bundle-manifest.json"), "\n");
+
+        var error = Assert.Throws<InvalidDataException>(() => UpdateService.ApplyBundleTransactionForTesting(update,
+            (_, _) => Assert.Fail("Startup must not run."), (_, _) => Assert.Fail("Rollback must not run.")));
+        Assert.Contains("changed after download", error.Message);
+        Assert.Equal(original, await File.ReadAllBytesAsync(Path.Combine(directory.Path, "rusttext.exe")));
+    }
+
+    [Fact]
     public async Task FailedStartupRestoresPreviousExeAndInvokesRollbackRestart()
     {
         using var directory = new TempDirectory();
@@ -381,8 +409,7 @@ public sealed class UpdaterTests
         {
             var restarted = false;
             var exception = Assert.Throws<IOException>(() => UpdateService.ApplyBundleTransactionForTesting(
-                directory.Path,
-                staged.Update.StagingDirectory,
+                staged.Update,
                 (_, _) => throw new IOException("simulated startup failure"),
                 (exe, _) =>
                 {
@@ -456,6 +483,17 @@ public sealed class UpdaterTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(responseFactory(request.RequestUri ?? throw new InvalidOperationException("Missing request URI.")));
+        }
+    }
+
+    private sealed class StalledResponseStream : MemoryStream
+    {
+        public override bool CanSeek => false;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
         }
     }
 }

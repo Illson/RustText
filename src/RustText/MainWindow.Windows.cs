@@ -10,7 +10,6 @@ public partial class MainWindow
 {
     private readonly WorkspaceSession _workspace;
     private readonly bool _restoreWorkspace;
-    private bool _isDetachedWindow;
     private bool _workspaceSwitchPending;
     private int _closedTabRestoreOperations;
 
@@ -192,7 +191,6 @@ public partial class MainWindow
         var window = new MainWindow([], _workspace, workspaceId, windowId,
             shareDefaultSession: sharedStorage is null, restoreWorkspace: false)
         {
-            _isDetachedWindow = true,
             _fontSize = _fontSize,
             _wordWrap = _wordWrap,
             _recent = _recent
@@ -290,10 +288,13 @@ public partial class MainWindow
 
     private (StorageService Source, StorageService Primary)? PrepareDetachedDraftRecovery()
     {
-        if (!_isDetachedWindow || _startEmpty) return null;
+        if (_windowId == WorkspaceCatalogStore.PrimaryWindowId || _startEmpty) return null;
+        return PrepareDetachedDraftRecovery(SessionStorage, _workspaceId);
+    }
 
-        var source = SessionStorage;
-        var primary = _workspace.GetStorage(_workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
+    private (StorageService Source, StorageService Primary)? PrepareDetachedDraftRecovery(StorageService source, string workspaceId)
+    {
+        var primary = _workspace.GetStorage(workspaceId, WorkspaceCatalogStore.PrimaryWindowId);
         if (string.Equals(StorageCacheKey(source), StorageCacheKey(primary), StringComparison.OrdinalIgnoreCase))
             return null;
         if (_workspace.DetachedDrafts.TryGetValue(source, out var existing)

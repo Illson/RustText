@@ -527,8 +527,9 @@ internal sealed partial class LogDataReader
     private long FindPreviousPageStart(ReadOnlySpan<byte> bytes, long aligned, CancellationToken cancellationToken)
     {
         var pageStart = bytes.Length;
-        var searchIndex = bytes.Length - _codeUnitBytes;
-        if (searchIndex >= 0 && IsLineEndingCodeUnit(bytes.Slice(searchIndex, _codeUnitBytes)))
+        var trailingBytes = bytes.Length % _codeUnitBytes;
+        var searchIndex = bytes.Length - trailingBytes - _codeUnitBytes;
+        if (trailingBytes == 0 && searchIndex >= 0 && IsLineEndingCodeUnit(bytes.Slice(searchIndex, _codeUnitBytes)))
         {
             if (IsLineFeed(bytes.Slice(searchIndex, _codeUnitBytes))
                 && searchIndex >= _codeUnitBytes
@@ -563,7 +564,7 @@ internal sealed partial class LogDataReader
             }
 
             var endingBytes = IsCarriageReturn(bytes.Slice(index, _codeUnitBytes))
-                && index + _codeUnitBytes < bytes.Length
+                && index + _codeUnitBytes * 2 <= bytes.Length
                 && IsLineFeed(bytes.Slice(index + _codeUnitBytes, _codeUnitBytes))
                     ? _codeUnitBytes * 2
                     : _codeUnitBytes;

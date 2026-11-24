@@ -6,12 +6,14 @@ public sealed class StagedUpdate : IAsyncDisposable
         string version,
         string installDirectory,
         string stagingDirectory,
-        string archiveSha256)
+        string archiveSha256,
+        string manifestSha256)
     {
         Version = version;
         InstallDirectory = installDirectory;
         StagingDirectory = stagingDirectory;
         ArchiveSha256 = archiveSha256;
+        ManifestSha256 = manifestSha256;
     }
 
     public string Version { get; }
@@ -21,6 +23,7 @@ public sealed class StagedUpdate : IAsyncDisposable
     public string BundleDirectory => Path.Combine(StagingDirectory, "bundle");
 
     internal bool ApplyStarted { get; set; }
+    internal string ManifestSha256 { get; }
 
     public ValueTask DisposeAsync()
     {

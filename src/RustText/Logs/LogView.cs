@@ -1540,22 +1540,25 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private async Task JumpToTimeAsync()
     {
-        var input = _searchBox.Text?.Trim() ?? string.Empty;
-        if (!TryParseRequestedTime(input, out var requested))
-        {
-            SetStatus("Введите дату и время либо время в формате ЧЧ:ММ:СС[.доли].");
-            return;
-        }
-        if (_busy)
-        {
-            return;
-        }
-
+        if (_closed || _busy || PageNavigationBlocked) return;
         var token = _closing.Token;
-        SetStatus("Поиск записи по времени…");
+        var generation = _dataGeneration;
         try
         {
-            var offset = await Task.Run(() => FindTimeOffset(requested, token), token);
+            if (!TryParseRequestedTime(_searchBox.Text?.Trim() ?? "", out var requested))
+            {
+                SetStatus("Введите дату и время либо время в формате ЧЧ:ММ:СС[.доли].");
+                return;
+            }
+            var snapshot = CaptureSearchSnapshot();
+            SetStatus("Поиск записи по времени…");
+            var offset = await Task.Run(() => FindTimeOffset(snapshot, requested, token), token);
+            if (_closed || generation != _dataGeneration) return;
+            if (snapshot.HiddenOffset != _hiddenOffset || !IsSearchSnapshotCurrent(snapshot))
+            {
+                SetStatus("Файл изменился. Повторите переход по времени.");
+                return;
+            }
             if (offset is null)
             {
                 SetStatus("Подходящая запись не найдена.");
@@ -1566,20 +1569,21 @@ internal sealed partial class LogView : UserControl, IDisposable
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
         }
-        catch (Exception error) when (error is IOException or ArgumentException)
+        catch (ObjectDisposedException) when (_closed || generation != _dataGeneration) { }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or RegexMatchTimeoutException)
         {
-            SetStatus($"Переход по времени остановлен. {error.Message}");
+            if (!_closed && generation == _dataGeneration) SetStatus($"Переход по времени остановлен. {error.Message}");
         }
     }
 
-    private long? FindTimeOffset(DateTime requested, CancellationToken token)
+    private static long? FindTimeOffset(LogSearchSnapshot snapshot, DateTime requested, CancellationToken token)
     {
-        var cursor = _hiddenOffset;
-        using var scan = _reader.BeginSequentialScan();
-        while (cursor < _file.Length)
+        var cursor = snapshot.HiddenOffset;
+        using var scan = snapshot.Reader.BeginSequentialScan(readAheadEnd: snapshot.Length);
+        while (cursor < snapshot.Length)
         {
             token.ThrowIfCancellationRequested();
-            var page = scan.ReadPage(cursor, token);
+            var page = scan.ReadPage(cursor, token, endOffset: snapshot.Length);
             if (page.Rows.Count == 0 || page.NextOffset <= cursor)
             {
                 break;
@@ -1853,7 +1857,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             throw new IOException("Файл изменился во время обрезки. Исходник оставлен без изменений, резервная копия сохранена.");
         }
-        File.Replace(staged, path, destinationBackupFileName: null);
+        DocumentFiles.PublishReplacement(staged, path, backup => ReadFileStamp(backup, source) == expected);
     }
 
     private static void CopyWithCancellation(Stream source, Stream target, CancellationToken token)
@@ -1939,6 +1943,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             var now = FileStamp.Read(_path, _file);
             if (now == _fileStamp)
             {
+                await RefreshAppendedFilterAsync();
                 CompleteConsoleRefresh();
                 return;
             }
@@ -1971,12 +1976,12 @@ internal sealed partial class LogView : UserControl, IDisposable
             LoadMinimapSamples();
             if (_levelFilterOpen && _levelFilter?.SelectedLevels != LogLevel.All)
             {
-                if (!appended)
+                if (appended) await RefreshAppendedFilterAsync();
+                else
                 {
                     _filterHistory.Clear();
-                    _filterCurrent = new(_hiddenOffset);
+                    await LoadFilteredPageAsync(new FilterCursor(_hiddenOffset));
                 }
-                await LoadFilteredPageAsync(appended ? _filterCurrent : new FilterCursor(_hiddenOffset));
             }
             if (preservedDraft) ReportPreservedExternalEdit();
         }
@@ -1998,7 +2003,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void CompleteConsoleRefresh()
     {
-        if (_consoleDisconnectMessage is null || _closed) return;
+        if (_consoleDisconnectMessage is null || _closed || _filterReading is not null) return;
         SetAutoRefresh(false);
         SetStatus(_consoleDisconnectMessage);
     }

@@ -69,11 +69,33 @@ public sealed class LogUiTests
         var (window, log) = await ShowLogAsync(path, new LogTabState(encoding, AutoRefresh: false));
         try
         {
-            var findTimeOffset = typeof(LogView).GetMethod("FindTimeOffset", Private)!;
-            var result = (long?)findTimeOffset.Invoke(log,
-                [new DateTime(2026, 11, 20, 11, 30, 0), CancellationToken.None]);
+            var findTimeOffset = typeof(LogView).GetMethod("FindTimeOffset", BindingFlags.Static | BindingFlags.NonPublic)!;
+            var result = (long?)findTimeOffset.Invoke(null,
+                [log.CaptureSearchSnapshot(), new DateTime(2026, 11, 20, 11, 30, 0), CancellationToken.None]);
 
             Assert.Equal(matchingOffset, result);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task TimeJumpDiscardsTheResultAfterRotation() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "time-rotation.log");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat("2026-11-20 10:00:00 old\n", 2000))
+            + "2026-11-20 12:30:00 match\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await log.InitialPageLoad;
+            ((TextBox)Field(log, "_searchBox")).Text = "2026-11-20 12:00:00";
+            var searching = InvokeTask(log, "JumpToTimeAsync");
+            File.Move(path, path + ".old");
+            File.WriteAllText(path, "rotated");
+            typeof(LogView).GetMethod("ResetFileHandle", Private)!.Invoke(log, null);
+            await searching;
+            Assert.Equal(0L, log.CurrentOffset);
+            Assert.DoesNotContain("Подходящая запись", log.StatusText);
         }
         finally { await CloseLogAsync(window, log); }
     });
@@ -650,6 +672,33 @@ public sealed class LogUiTests
             await WriteAppend(path, Encoding.UTF8.GetBytes("Error appended while filtered\n"));
             await HeadlessTests.WaitForAsync(() => filtered.Text?.Contains("Error appended while filtered", StringComparison.Ordinal) == true);
             Assert.DoesNotContain("Info row-", filtered.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task AppendDoesNotCancelAFilterScanAndTheNextScanKeepsThePagePrefix() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "filter-live.log");
+        var text = "Error first\n" + string.Concat(Enumerable.Repeat("Info ordinary\n", 300)) + "Error half";
+        await File.WriteAllTextAsync(path, text);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true));
+        try
+        {
+            await log.InitialPageLoad;
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            ((LogLevelFilterPanel)Field(log, "_levelFilter")).SetLevels(LogLevel.Error);
+            var activeScan = Assert.IsType<CancellationTokenSource>(Field(log, "_filterReading"));
+            File.AppendAllText(path, " line\nError new\n");
+            typeof(LogView).GetMethod("OnRefreshTimerTick", Private)!.Invoke(log, [null, EventArgs.Empty]);
+            Assert.Same(activeScan, Field(log, "_filterReading"));
+            Assert.False(activeScan.IsCancellationRequested);
+
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            await HeadlessTests.WaitForAsync(() => Field(log, "_filterReading") is null
+                && filtered.Text?.EndsWith("Error new", StringComparison.Ordinal) == true);
+            Assert.Equal(new[] { "Error first", "Error half line", "Error new" },
+                filtered.Text!.Split(["\r\n", "\n"], StringSplitOptions.None));
         }
         finally { await CloseLogAsync(window, log); }
     });
