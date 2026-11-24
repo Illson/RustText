@@ -10,6 +10,7 @@ using Avalonia.Media;
 using Avalonia.Platform;
 using Avalonia.VisualTree;
 using RustText.Demo;
+using RustText.Demo.Editor;
 using Xunit;
 
 namespace RustText.Tests;
@@ -139,7 +140,16 @@ public sealed class ThemeMenuTests
             await HeadlessTests.WaitForAsync(() => ReadFlag(second, "_restoreFinished"));
 
             await HeadlessTests.WaitForAsync(() => second.IsVisible);
-            Assert.DoesNotContain(Options(first), item => item.ToggleType == MenuItemToggleType.CheckBox);
+            var cursor = Assert.Single(Options(first), item => item.ToggleType == MenuItemToggleType.CheckBox);
+            Assert.Equal("Плавный курсор", cursor.Header);
+            Assert.True(cursor.IsChecked);
+            var peer = Avalonia.Automation.Peers.ControlAutomationPeer.CreatePeerForElement(cursor)!;
+            Assert.IsAssignableFrom<Avalonia.Automation.Provider.IToggleProvider>(peer).Toggle();
+            await HeadlessTests.WaitForAsync(() => !cursor.IsChecked && !second.GetValue(EditorCaret.SmoothProperty));
+            Assert.False((await storage.LoadSettingsAsync()).SmoothCaret);
+            var editor = Assert.Single(first.GetVisualDescendants().OfType<AvaloniaEdit.TextEditor>());
+            editor.TextArea.Focus();
+            Assert.False(Assert.Single(editor.TextArea.TextView.Layers.OfType<EditorCaret>()).MotionEnabled);
             Assert.DoesNotContain(Options(first), item => Equals(item.Header, "Настройки тем…"));
             var off = WindowPixels(first);
             Assert.Equal(255, FocusTheme.TabBar.GradientStops[0].Color.A);
@@ -208,6 +218,7 @@ public sealed class ThemeMenuTests
         var reopened = await ShowWindowAsync();
         try
         {
+            Assert.False(reopened.GetValue(EditorCaret.SmoothProperty));
             var (menu, slider) = await OpenGlassSliderAsync(reopened);
             Assert.Equal(37, slider.Value);
             menu.IsSubMenuOpen = false;

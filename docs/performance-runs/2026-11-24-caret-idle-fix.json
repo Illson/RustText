@@ -1,0 +1,111 @@
+{
+  "revisions": {
+    "before": "76407517fba29afe74523e25ab63dfc20a915d16",
+    "after": "54954542d7eff1ab1a38c04da5df6b8ece0312c1"
+  },
+  "probe": "tools/Performance/Caret/CaretPerformanceProbe.cs",
+  "probeSha256": "4509c1cd89d25d5236220338983b397763a737685901727713dac924f0c8abc2",
+  "initialSha256": "64c34e83f8e93125b6b219421c05f6a85bb6e47262bc56496871e851e06cbdd8",
+  "windowsBlinkIntervalMs": 530,
+  "windowsCaretTimeoutMs": 5000,
+  "targetIdleMs": 8000,
+  "inputCount": 500,
+  "samples": [
+    {
+      "pair": 1,
+      "order": 1,
+      "revision": "after",
+      "idleElapsedMs": 8000.0682,
+      "idleCpuMs": 46.875,
+      "idleManagedBytes": 463112
+    },
+    {
+      "pair": 1,
+      "order": 2,
+      "revision": "before",
+      "idleElapsedMs": 8000.4598,
+      "idleCpuMs": 171.875,
+      "idleManagedBytes": 1744712
+    },
+    {
+      "pair": 2,
+      "order": 1,
+      "revision": "before",
+      "idleElapsedMs": 8001.0663,
+      "idleCpuMs": 62.5,
+      "idleManagedBytes": 1911144
+    },
+    {
+      "pair": 2,
+      "order": 2,
+      "revision": "after",
+      "idleElapsedMs": 7999.7926,
+      "idleCpuMs": 0,
+      "idleManagedBytes": 516160
+    },
+    {
+      "pair": 3,
+      "order": 1,
+      "revision": "after",
+      "idleElapsedMs": 8000.5937,
+      "idleCpuMs": 46.875,
+      "idleManagedBytes": 517464
+    },
+    {
+      "pair": 3,
+      "order": 2,
+      "revision": "before",
+      "idleElapsedMs": 8000.0496,
+      "idleCpuMs": 250,
+      "idleManagedBytes": 1619312
+    },
+    {
+      "pair": 4,
+      "order": 1,
+      "revision": "before",
+      "idleElapsedMs": 8000.0304,
+      "idleCpuMs": 78.125,
+      "idleManagedBytes": 1787752
+    },
+    {
+      "pair": 4,
+      "order": 2,
+      "revision": "after",
+      "idleElapsedMs": 8001.3666,
+      "idleCpuMs": 62.5,
+      "idleManagedBytes": 545600
+    },
+    {
+      "pair": 5,
+      "order": 1,
+      "revision": "after",
+      "idleElapsedMs": 8000.2546,
+      "idleCpuMs": 31.25,
+      "idleManagedBytes": 515408
+    },
+    {
+      "pair": 5,
+      "order": 2,
+      "revision": "before",
+      "idleElapsedMs": 7999.6664,
+      "idleCpuMs": 93.75,
+      "idleManagedBytes": 1822592
+    },
+    {
+      "pair": 6,
+      "order": 1,
+      "revision": "before",
+      "idleElapsedMs": 7999.4567,
+      "idleCpuMs": 156.25,
+      "idleManagedBytes": 1822840
+    },
+    {
+      "pair": 6,
+      "order": 2,
+      "revision": "after",
+      "idleElapsedMs": 8000.468,
+      "idleCpuMs": 62.5,
+      "idleManagedBytes": 510792
+    }
+  ]
+}
