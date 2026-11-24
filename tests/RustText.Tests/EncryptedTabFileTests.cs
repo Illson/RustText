@@ -170,6 +170,40 @@ public sealed class EncryptedTabDialogTests
     });
 
     [Fact]
+    public Task EncryptingFromBlockedFallbackDoesNotDeleteTheLatestDrafts() => HeadlessTests.RunAsync(async profile =>
+    {
+        var storage = StorageService.OpenDefault();
+        var a = new SessionTab(10, null, TextEncodingKind.Utf8);
+        var b = new SessionTab(11, null, TextEncodingKind.Utf8);
+        await storage.SaveSessionAsync(new([a]), new Dictionary<long, string> { [a.Id] = "old A" });
+        var latest = await storage.SaveSessionAsync(new([a, b]), new Dictionary<long, string> { [a.Id] = "new A", [b.Id] = "note B" });
+        var window = new MainWindow([]);
+        var target = Path.Combine(profile, "old.rte");
+        try
+        {
+            using (new FileStream(storage.GetDraftPath(latest.Tabs[1])!, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                window.Show();
+                await HeadlessTests.WaitForAsync(() => ReadFlag(window, "_restoreFinished"));
+                Assert.Equal("old A", Assert.Single(window.GetVisualDescendants().OfType<TextEditor>()).Text);
+            }
+
+            var saving = window.EncryptActiveTabAsync(() => Task.FromResult<string?>(target));
+            if (!saving.IsCompleted) SubmitTestPassword(GetCreateDialog(window));
+            await saving;
+            var checkpoint = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
+            Assert.Equal(new[] { "new A", "note B" }, await Task.WhenAll(checkpoint.Tabs.Select(tab => storage.LoadDraftAsync(tab))));
+            var previous = Assert.IsType<SessionState>(await ReadCheckpointAsync(storage, "previous"));
+            Assert.Equal("old A", await storage.LoadDraftAsync(Assert.Single(previous.Tabs)));
+            Assert.True(File.Exists(storage.GetDraftPath(latest.Tabs[0])));
+            Assert.False(File.Exists(target));
+            Assert.Equal("old A", Assert.Single(window.GetVisualDescendants().OfType<TextEditor>()).Text);
+            Assert.Contains("Шифрование недоступно", window.FindControl<TextBlock>("StatusText")!.Text);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task StartupWithAnEncryptedPathPromptsAndCancellationDoesNotCreateHistory() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "startup.RTE");

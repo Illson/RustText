@@ -305,6 +305,47 @@ public sealed class HomeHistoryTests
     });
 
     [Fact]
+    public Task LockedPreviousPointerDoesNotHideLatestHistoryOrPruneItsDraft() => HeadlessTests.RunAsync(async _ =>
+    {
+        var storage = StorageService.OpenDefault();
+        var open = new SessionTab(101, null, TextEncodingKind.Utf8);
+        var closed = new SessionTab(102, null, TextEncodingKind.Utf8) { ClosedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+        var initial = await storage.SaveSessionAsync(new([open]), new Dictionary<long, string> { [open.Id] = "open note" });
+        var latest = await storage.SaveSessionAsync(initial with { ClosedTabs = [closed] },
+            new Dictionary<long, string> { [closed.Id] = "latest closed note" });
+        var draft = storage.GetDraftPath(Assert.Single(latest.ClosedTabs!))!;
+        var backup = Path.Combine(storage.RootDirectory, "session", "previous.json");
+
+        var held = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.None);
+        MainWindow? window = null;
+        try
+        {
+            window = await OpenWorkspaceAsync();
+            Assert.Equal("open note", ActiveEditor(window)?.Text);
+            var history = Assert.IsType<List<SessionTab>>(Field(window, "_closedTabs"));
+            Assert.Equal("latest closed note", await storage.LoadDraftAsync(Assert.Single(history)));
+            held.Dispose();
+            for (var i = 0; i < 2; i++)
+            {
+                var edit = $"open edit {i}";
+                ActiveEditor(window)!.Text = edit;
+                await CallAsync(window, "SaveSessionAsync");
+                var saved = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
+                Assert.Equal(edit, await storage.LoadDraftAsync(Assert.Single(saved.Tabs)));
+            }
+            await CloseAsync(window);
+            Assert.True(File.Exists(draft));
+            var recovered = Assert.IsType<SessionState>(await storage.LoadSessionAsync());
+            Assert.Equal("latest closed note", await storage.LoadDraftAsync(Assert.Single(recovered.ClosedTabs!)));
+        }
+        finally
+        {
+            held.Dispose();
+            if (window is { IsVisible: true }) await CloseAsync(window);
+        }
+    });
+
+    [Fact]
     public Task ClosingBookmarksDoesNotEvictSavedDrafts() => HeadlessTests.RunAsync(async profile =>
     {
         var storage = StorageService.OpenDefault();
@@ -467,6 +508,55 @@ public sealed class HomeHistoryTests
         {
             var draft = await storage.SaveClosedDraftAsync(new SessionTab(id, null, TextEncodingKind.Utf8), content);
             return await storage.DraftArchive.ArchiveAsync(draft, storage.GetDraftPath(draft)!);
+        }
+    });
+
+    [Fact]
+    public Task DuplicatingInactiveWorkspaceRejectsBlockedFallbackAndCanRetry() => HeadlessTests.RunAsync(async profile =>
+    {
+        var catalog = new WorkspaceCatalogStore(profile);
+        var source = await catalog.CreateAsync("Blocked source");
+        var storage = StorageService.OpenWorkspace(profile, source.Id, WorkspaceCatalogStore.PrimaryWindowId);
+        var a = new SessionTab(10, null, TextEncodingKind.Utf8);
+        var b = new SessionTab(11, null, TextEncodingKind.Utf8);
+        await storage.SaveSessionAsync(new([a]), new Dictionary<long, string> { [a.Id] = "old A" });
+        var latest = await storage.SaveSessionAsync(new([a, b]), new Dictionary<long, string> { [a.Id] = "new A", [b.Id] = "note B" });
+
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            var manage = CallAsync(window, "ShowWorkspacesAsync");
+            await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Count == 1);
+            var parent = Assert.Single(window.OwnedWindows);
+
+            using (new FileStream(storage.GetDraftPath(latest.Tabs[1])!, FileMode.Open, FileAccess.Read, FileShare.None))
+                await Assert.ThrowsAsync<InvalidDataException>(DuplicateAsync);
+            Assert.Equal(WorkspaceCatalogStore.DefaultWorkspaceId, Field(window, "_workspaceId"));
+            Assert.DoesNotContain((await catalog.LoadAsync()).Workspaces, item => item.Name == "Blocked source (копия)");
+
+            await DuplicateAsync();
+            await manage;
+            var copy = Assert.Single((await catalog.LoadAsync()).Workspaces, item => item.Name == "Blocked source (копия)");
+            var destination = StorageService.OpenWorkspace(profile, copy.Id, WorkspaceCatalogStore.PrimaryWindowId);
+            foreach (var store in new[] { storage, destination })
+            {
+                var checkpoint = Assert.IsType<SessionState>(await store.LoadSessionAsync());
+                Assert.Equal(new[] { "new A", "note B" }, await Task.WhenAll(checkpoint.Tabs.Select(tab => store.LoadDraftAsync(tab))));
+            }
+
+            Task DuplicateAsync()
+            {
+                var duplicate = CallAsync(window, "DuplicateWorkspaceAsync", source, parent);
+                var prompt = Assert.Single(window.OwnedWindows, item => !ReferenceEquals(item, parent));
+                prompt.UpdateLayout();
+                Click(prompt.GetVisualDescendants().OfType<Button>().Single(button => Equals(button.Content, "OK")));
+                return duplicate;
+            }
+        }
+        finally
+        {
+            foreach (var dialog in window.OwnedWindows.ToArray()) dialog.Close();
+            await CloseAsync(window);
         }
     });
 

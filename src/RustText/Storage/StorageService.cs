@@ -83,6 +83,7 @@ internal sealed class StorageService
     internal bool HasSessionCheckpoint => File.Exists(Path.Combine(_checkpoints, "latest.json"))
         || File.Exists(Path.Combine(_checkpoints, "previous.json"));
     internal bool CheckpointReadBlocked { get; private set; }
+    internal bool LoadedLatestCheckpoint => _cachedSessionWasLatest;
     public static string GetProfileBaseDirectory()
     {
         var overridePath = Environment.GetEnvironmentVariable("RUSTTEXT_PROFILE_DIR");
@@ -100,33 +101,33 @@ internal sealed class StorageService
     {
         _cachedSession = state;
         CheckpointReadBlocked = readBlocked;
-        _hasCachedSession = !readBlocked;
+        _hasCachedSession = false;
         _cachedSessionWasLatest = isLatest;
         if (readBlocked)
         {
             _blockedCheckpointFallback ??= state;
             return;
         }
-        var latest = Path.Combine(_checkpoints, "latest.json");
-        var previous = Path.Combine(_checkpoints, "previous.json");
-        _cachedLatestPointer = File.Exists(latest) ? File.ReadAllText(latest).Trim() : null;
-        _cachedPreviousPointer = File.Exists(previous) ? File.ReadAllText(previous).Trim() : null;
-        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var pointer in new[] { _cachedLatestPointer, _cachedPreviousPointer })
+        // An unreadable cache dependency must not discard an already validated snapshot.
+        try
         {
-            if (pointer is null || Path.GetFileName(pointer) != pointer || !pointer.StartsWith("checkpoint-", StringComparison.Ordinal)) continue;
-            files.Add(Path.Combine(_checkpoints, pointer, "manifest.json"));
-        }
-        if (state is not null)
-        {
-            foreach (var tab in (state.Tabs ?? []).Concat(state.ClosedTabs ?? []))
+            _cachedLatestPointer = ReadCheckpointPointer("latest.json");
+            _cachedPreviousPointer = ReadCheckpointPointer("previous.json");
+            var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pointer in new[] { _cachedLatestPointer, _cachedPreviousPointer })
+            {
+                if (pointer is null || Path.GetFileName(pointer) != pointer || !pointer.StartsWith("checkpoint-", StringComparison.Ordinal)) continue;
+                files.Add(Path.Combine(_checkpoints, pointer, "manifest.json"));
+            }
+            foreach (var tab in (state?.Tabs ?? []).Concat(state?.ClosedTabs ?? []))
             {
                 if (tab.DraftRef is null) continue;
-                try { files.Add(ResolveAnyDraftReference(tab.DraftRef)); }
-                catch (Exception error) when (IsInvalidCheckpointException(error)) { }
+                files.Add(ResolveAnyDraftReference(tab.DraftRef));
             }
+            _cachedFiles = files.ToDictionary(path => path, GetFileSignature, StringComparer.OrdinalIgnoreCase);
+            _hasCachedSession = true;
         }
-        _cachedFiles = files.ToDictionary(path => path, GetFileSignature, StringComparer.OrdinalIgnoreCase);
+        catch (Exception error) when (IsInvalidCheckpointException(error)) { }
     }
 
     internal bool HasCommittedDraft(long id, string sha256) =>
@@ -139,13 +140,20 @@ internal sealed class StorageService
 
     private bool CachedFilesAreUnchanged()
     {
-        var latestPath = Path.Combine(_checkpoints, "latest.json");
-        var previousPath = Path.Combine(_checkpoints, "previous.json");
-        var latest = File.Exists(latestPath) ? File.ReadAllText(latestPath).Trim() : null;
-        var previous = File.Exists(previousPath) ? File.ReadAllText(previousPath).Trim() : null;
-        return string.Equals(latest, _cachedLatestPointer, StringComparison.Ordinal)
-            && string.Equals(previous, _cachedPreviousPointer, StringComparison.Ordinal)
-            && _cachedFiles.All(entry => GetFileSignature(entry.Key) == entry.Value);
+        if (!_hasCachedSession) return false;
+        try
+        {
+            return string.Equals(ReadCheckpointPointer("latest.json"), _cachedLatestPointer, StringComparison.Ordinal)
+                && string.Equals(ReadCheckpointPointer("previous.json"), _cachedPreviousPointer, StringComparison.Ordinal)
+                && _cachedFiles.All(entry => GetFileSignature(entry.Key) == entry.Value);
+        }
+        catch (Exception error) when (IsInvalidCheckpointException(error)) { return false; }
+    }
+
+    private string? ReadCheckpointPointer(string name)
+    {
+        var path = Path.Combine(_checkpoints, name);
+        return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
     }
 
     private static (long Length, long LastWriteTicks) GetFileSignature(string path)
@@ -203,7 +211,7 @@ internal sealed class StorageService
         // the validated manifest without reading every large draft again.
         // A fallback opened during a read error cannot be used for writing, even if the lock is gone.
         var fallbackState = CheckpointReadBlocked
-            || _hasCachedSession && (_cachedSession is not null || !HasSessionCheckpoint) && CachedFilesAreUnchanged()
+            || (_cachedSession is not null || !HasSessionCheckpoint) && CachedFilesAreUnchanged()
             ? _cachedSession
             : await LoadSessionAsync(cancellationToken).ConfigureAwait(false);
         if (CheckpointReadBlocked || fallbackState is null && HasSessionCheckpoint)
@@ -637,6 +645,8 @@ internal sealed class StorageService
         CancellationToken token)
     {
         using var writerLock = AcquireSessionLock();
+        if (CheckpointReadBlocked)
+            throw new InvalidDataException("Не удалось проверить сеанс. История оставлена без изменений.");
         var latest = Path.Combine(_checkpoints, "latest.json");
         var previous = Path.Combine(_checkpoints, "previous.json");
         _hasCachedSession = _cachedSessionWasLatest = false;

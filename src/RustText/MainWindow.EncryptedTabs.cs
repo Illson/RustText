@@ -36,6 +36,11 @@ public partial class MainWindow
             SetStatus("Дождитесь завершения операции с вкладкой перед шифрованием.");
             return;
         }
+        if (EncryptionCleanupBlocked(views))
+        {
+            SetStatus("Шифрование недоступно до восстановления сеанса. Вкладка и история оставлены без изменений.");
+            return;
+        }
         if (document.TextLength > EncryptedTabFile.MaxTextBytes)
         {
             SetStatus("Максимальный размер текста для шифрования — 32 МиБ в UTF-8.");
@@ -97,6 +102,18 @@ public partial class MainWindow
         }
     }
 
+    private bool EncryptionCleanupBlocked((MainWindow Owner, WorkTab Tab)[] views) =>
+        views.Any(view => view.Owner._validatingStartupSession
+            || view.Owner.FindTabWorkspace(view.Tab) is not { } location
+            || IsSessionUnavailable(location.Storage)
+            || (_workspace.DetachedDrafts.TryGetValue(location.Storage, out var recovery)
+                && recovery.DestinationIds.GetValueOrDefault(view.Tab.Id) is { } previousId
+                && IsSessionUnavailable(recovery.PrimaryStorage)
+                && !SessionViews(recovery.PrimaryStorage, null).Any(other => other.View.Tabs.ContainsKey(previousId))));
+
+    private bool IsSessionUnavailable(StorageService storage) =>
+        storage.CheckpointReadBlocked || _workspace.UnavailableSessions.Contains(StorageCacheKey(storage));
+
     private async Task CloseEncryptedViewsAsync((MainWindow Owner, WorkTab Tab)[] views, WorkTab source, long revision,
         AvaloniaEdit.Document.TextDocument document, string? sourcePath, CancellationToken token)
     {
@@ -110,6 +127,11 @@ public partial class MainWindow
             if (source.Revision != revision || views.Any(view => !ReferenceEquals(view.Tab.Editor?.Document, document)))
             {
                 SetStatus("Зашифрованная копия сохранена. Вкладка изменена во время операции и оставлена открытой.");
+                return;
+            }
+            if (EncryptionCleanupBlocked(views))
+            {
+                SetStatus("Зашифрованная копия сохранена. Сеанс недоступен, вкладка и история оставлены без изменений.");
                 return;
             }
 
