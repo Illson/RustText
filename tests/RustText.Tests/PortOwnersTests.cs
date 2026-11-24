@@ -81,10 +81,11 @@ public sealed class PortOwnersTests
 
                 var input = Assert.Single(view.GetVisualDescendants().OfType<TextBox>());
                 var results = Assert.Single(view.GetVisualDescendants().OfType<ListBox>());
+                var find = Button("Найти");
                 var stop = Button("Завершить процесс…");
                 Assert.False(stop.IsEnabled);
                 input.Text = "65536";
-                Click(Button("Найти"));
+                Click(find);
                 await HeadlessTests.WaitForAsync(() => StatusContains("Неверный номер порта"));
                 Assert.Empty(results.Items);
 
@@ -132,9 +133,11 @@ public sealed class PortOwnersTests
                 Assert.False(child.HasExited);
                 Click(stop);
                 Click(Button("Завершить"));
-                await child.WaitForExitAsync(timeout.Token);
-                await HeadlessTests.WaitForAsync(() => StatusContains($"Порт {ports[2]} не найден"));
-                Assert.Empty(results.Items);
+                await HeadlessTests.WaitForAsync(() => find.IsEnabled);
+                Assert.True(child.HasExited);
+                Assert.Contains(view.GetVisualDescendants().OfType<TextBlock>(),
+                    label => label.Text?.StartsWith($"Процесс с PID {child.Id} завершён.", StringComparison.Ordinal) == true);
+                Assert.DoesNotContain(results.Items.OfType<PortOwners.Match>(), match => match.Owner.Id == child.Id);
 
                 await ((Task)typeof(MainWindow).GetMethod("SaveSessionAsync", Private)!.Invoke(window, null)!);
                 var storage = StorageService.OpenForTesting(profile);
@@ -154,7 +157,7 @@ public sealed class PortOwnersTests
                 async Task<PortOwners.Match> SearchAsync(int port)
                 {
                     input.Text = port.ToString();
-                    Click(Button("Найти"));
+                    Click(find);
                     await HeadlessTests.WaitForAsync(() => results.Items.OfType<PortOwners.Match>()
                         .Any(match => match.Binding.Local.Port == port && match.Owner.Id == child.Id));
                     var match = Assert.Single(results.Items.OfType<PortOwners.Match>(), row => row.Owner.Id == child.Id);

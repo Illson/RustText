@@ -29,7 +29,7 @@ internal static class PortOwners
         if (selected.Pid != match.Owner.Id || !current.Any(row =>
                 row.Pid == selected.Pid && row.Protocol == selected.Protocol && row.Local.Equals(selected.Local)))
             throw new InvalidOperationException("Процесс больше не использует этот порт. Повторите поиск.");
-        if (!LocalProcesses.TryForceClose(match.Owner, token))
+        if (!LocalProcesses.TryForceClose(match.Owner, token, waitForExit: true))
             throw new InvalidOperationException("Процесс изменился, уже завершился или недоступен для завершения.");
     }
 

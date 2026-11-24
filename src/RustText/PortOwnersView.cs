@@ -95,7 +95,7 @@ internal sealed class PortOwnersView : UserControl, IDisposable
             await RunAsync("Проверка и завершение процесса…", async token =>
             {
                 await Task.Run(() => PortOwners.StopAsync(match, token), token);
-                await RefreshAsync(match.Binding.Local.Port, token, $"Запрос на завершение PID {match.Owner.Id} отправлен. ");
+                await RefreshAsync(match.Binding.Local.Port, token, $"Процесс с PID {match.Owner.Id} завершён. ");
             });
         };
     }

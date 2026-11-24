@@ -11,6 +11,8 @@ internal static class LocalProcesses
 {
     private const uint QueryLimitedInformation = 0x1000;
     private const uint Terminate = 0x0001;
+    private const uint Synchronize = 0x00100000;
+    private const uint WaitTimeout = 258;
     private const uint TokenQuery = 0x0008;
 
     internal sealed record Owner(int Id, string Name, long Started, bool CanClose)
@@ -58,17 +60,26 @@ internal static class LocalProcesses
     }
 
     [SupportedOSPlatform("windows")]
-    public static bool TryForceClose(Owner expected, CancellationToken token)
+    public static bool TryForceClose(Owner expected, CancellationToken token, bool waitForExit = false)
     {
         token.ThrowIfCancellationRequested();
         if (!expected.CanClose) return false;
         using var caller = WindowsIdentity.GetCurrent();
         using var current = Process.GetCurrentProcess();
-        using var target = OpenProcess(QueryLimitedInformation | Terminate, false, expected.Id);
+        using var target = OpenProcess(QueryLimitedInformation | Terminate | (waitForExit ? Synchronize : 0), false, expected.Id);
         if (!Matches(expected, target, caller.User, current.SessionId)) return false;
         token.ThrowIfCancellationRequested();
         // Use the validated handle; a recycled PID cannot redirect termination.
-        return TerminateProcess(target, 1);
+        if (!TerminateProcess(target, 1)) return false;
+        if (waitForExit)
+        {
+            var result = WaitForSingleObject(target, 5_000);
+            token.ThrowIfCancellationRequested();
+            if (result == WaitTimeout)
+                throw new TimeoutException("Запрос на завершение отправлен, но процесс ещё не закрылся.");
+            if (result != 0) throw new Win32Exception();
+        }
+        return true;
     }
 
     [SupportedOSPlatform("windows")]
@@ -143,6 +154,9 @@ internal static class LocalProcesses
     [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TerminateProcess(SafeProcessHandle process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetShellWindow();
