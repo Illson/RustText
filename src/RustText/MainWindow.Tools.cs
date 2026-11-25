@@ -247,6 +247,7 @@ public partial class MainWindow
 
             tab.Log?.SetTextSize(_fontSize);
             if (tab.Log is { } log) log.WordWrap = _wordWrap;
+            tab.ConsoleText?.SetAppearance(_fontSize, _wordWrap);
         }
     }
 

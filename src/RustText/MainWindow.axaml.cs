@@ -333,8 +333,8 @@ public partial class MainWindow : Window
         };
         context.Opening += (_, _) =>
         {
-            var console = tab.IsTransient;
-            reveal.IsVisible = copyPath.IsVisible = moveWindow.IsVisible = logMode.IsVisible = !console;
+            reveal.IsVisible = copyPath.IsVisible = moveWindow.IsVisible = !tab.IsTransient;
+            logMode.IsVisible = !tab.IsTransient || tab.Console is not null;
             logMode.IsChecked = tab.OpensAsLog || tab.Deferred?.DraftLogMode == true
                 || tab.Recovery is not null && tab.Log?.FileLength <= DocumentFiles.MaximumDocumentBytes;
             logMode.IsEnabled = !tab.Loading && !tab.Closing && !tab.Saving && !tab.CheckingSession;
@@ -796,6 +796,9 @@ public partial class MainWindow : Window
         tab.ProcessFinder?.Dispose();
         tab.Log?.Close();
         tab.Log = null;
+        tab.ConsoleText?.Dispose();
+        tab.Console?.Dispose();
+        tab.Console = null;
         tab.Shell?.Dispose();
         tab.Shell = null;
         DetachEditor(tab);

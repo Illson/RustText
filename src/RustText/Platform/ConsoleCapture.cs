@@ -20,25 +20,25 @@ internal sealed class ConsoleCapture : IDisposable
     private readonly FileStream _file;
     private bool _disposed;
 
-    private ConsoleCapture(int processId, string title)
+    internal ConsoleCapture(string title)
     {
         Title = title;
         Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"rusttext-console-{Guid.NewGuid():N}.log");
         _file = new FileStream(Path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete,
             16 * 1024, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
-        Completion = PumpAsync(processId, _stop.Token);
     }
 
     public string Path { get; }
     public string Title { get; }
-    public Task<Exception?> Completion { get; }
+    public Task<Exception?> Completion { get; private set; } = Task.FromResult<Exception?>(null);
     public bool IsDisposed => _disposed;
 
     public static async Task<ConsoleCapture> ConnectAsync(int processId, string title, CancellationToken token)
     {
-        var capture = new ConsoleCapture(processId, title);
+        var capture = new ConsoleCapture(title);
         try
         {
+            capture.Completion = capture.PumpAsync(processId, capture._stop.Token);
             await capture._ready.Task.WaitAsync(ConnectionTimeout, token).ConfigureAwait(false);
             return capture;
         }

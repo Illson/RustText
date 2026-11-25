@@ -1,9 +1,14 @@
 using System.Reflection;
 using System.Text;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Threading;
+using Avalonia.Input;
+using Avalonia.Interactivity;
 using AvaloniaEdit;
 using RustText.Demo;
 using RustText.Demo.Logs;
+using RustText.Demo.Platform;
 using Xunit;
 
 namespace RustText.Tests;
@@ -12,6 +17,136 @@ namespace RustText.Tests;
 public sealed class LogModeSwitchTests
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    [Fact]
+    public Task ConsoleTabCanToggleLogModeFromItsMenuWithoutStoppingCapture() => HeadlessTests.RunAsync(async _ =>
+    {
+        using var capture = new ConsoleCapture("Synthetic console");
+        await using var writer = new StreamWriter(new FileStream(capture.Path, FileMode.Open, FileAccess.Write,
+            FileShare.ReadWrite | FileShare.Delete), new UTF8Encoding(false)) { AutoFlush = true };
+        await writer.WriteLineAsync("[INFO] first frame");
+        var window = new MainWindow { Width = 900, Height = 700 };
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => (bool)Field(window, "_restoreFinished"));
+            var tab = typeof(MainWindow).GetMethod("AddConsoleTab", Private)!.Invoke(window, [capture])!;
+            var item = Assert.IsType<TabItem>(Property(tab, "Item"));
+            var log = Assert.IsType<LogView>(item.Content);
+            await log.InitialPageLoad;
+
+            var menu = item.ContextMenu!;
+            MenuItem ModeToggle(bool expected)
+            {
+                item.RaiseEvent(new ContextRequestedEventArgs());
+                var toggle = Assert.Single(menu.Items.OfType<MenuItem>(), entry => Equals(entry.Header, "Режим лога")
+                    || entry.Header is TextBlock { Text: "Режим лога" });
+                Assert.True(toggle.IsVisible);
+                Assert.True(toggle.IsEnabled);
+                Assert.Equal(expected, toggle.IsChecked);
+                return toggle;
+            }
+
+            ModeToggle(true).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            menu.Close();
+            var plain = Assert.IsType<ConsoleTextView>(item.Content);
+            Assert.True(plain.Editor.IsReadOnly);
+            Assert.True((bool)Property(tab, "IsTransient")!);
+            Assert.False(capture.IsDisposed);
+            await HeadlessTests.WaitForAsync(() => plain.Editor.Text.Contains("first frame", StringComparison.Ordinal));
+            await writer.WriteLineAsync("[WARN] новый вывод");
+            await HeadlessTests.WaitForAsync(() => plain.Editor.Text.Contains("новый вывод", StringComparison.Ordinal));
+            Assert.Same(plain, item.Content);
+            typeof(MainWindow).GetMethod("OpenSearchPanel", Private)!.Invoke(window, [false]);
+            ((TextBox)Field(window, "_searchInput")).Text = "новый вывод";
+            var results = (ListBox)Field(window, "_searchResults");
+            foreach (var allTabs in new[] { false, true })
+            {
+                ((ToggleButton)Field(window, "_allTabs")).IsChecked = allTabs;
+                await InvokeTask(window, "FindAsync");
+                Assert.Single(results.Items);
+                results.SelectedIndex = 0;
+                Assert.Equal("новый вывод", plain.Editor.SelectedText);
+            }
+            typeof(MainWindow).GetMethod("CloseSearchPanel", Private)!.Invoke(window, null);
+
+            ModeToggle(false).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            menu.Close();
+            var restored = Assert.IsType<LogView>(item.Content);
+            Assert.NotSame(log, restored);
+            await restored.InitialPageLoad;
+            var text = Assert.IsType<TextBox>(Field(restored, "_logText"));
+            Assert.Contains("новый вывод", text.Text);
+            Assert.False(capture.IsDisposed);
+            ModeToggle(true).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            menu.Close();
+            plain = Assert.IsType<ConsoleTextView>(item.Content);
+            await writer.WriteLineAsync(new string('x', ConsoleTextView.TextLimit) + "latest");
+            await HeadlessTests.WaitForAsync(() => plain.Editor.Text.Contains("latest"));
+            ((TextBox)Field(window, "_searchInput")).Text = "first frame";
+            await InvokeTask(window, "FindAsync");
+            Assert.Empty(results.Items);
+            Assert.Contains("неполные", ((TextBlock)Field(window, "_searchStatus")).Text);
+            await InvokeTask(window, "CloseTabAsync", tab);
+            Assert.True(capture.IsDisposed);
+        }
+        finally { await CloseMainWindowAsync(window); }
+    });
+
+    [Fact]
+    public Task LiveBurstShowsTheLatestUtf8InOneRefresh() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "burst.log");
+        await File.WriteAllTextAsync(path, "old output\n");
+        using var view = new ConsoleTextView(path, 12, false);
+        await HeadlessTests.WaitForAsync(() => view.Editor.Text.Contains("old output"));
+        ((DispatcherTimer)Field(view, "_timer")).Stop();
+        var burst = new string('a', 2 * 1024 * 1024) + "Я" + new string('x', ConsoleTextView.TextLimit - 6) + "\nend\n";
+        await File.AppendAllTextAsync(path, burst);
+        typeof(ConsoleTextView).GetMethod("ReadOutput", Private)!.Invoke(view, [null, EventArgs.Empty]);
+        await HeadlessTests.WaitForAsync(() => !(bool)Field(view, "_reading"));
+        Assert.Equal(new string('x', ConsoleTextView.TextLimit - 6) + "\nend\n", view.Editor.Text);
+        Assert.Equal("old output\n" + burst, await File.ReadAllTextAsync(path));
+    });
+
+    [Fact]
+    public Task CompletingAnOversizedLiveLineKeepsItsTail() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "long-line.log");
+        var initial = "😀" + new string('x', ConsoleTextView.TextLimit - 12);
+        await File.WriteAllTextAsync(path, initial);
+        using var view = new ConsoleTextView(path, 12, false);
+        await HeadlessTests.WaitForAsync(() => view.Editor.Document.TextLength == initial.Length);
+        const string end = "xxxxxEND!\r\n";
+        await File.AppendAllTextAsync(path, end);
+        await HeadlessTests.WaitForAsync(() => (bool)Field(view, "_earlierOutput"));
+        Assert.Equal(initial[2..] + end, view.Editor.Text);
+        Assert.Equal(initial + end, await File.ReadAllTextAsync(path));
+    });
+
+    [Fact]
+    public Task ConsolePlainTextKeepsRecentUtf8WithoutTruncatingTheCapture() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "long-console.log");
+        // The initial byte window starts one byte into the first Cyrillic character.
+        var original = "older output\nЯ" + new string('x', ConsoleTextView.TextLimit - 6) + "\nend\n";
+        await File.WriteAllTextAsync(path, original, new UTF8Encoding(false));
+        using var view = new ConsoleTextView(path, 12, wordWrap: false);
+        var window = new Window { Content = view };
+        window.Show();
+        try
+        {
+            await HeadlessTests.WaitForAsync(() => view.Editor.Text.EndsWith("\nend\n", StringComparison.Ordinal));
+            Assert.DoesNotContain('\uFFFD', view.Editor.Text);
+            Assert.DoesNotContain("older output", view.Editor.Text);
+            await File.AppendAllTextAsync(path, "after switch\n");
+            view.ReportDisconnected("Источник отключён");
+            await HeadlessTests.WaitForAsync(() => view.Editor.Text.EndsWith("after switch\n", StringComparison.Ordinal));
+            Assert.InRange(view.Editor.Document.TextLength, 1, ConsoleTextView.TextLimit);
+            Assert.Equal(original + "after switch\n", await File.ReadAllTextAsync(path));
+        }
+        finally { window.Close(); }
+    });
 
     [Fact]
     public Task SwitchingToTheEditorDisablesPageInputDuringTheReload() => HeadlessTests.RunAsync(async profile =>

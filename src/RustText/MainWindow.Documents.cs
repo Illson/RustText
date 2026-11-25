@@ -950,6 +950,11 @@ public partial class MainWindow
     private async Task ToggleLogModeAsync(WorkTab tab)
     {
         if (_closing || _workspaceSwitchPending || tab.Saving || tab.Closing || tab.Loading || tab.CheckingSession) return;
+        if (tab.Console is { } capture)
+        {
+            ToggleConsoleLogMode(tab, capture);
+            return;
+        }
         if (tab.Deferred is not null) await ActivateDeferredAsync(tab);
         if (tab.Deferred is not null || !_tabs.ContainsKey(tab.Id) || tab.Loading) return;
         tab.Loading = true;
@@ -1180,7 +1185,7 @@ public partial class MainWindow
     {
         if (tab.EditorLogFilter?.IsFiltering == true) CloseEditorLevelFilter(tab);
         Select(tab);
-        if (tab.Editor is not { } editor)
+        if (tab.SearchEditor is not { } editor)
         {
             return;
         }
@@ -1456,7 +1461,11 @@ public partial class MainWindow
         public TextBlock LoadMark { get; set; } = null!;
         public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }
+        public ConsoleCapture? Console { get; set; }
+        public ConsoleTextView? ConsoleText => Item.Content as ConsoleTextView;
+        public string? ConsoleDisconnectStatus { get; set; }
         public TextEditor? Editor { get; set; }
+        public TextEditor? SearchEditor => Editor ?? ConsoleText?.Editor;
         public EditorLogFilter? EditorLogFilter { get; set; }
         public MultiCaretEditing? MultiCaret { get; set; }
         public LogView? Log { get; set; }

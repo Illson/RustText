@@ -103,7 +103,7 @@ public partial class MainWindow
         _searchDebounce.Tick += (_, _) =>
         {
             _searchDebounce.Stop();
-            if (PanelHost.IsVisible && ActiveTab?.Editor is not null)
+            if (PanelHost.IsVisible && ActiveTab?.SearchEditor is not null)
                 Run(() => FindMatchesAsync(automatic: true));
         };
         Closed += (_, _) => CancelSearch();
@@ -169,7 +169,7 @@ public partial class MainWindow
             return;
         }
 
-        if (ActiveTab?.Editor is { } editor && !_searchInput.IsKeyboardFocusWithin && !_replacement.IsKeyboardFocusWithin)
+        if (ActiveTab?.SearchEditor is { } editor && !_searchInput.IsKeyboardFocusWithin && !_replacement.IsKeyboardFocusWithin)
         {
             var selection = MultiCaretEditing.Primary(editor.TextArea);
             if (selection.Length > 0)
@@ -193,7 +193,7 @@ public partial class MainWindow
         _highlightPattern = null;
         _searchFocus = null;
         RefreshSearchHighlights();
-        ActiveTab?.Editor?.Focus();
+        ActiveTab?.SearchEditor?.Focus();
     }
 
     private void ForgetSearchTab(WorkTab tab)
@@ -234,7 +234,7 @@ public partial class MainWindow
         _searchResults.Items.Clear();
         _searchStatus.Text = "";
         ToolTip.SetTip(_searchStatus, null);
-        var editor = _searchTab?.Editor;
+        var editor = _searchTab?.SearchEditor;
         _findAll.IsEnabled = editor is { IsReadOnly: false };
         RefreshSearchHighlights();
         if (PanelHost.IsVisible && editor is not null && !string.IsNullOrEmpty(_searchInput.Text)
@@ -254,7 +254,7 @@ public partial class MainWindow
     }
 
     private static bool IsAutomaticSearchSize(WorkTab tab) =>
-        (tab.Log?.FileLength ?? tab.Stamp?.Length ?? (long)(tab.Editor?.Document.TextLength ?? 0) * sizeof(char))
+        (tab.Log?.FileLength ?? tab.Stamp?.Length ?? (long)(tab.SearchEditor?.Document.TextLength ?? 0) * sizeof(char))
         < TextOperations.AutomaticSearchMaxBytes;
 
     private Task FindAsync() => FindMatchesAsync();
@@ -345,19 +345,20 @@ public partial class MainWindow
                     }
                     continue;
                 }
-                if (tab.Editor is not { } editor)
+                if (tab.SearchEditor is not { } editor)
                 {
                     incomplete |= tab.Deferred is not null || tab.Loading || tab.Recovery is not null;
                     continue;
                 }
 
+                incomplete |= tab.ConsoleText?.HasEarlierOutput == true;
                 var text = editor.Text;
                 var revision = tab.Revision;
                 var previewLimit = 100 - results.Count;
                 var caretLimit = selectAll ? MultiCaretEditing.MaxCarets : 0;
                 var result = await Task.Run(
                     () => TextOperations.Find(text, new TextMatcher(options, query), previewLimit, source.Token, caretLimit), source.Token);
-                if (tab.Revision != revision || !ReferenceEquals(tab.Editor, editor))
+                if (tab.Revision != revision || !ReferenceEquals(tab.SearchEditor, editor))
                 {
                     incomplete = true;
                     continue;
@@ -426,7 +427,7 @@ public partial class MainWindow
 
     private async Task NavigateSearchFromAsync(bool backward, int? startOffset)
     {
-        if (ActiveTab is not { Editor: { } editor } tab)
+        if (ActiveTab is not { SearchEditor: { } editor } tab)
         {
             return;
         }
@@ -450,7 +451,7 @@ public partial class MainWindow
         var text = editor.Text;
         var revision = tab.Revision;
         var result = await Task.Run(() => TextOperations.FindNext(text, new TextMatcher(options, query), offset, backward), _lifetime.Token);
-        if (tab.Revision != revision || !ReferenceEquals(tab.Editor, editor) || !ReferenceEquals(ActiveTab, tab)
+        if (tab.Revision != revision || !ReferenceEquals(tab.SearchEditor, editor) || !ReferenceEquals(ActiveTab, tab)
             || CurrentQuery() != options)
         {
             return;
@@ -532,7 +533,7 @@ public partial class MainWindow
     {
         foreach (var tab in _tabs.Values)
         {
-            if (tab.Highlights is not { } highlights || tab.Editor is not { } editor)
+            if ((tab.Highlights ?? tab.ConsoleText?.Highlights) is not { } highlights || tab.SearchEditor is not { } editor)
             {
                 continue;
             }
