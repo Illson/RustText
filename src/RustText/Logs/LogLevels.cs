@@ -31,7 +31,7 @@ internal static partial class LogLevels
         string.Equals(Path.GetExtension(path), ".log", StringComparison.OrdinalIgnoreCase);
 
     internal static bool StartsRecord(string text) => DatedHeader().IsMatch(text)
-        || HeaderLevel().Match(text, 0, Math.Min(text.Length, 256)) is { Success: true, Index: 0 };
+        || Classify(text, headerOnly: true) != LogLevel.Other;
 
     internal static bool HasLogRecords(string path, TextEncodingKind? encoding, CancellationToken token)
     {
@@ -67,7 +67,7 @@ internal static partial class LogLevels
         return recognized >= 2 && recognized * 2 >= nonEmpty;
     }
 
-    internal static LogLevel Classify(string text)
+    internal static LogLevel Classify(string text, bool headerOnly = false)
     {
         if (text.Length == 0) return LogLevel.Other;
         var close = text[0] == '<' ? text.IndexOf('>', 1, Math.Min(4, text.Length - 1)) : -1;
@@ -82,10 +82,12 @@ internal static partial class LogLevels
         }
         var end = Math.Min(1024, text.Length);
         var field = StructuredLevel().Match(text, 0, end);
-        if (!field.Success)
+        var json = text.AsSpan().TrimStart().StartsWith("{");
+        if (!field.Success || (headerOnly && field.Index != 0 && !json))
         {
-            if (text.AsSpan().TrimStart().StartsWith("{")) return LogLevel.Other;
+            if (json) return LogLevel.Other;
             field = HeaderLevel().Match(text, 0, Math.Min(end, 256));
+            if (headerOnly && field.Index != 0) return LogLevel.Other;
         }
         if (!field.Success) return LogLevel.Other;
         return field.Groups["level"].Value.ToUpperInvariant() switch

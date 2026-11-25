@@ -22,6 +22,11 @@ public sealed class ConsoleCaptureTests
     [InlineData("", "tail\n[ERR] failed", "full-widthtail\r\n[ERR] failed\r\n")]
     [InlineData(" ", "tail\n[ERR] failed", "full-width tail\r\n[ERR] failed\r\n")]
     [InlineData(" ", "[ERR] failed", "full-width\r\n[ERR] failed\r\n")]
+    [InlineData(" ", "{\"msg\":\"next\",\"level\":\"error\"}", "full-width\r\n{\"msg\":\"next\",\"level\":\"error\"}\r\n")]
+    [InlineData(" ", "<11>second", "full-width\r\n<11>second\r\n")]
+    [InlineData(" ", "level=warn next", "full-width\r\nlevel=warn next\r\n")]
+    [InlineData(" ", "details level=error", "full-width details level=error\r\n")]
+    [InlineData(" ", "<192>invalid", "full-width <192>invalid\r\n")]
     [InlineData(" ", "\n[ERR] failed", "full-width\r\n[ERR] failed\r\n")]
     public async Task CapturePreservesConsoleRecordBoundaries(string padding, string followingRows, string expected)
     {
