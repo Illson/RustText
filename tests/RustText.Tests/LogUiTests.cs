@@ -14,6 +14,7 @@ using AvaloniaEdit;
 using RustText.Demo;
 using RustText.Demo.Editor;
 using RustText.Demo.Logs;
+using RustText.Demo.Platform;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -672,6 +673,45 @@ public sealed class LogUiTests
             await WriteAppend(path, Encoding.UTF8.GetBytes("Error appended while filtered\n"));
             await HeadlessTests.WaitForAsync(() => filtered.Text?.Contains("Error appended while filtered", StringComparison.Ordinal) == true);
             Assert.DoesNotContain("Info row-", filtered.Text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task WrappedConsoleRecordKeepsOneNumberAndItsLevelAcrossFrames() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "console-wrap.log");
+        const string header = "2026-11-25 12:00:00.0000 WARN: ";
+        var firstPart = header + new string('x', 240) + " registered for ID";
+        const string tail = "101; requested ID is 102";
+        using var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
+        await using var writer = new StreamWriter(file);
+        var (_, pendingJoin) = await ConsoleCapture.CopyFrameAsync(new StringReader(firstPart + " \0"), writer, 1, 1024, default);
+
+        var (window, log) = await ShowLogAsync(path, new LogTabState(WordWrap: true));
+        try
+        {
+            await InvokeTask(log, "ShowLevelFilterAsync");
+            var panel = (LogLevelFilterPanel)Field(log, "_levelFilter");
+            panel.SetLevels(LogLevel.Warning);
+            var filtered = (TextBox)Field(log, "_filteredLogText");
+            await HeadlessTests.WaitForAsync(() => filtered.Text == firstPart);
+            await ConsoleCapture.CopyFrameAsync(new StringReader($"{tail}\n[ERR] skip\n[WARN] next"), writer, 3, 1024, default, pendingJoin);
+
+            var gutter = (TextBlock)Field(log, "_lineGutterText");
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("[WARN] next", StringComparison.Ordinal) == true
+                && gutter.Text?.EndsWith("3", StringComparison.Ordinal) == true);
+            Assert.Equal(firstPart + " " + tail + Environment.NewLine + "[WARN] next", filtered.Text);
+            Assert.Equal("Строк на странице · 3", ((TextBlock)Field(log, "_countLabel")).Text);
+            var labels = gutter.Text!.Split(Environment.NewLine, StringSplitOptions.None);
+            Assert.True(labels.Length > 2);
+            Assert.Equal("1", labels[0]);
+            Assert.Equal("3", labels[^1]);
+            Assert.All(labels[1..^1], label => Assert.Empty(label));
+
+            panel.SetLevels(LogLevel.Other);
+            await HeadlessTests.WaitForAsync(() => ((TextBlock)Field(log, "_filterStatus")).Text == "Совпадений нет");
+            Assert.Empty(filtered.Text!);
         }
         finally { await CloseLogAsync(window, log); }
     });

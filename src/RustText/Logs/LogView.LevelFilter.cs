@@ -261,6 +261,7 @@ internal sealed partial class LogView
         if (_levelFilterViewport?.IsVisible != true) return;
         var scrollViewer = _filteredLogText.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
         AttachFilteredScrollViewer(scrollViewer);
+        if (_wordWrap) UpdateLineGutterText();
         SyncFilteredViewport();
     }
 

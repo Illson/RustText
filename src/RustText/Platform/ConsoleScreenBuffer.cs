@@ -12,7 +12,7 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
     private readonly SafeFileHandle _output;
     private readonly ConsoleScrollTracker? _scrollTracker;
     private BufferInfo? _previous;
-    private string[] _tail = [];
+    private ConsoleScreenRow[] _tail = [];
     private long _scrollAlreadyCaptured;
 
     public ConsoleScreenBuffer(int processId)
@@ -38,7 +38,7 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
         }
     }
 
-    public string[] ReadNewRows(CancellationToken token)
+    public ConsoleScreenRow[] ReadNewRows(CancellationToken token)
     {
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -119,7 +119,7 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
         return reported;
     }
 
-    private int FindBoundary(ReadOnlySpan<string> rows, int first, int? expected)
+    private int FindBoundary(ReadOnlySpan<ConsoleScreenRow> rows, int first, int? expected)
     {
         if (_tail.Length == 0) return 0;
         if (expected is { } count && count <= rows.Length)
@@ -163,9 +163,9 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
         return info;
     }
 
-    private unsafe string[]? ReadRows(short width, int first, int end, CancellationToken token)
+    private unsafe ConsoleScreenRow[]? ReadRows(short width, int first, int end, CancellationToken token)
     {
-        var rows = new string[end - first];
+        var rows = new ConsoleScreenRow[end - first];
         if (rows.Length == 0) return rows;
         var chunkRows = Math.Min(rows.Length, Math.Max(1, 8192 / width));
         var cells = new Cell[width * chunkRows];
@@ -191,8 +191,12 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
                         if ((cell.Attributes & TrailingCharacterCell) != 0) continue;
                         text[length++] = cell.Character is 0 or '\r' or '\n' ? ' ' : (char)cell.Character;
                     }
+                    var fullLength = length;
                     while (length > 0 && text[length - 1] == ' ') length--;
-                    rows[start - first + row] = new string(text, 0, length);
+                    // shortcut: the last blank may be a printed space; use native wrap metadata if it becomes available.
+                    var mayWrap = length > 0 && fullLength - length <= 1;
+                    rows[start - first + row] = new ConsoleScreenRow(
+                        new string(text, 0, mayWrap ? fullLength : length), mayWrap);
                 }
             }
         }
@@ -250,3 +254,5 @@ internal sealed partial class ConsoleScreenBuffer : IDisposable
     private static unsafe partial bool ReadConsoleOutput(SafeFileHandle output, Cell* cells, Coord size,
         Coord position, ref Rect area);
 }
+
+internal readonly record struct ConsoleScreenRow(string Text, bool MayWrap);

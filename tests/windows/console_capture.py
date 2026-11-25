@@ -51,7 +51,10 @@ def check(result, name):
 
 
 def write_rows(kernel, handle, rows):
-    text = "".join(row + "\r\n" for row in rows)
+    write_text(kernel, handle, "".join(row + "\r\n" for row in rows))
+
+
+def write_text(kernel, handle, text):
     written = wintypes.DWORD()
     check(kernel.WriteConsoleW(handle, text, len(text), ctypes.byref(written), None), "WriteConsoleW")
     if written.value != len(text):
@@ -108,6 +111,15 @@ def fixture(kernel):
                 rows = ["repeat"] * int(command[1:])
             elif command == "control":
                 rows = ["control"]
+            elif command in ("wrap-start", "wrap-start-space"):
+                width = console_info(kernel, handle)[0]
+                padding = " " if command == "wrap-start-space" else ""
+                write_text(kernel, handle, "[INFO] ".ljust(width - len(padding), "x") + padding)
+                print(f"ok {width}", flush=True)
+                continue
+            elif command == "wrap-end":
+                # Overwrite the shorter numbered rows left in this part of the buffer.
+                rows = ["tail/segment", "[ERROR] separate"]
             elif command == "burst":
                 number = 1
                 for index in range(62):
@@ -181,7 +193,12 @@ def expect(lines, expected, timeout=10):
             raise RuntimeError(f"Unexpected console frame size: {count}")
         actual.extend(take(lines, deadline, "console row") for _ in range(count))
     if actual != expected:
-        raise AssertionError(f"Expected {len(expected)} rows, captured {len(actual)} or got them out of order")
+        first_difference = next((i for i, (a, b) in enumerate(zip(actual, expected)) if a != b),
+                                min(len(actual), len(expected)))
+        raise AssertionError(f"Expected {len(expected)} rows, captured {len(actual)}; "
+                             f"first difference at row {first_difference + 1}: "
+                             f"{actual[first_difference:first_difference + 1]!r} "
+                             f"instead of {expected[first_difference:first_difference + 1]!r}")
 
 
 def idle(lines):
@@ -194,11 +211,13 @@ def idle(lines):
     raise AssertionError(f"Unexpected duplicate console output: {line!r}")
 
 
-def send_fixture(process, lines, command, expected):
+def send_fixture(process, lines, command, expected=None):
     process.stdin.write(command + "\n")
     process.stdin.flush()
-    if take(lines, time.monotonic() + 5, f"fixture response to {command}") != f"ok {expected}":
+    reply = take(lines, time.monotonic() + 5, f"fixture response to {command}")
+    if not reply.startswith("ok ") or (expected is not None and reply != f"ok {expected}"):
         raise RuntimeError(f"Fixture did not complete {command}")
+    return int(reply[3:])
 
 
 def stop(process):
@@ -286,6 +305,13 @@ def run(executable):
         send_fixture(fixture_process, fixture_lines, "control", 1)
         expect(worker_lines, ["control"])
         idle(worker_lines)
+
+        for command, padding in (("wrap-start", ""), ("wrap-start-space", " ")):
+            width = send_fixture(fixture_process, fixture_lines, command)
+            expect(worker_lines, ["[INFO] ".ljust(width - len(padding), "x") + padding + "\0"])
+            send_fixture(fixture_process, fixture_lines, "wrap-end", 2)
+            expect(worker_lines, ["tail/segment", "[ERROR] separate"])
+            idle(worker_lines)
 
         fixture_process.stdin.close()
         if fixture_process.wait(timeout=5) or worker.wait(timeout=5):

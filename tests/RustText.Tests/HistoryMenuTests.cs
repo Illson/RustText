@@ -45,6 +45,7 @@ public sealed class HistoryMenuTests
                 var fileCommands = fileMenu.Items.OfType<MenuItem>().ToArray();
                 Assert.DoesNotContain(fileCommands, item => MenuHeader(item) == "Шифрование");
                 Assert.DoesNotContain(fileCommands, item => MenuHeader(item) == "Удалить с диска");
+                Assert.DoesNotContain(fileCommands, item => MenuHeader(item) == "Подключиться к консоли…");
                 Assert.Single(fileCommands, item => MenuHeader(item) == "Настроить открытие файлов в Windows…");
 
                 var toolsGroups = toolsMenu.Items.OfType<MenuItem>().ToArray();
@@ -55,7 +56,7 @@ public sealed class HistoryMenuTests
                 }, toolsGroups.Select(MenuHeader));
 
                 var terminalGroup = toolsGroups.Single(item => MenuHeader(item) == "Терминал");
-                Assert.Equal(new[] { "CMD", "PowerShell" }, MenuLabels(terminalGroup));
+                Assert.Equal(new[] { "CMD", "PowerShell", "Подключиться к консоли…" }, MenuLabels(terminalGroup));
 
                 var editorGroup = toolsGroups.Single(item => MenuHeader(item) == "Редактор и просмотр");
                 Assert.Equal(new[] { "Перейти к строке…   Ctrl+G", "Перенос строк", "Масштаб текста" }, MenuLabels(editorGroup));
