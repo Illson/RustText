@@ -17,6 +17,7 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
+using AvaloniaEdit.Folding;
 using AvaloniaEdit.Rendering;
 using AvaloniaEdit.Editing;
 using RustText.Demo;
@@ -3282,6 +3283,40 @@ public sealed class WorkspaceTests
                 var address = frame.Address + y * frame.RowBytes + x * 4;
                 return Color.FromRgb(Marshal.ReadByte(address, 2), Marshal.ReadByte(address, 1), Marshal.ReadByte(address, 0));
             }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapUsesVisibleRowsWhenFoldingOffsetsWrapping() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "folded-wrap.json");
+        await File.WriteAllTextAsync(path, "[\n [\n      1,\n      2,\n      3\n ],\ntrue,\n\"x\"\n]");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var view = editor.TextArea.TextView;
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            await HeadlessTests.WaitForAsync(() => view.Bounds.Width > 200
+                && view.GetService(typeof(FoldingManager)) is FoldingManager m && m.AllFoldings.Count() == 2);
+            var manager = (FoldingManager)view.GetService(typeof(FoldingManager))!;
+            manager.AllFoldings.Last().IsFolded = true;
+            var line = editor.Document.GetLineByNumber(8);
+            editor.Document.Replace(line.Offset + 1, 1, new string('x', (int)(4.3 * view.Bounds.Width / view.WideSpaceWidth)));
+            window.UpdateLayout();
+            Assert.Equal(editor.Document.LineCount, (int)Math.Round(view.DocumentHeight / view.DefaultLineHeight));
+            Assert.Equal(7, view.GetDocumentLineByVisualTop(2.5 * view.DefaultLineHeight).LineNumber);
+
+            var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+            using var bitmap = new RenderTargetBitmap(size);
+            using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+            using var frame = pixels.Lock();
+            bitmap.Render(minimap);
+            bitmap.CopyPixels(frame);
+            var thirdRow = frame.Address + 7 * frame.RowBytes;
+            // The visible row starts with "true,", not the six spaces of the folded line.
+            Assert.NotEqual(Marshal.ReadInt32(thirdRow, 50 * 4), Marshal.ReadInt32(thirdRow, 3 * 4));
         }
         finally { await CloseAsync(window); }
     });

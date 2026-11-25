@@ -235,7 +235,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
         var view = _editor.TextArea.TextView;
         if (!_editor.WordWrap || view.DocumentHeight <= 0) return (document.LineCount, 0);
         var rows = Math.Max(1, (int)Math.Round(view.DocumentHeight / view.DefaultLineHeight));
-        return rows == document.LineCount ? (rows, 0) : (rows, view.DocumentHeight);
+        return (rows, view.DocumentHeight);
     }
 
     private void Jump(PointerEventArgs e)
