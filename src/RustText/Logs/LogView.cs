@@ -105,7 +105,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private Button _cancelSearchButton = null!;
     private readonly TextBlock _searchStatusText = SearchBar.Status();
     private readonly Button _cancelIndexButton = new() { Content = "Остановить индекс" };
-    private readonly Button _wrapButton = new();
+    private readonly CheckBox _wrapCheckBox = new() { Content = "Перенос строк" };
     private readonly Button _hideButton = new() { Content = "Скрыть начало" };
     private readonly Button _revealButton = new() { Content = "Показать весь файл" };
     private readonly Button _trimButton = new() { Content = "Удалить начало…" };
@@ -275,7 +275,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             var horizontalScroll = value ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
             ScrollViewer.SetHorizontalScrollBarVisibility(_logText, horizontalScroll);
             ScrollViewer.SetHorizontalScrollBarVisibility(_filteredLogText, horizontalScroll);
-            _wrapButton.Content = value ? "Перенос: вкл." : "Перенос: выкл.";
+            _wrapCheckBox.IsChecked = value;
         }
     }
 
@@ -746,14 +746,13 @@ internal sealed partial class LogView : UserControl, IDisposable
         SetButtonStyle(_indexButton, "focus-quiet");
         SetButtonStyle(_cancelIndexButton, "focus-quiet");
         SetButtonStyle(_openSearchButton, "focus-quiet");
-        SetButtonStyle(_wrapButton, "focus-quiet");
         SetButtonStyle(_hideButton, "focus-quiet");
         SetButtonStyle(_revealButton, "focus-quiet");
         SetButtonStyle(_trimButton, "focus-danger");
         SetButtonStyle(_cancelTrimButton, "focus-quiet");
         var fileActions = new StackPanel { Spacing = 2 };
         var actionsFlyout = new Flyout { Content = fileActions, Placement = PlacementMode.Top };
-        foreach (var button in new[] { _indexButton, _wrapButton, _hideButton, _revealButton, _trimButton })
+        foreach (var button in new[] { _indexButton, _wrapCheckBox, _hideButton, _revealButton, _trimButton })
         {
             button.HorizontalAlignment = HorizontalAlignment.Stretch;
             button.HorizontalContentAlignment = HorizontalAlignment.Left;
@@ -852,7 +851,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _indexButton.Click += (_, _) => ToggleIndexing();
         _cancelIndexButton.Click += (_, _) => _indexCancellation?.Cancel();
         _openSearchButton.Click += (_, _) => FocusSearch();
-        _wrapButton.Click += (_, _) => WordWrap = !WordWrap;
+        _wrapCheckBox.Click += (_, _) => WordWrap = _wrapCheckBox.IsChecked == true;
         _hideButton.Click += async (_, _) => await HideBeginningAsync();
         _revealButton.Click += async (_, _) =>
         {
@@ -2416,9 +2415,6 @@ internal sealed partial class LogView : UserControl, IDisposable
         ToolTip.SetTip(_indexButton, _indexPaused && largeIndexOptInRequired
             ? "Большой файл не индексируется автоматически. Нажмите, чтобы начать полный проход."
             : "Построить индекс строк для навигации по файлу.");
-        _wrapButton.Content = _wordWrap ? "Перенос: вкл." : "Перенос: выкл.";
-        _wrapButton.Background = _wordWrap ? FocusTheme.Hover : Brushes.Transparent;
-        _wrapButton.Foreground = _wordWrap ? FocusTheme.Accent : FocusTheme.Text;
         _previousButton.IsEnabled = enabled && (_previousOffsets.Count > 0 || _page?.StartOffset > _hiddenOffset);
         _nextButton.IsEnabled = enabled && _page?.HasMore == true;
         _startButton.IsEnabled = enabled && _page is not null;

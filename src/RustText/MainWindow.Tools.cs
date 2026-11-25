@@ -14,6 +14,8 @@ namespace RustText.Demo;
 
 public partial class MainWindow
 {
+    private MenuItem _wordWrapMenu = null!;
+
     private void BuildMenus()
     {
         _recentMenu = new MenuItem { Header = "Недавние файлы" };
@@ -32,6 +34,9 @@ public partial class MainWindow
             finally { RefreshHistoryMenus(); }
         }));
         _showArchivedDrafts.ToggleType = MenuItemToggleType.CheckBox;
+        _wordWrapMenu = Command("Перенос строк", ToggleWrap);
+        _wordWrapMenu.ToggleType = MenuItemToggleType.CheckBox;
+        _wordWrapMenu.IsChecked = _wordWrap;
         TopMenu.Items.Add(MenuGroup("_Файл",
             Command("Новая вкладка   Ctrl+N", () => NewTab()),
             Command("Новое окно", () => Run(() => OpenWorkspaceWindowAsync(_workspaceId))),
@@ -62,7 +67,7 @@ public partial class MainWindow
                 Command("Подключиться к консоли…", () => Run(OpenConsoleAsync))),
             MenuGroup("Редактор и просмотр",
                 Command("Перейти к строке…   Ctrl+G", () => Run(GoToLineAsync)),
-                Command("Перенос строк", ToggleWrap),
+                _wordWrapMenu,
                 MenuGroup("Масштаб текста",
                     Command("Увеличить", () => ResizeText(1)),
                     Command("Уменьшить", () => ResizeText(-1)),
@@ -230,6 +235,7 @@ public partial class MainWindow
 
     private void ApplyTextAppearance()
     {
+        _wordWrapMenu.IsChecked = _wordWrap;
         foreach (var tab in _tabs.Values)
         {
             if (tab.Editor is { } editor)

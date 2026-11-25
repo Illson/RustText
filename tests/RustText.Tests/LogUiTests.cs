@@ -2,6 +2,8 @@ using System.Reflection;
 using System.Text;
 using Avalonia;
 using Avalonia.Automation;
+using Avalonia.Automation.Peers;
+using Avalonia.Automation.Provider;
 using Avalonia.Controls;
 using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
@@ -1233,6 +1235,8 @@ public sealed class LogUiTests
         {
             var text = (TextBox)Field(log, "_logText");
             var minimap = (LogView.LogMinimap)Field(log, "_minimap");
+            var wrap = Assert.IsType<CheckBox>(Field(log, "_wrapCheckBox"));
+            var toggle = (IToggleProvider)new ToggleButtonAutomationPeer(wrap);
             await HeadlessTests.WaitForAsync(() => text.Text == line
                 && Field(log, "_logScrollViewer") is ScrollViewer { Viewport.Width: > 0 });
             var scroll = (ScrollViewer)Field(log, "_logScrollViewer");
@@ -1241,7 +1245,10 @@ public sealed class LogUiTests
             Assert.True(scroll.Extent.Width <= scroll.Viewport.Width + 1);
             Assert.True(text.Bounds.Right <= minimap.Bounds.Left);
 
-            log.WordWrap = false;
+            Assert.True(wrap.IsChecked);
+            toggle.Toggle();
+            Assert.False(wrap.IsChecked);
+            Assert.False(log.WordWrap);
             await HeadlessTests.WaitForAsync(() => scroll.Extent.Width > scroll.Viewport.Width);
             var horizontalMaximum = scroll.Extent.Width - scroll.Viewport.Width;
             scroll.Offset = new Vector(horizontalMaximum, 0);
@@ -1249,6 +1256,7 @@ public sealed class LogUiTests
             Assert.True(text.Bounds.Right <= minimap.Bounds.Left);
 
             log.WordWrap = true;
+            Assert.True(wrap.IsChecked);
             await HeadlessTests.WaitForAsync(() => scroll.Extent.Width <= scroll.Viewport.Width + 1);
             Assert.Equal(0, scroll.Offset.X);
         }

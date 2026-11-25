@@ -223,6 +223,7 @@ public partial class MainWindow
             RestoreWorkspaceWindowSize(state.WindowWidth, state.WindowHeight, state.Maximized);
 
             _wordWrap = Settings.WordWrap ?? state.Wrap;
+            _wordWrapMenu.IsChecked = _wordWrap;
             _fontSize = Settings.FontSize ?? Math.Clamp(state.FontSize, 8, 48);
             _workspace.NextId = Math.Max(_workspace.NextId, state.Tabs.Concat(state.ClosedTabs ?? []).Select(tab => tab.Id).DefaultIfEmpty().Max());
             _root = state.Layout is { } layout ? RestoreLayout(layout) : MakeGroup();
