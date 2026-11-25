@@ -24,6 +24,7 @@ public partial class MainWindow
         var terminal = new ShellTab(shell, folder!, _fontSize);
         var tab = AddTab(select: false);
         tab.Shell = terminal;
+        tab.IsTransient = true;
         tab.CustomTitle = shell == ShellKind.Cmd ? "CMD" : "PowerShell";
         tab.Item.Content = terminal;
         UpdateTab(tab);

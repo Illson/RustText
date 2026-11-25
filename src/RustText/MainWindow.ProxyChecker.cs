@@ -21,6 +21,7 @@ public partial class MainWindow
 
         var view = new ProxyCheckerView();
         var tab = AddTab(select: false);
+        tab.IsTransient = true;
         tab.CustomTitle = "Прокси-чекер";
         tab.Item.Content = view;
         tab.Item.ContextMenu = new ContextMenu

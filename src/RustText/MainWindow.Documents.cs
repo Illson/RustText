@@ -684,6 +684,7 @@ public partial class MainWindow
         else _ = DetachEditor(tab);
         log.SetTextSize(_fontSize);
         tab.Log = log;
+        if (console is not null) tab.IsTransient = true;
         if (_closing) log.SetWindowCloseInputBlocked(true);
         if (draftName is null)
         {
@@ -1448,16 +1449,16 @@ public partial class MainWindow
         public TextBlock LoadMark { get; set; } = null!;
         public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }
+        public ConsoleCapture? Console { get; set; }
+        public ConsoleTextView? ConsoleText => Item.Content as ConsoleTextView;
+        public string? ConsoleDisconnectStatus { get; set; }
         public TextEditor? Editor { get; set; }
         public TextEditor? SearchEditor => Editor ?? ConsoleText?.Editor;
         public EditorLogFilter? EditorLogFilter { get; set; }
         public MultiCaretEditing? MultiCaret { get; set; }
         public LogView? Log { get; set; }
         public ShellTab? Shell { get; set; }
-        public ConsoleCapture? Console { get; set; }
-        public ConsoleTextView? ConsoleText => Item.Content as ConsoleTextView;
-        public string? ConsoleDisconnectStatus { get; set; }
-        public bool IsTransient => ProxyChecker is not null || Shell is not null || Console is not null;
+        public bool IsTransient { get; set; }
         public bool IsLog => PendingFileOpenMode is FileOpenMode.PagedEditor or FileOpenMode.Log
             || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
         public bool OpensAsLog => IsLog && !(Log?.EditsPagesByDefault
