@@ -2296,7 +2296,8 @@ public sealed class WorkspaceTests
     [InlineData(true)]
     public Task CtrlDoubleClickAddsWordsWithoutLosingSelections(bool existingSelection) => HeadlessTests.RunAsync(async profile =>
     {
-        const string original = "keep alpha\nу бета_2\nother";
+        var between = string.Concat(Enumerable.Repeat("middle row\n", 149));
+        var original = $"keep alpha\n{between}у бета_2\nother";
         var path = Path.Combine(profile, "ctrl-double-click.txt");
         await File.WriteAllTextAsync(path, original);
         var window = await OpenWorkspaceAsync(path);
@@ -2310,37 +2311,77 @@ public sealed class WorkspaceTests
             editor.CaretOffset = original.Length;
             if (existingSelection) editor.Select(0, 4);
 
-            DoubleClick(1, 8, RawInputModifiers.Control);
+            await DoubleClick(1, 8, RawInputModifiers.Control);
             Assert.Equal(existingSelection ? ["keep", "alpha"] : new[] { "alpha" }, SelectedWords());
 
-            DoubleClick(2, 5, RawInputModifiers.Control);
+            await DoubleClick(151, 5, RawInputModifiers.Control);
             var expectedWords = existingSelection ? ["keep", "alpha", "бета_2"] : new[] { "alpha", "бета_2" };
             Assert.Equal(expectedWords, SelectedWords());
 
-            DoubleClick(1, 8, RawInputModifiers.Control);
+            await DoubleClick(1, 8, RawInputModifiers.Control);
             Assert.Equal(expectedWords, SelectedWords());
 
             window.KeyTextInput("!");
-            Assert.Equal(existingSelection ? "! !\nу !\nother" : "keep !\nу !\nother", editor.Text);
+            Assert.Equal((existingSelection ? "! !" : "keep !") + $"\n{between}у !\nother", editor.Text);
             editor.Undo();
             Assert.Equal(original, editor.Text);
 
-            DoubleClick(3, 3, RawInputModifiers.None);
+            await DoubleClick(152, 3, RawInputModifiers.None);
             Assert.Equal("other", Assert.Single(SelectedWords()));
 
             IEnumerable<string> SelectedWords() => area.Selection.Segments
                 .Select(segment => editor.Document.GetText(segment.StartOffset, segment.Length));
 
-            void DoubleClick(int line, int column, RawInputModifiers modifiers)
+            async Task DoubleClick(int line, int column, RawInputModifiers modifiers)
             {
+                editor.ScrollToLine(line);
+                await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
+                view.EnsureVisualLines();
                 var point = view.TranslatePoint(view.GetVisualPosition(new TextViewPosition(line, column),
                     VisualYPosition.LineMiddle) - view.ScrollOffset, window)!.Value;
                 for (var click = 0; click < 2; click++)
                 {
                     window.MouseDown(point, MouseButton.Left, modifiers);
                     window.MouseUp(point, MouseButton.Left, modifiers);
+                    await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
                 }
             }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task CtrlDoubleClickPreservesColumnRowsWhenAddingAWord(bool reverse) => HeadlessTests.RunAsync(async profile =>
+    {
+        const string original = "abXcd\nefYgh\nijZkl\npick";
+        var path = Path.Combine(profile, "column.txt");
+        await File.WriteAllTextAsync(path, original);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var view = editor.TextArea.TextView;
+            editor.TextArea.Focus();
+            view.EnsureVisualLines();
+            Point At(int line, int column) => view.TranslatePoint(view.GetVisualPosition(new TextViewPosition(line, column),
+                VisualYPosition.LineMiddle) - view.ScrollOffset, window)!.Value;
+            var (start, end) = reverse ? (At(3, 4), At(1, 3)) : (At(1, 3), At(3, 4));
+            window.MouseDown(start, MouseButton.Left, RawInputModifiers.Alt);
+            window.MouseMove(end, RawInputModifiers.Alt | RawInputModifiers.LeftMouseButton);
+            window.MouseUp(end, MouseButton.Left, RawInputModifiers.Alt);
+            Assert.Equal(3, Assert.IsType<RectangleSelection>(editor.TextArea.Selection).Segments.Count());
+            var word = At(4, 2);
+            for (var i = 0; i < 2; i++)
+            {
+                window.MouseDown(word, MouseButton.Left, RawInputModifiers.Control);
+                window.MouseUp(word, MouseButton.Left, RawInputModifiers.Control);
+            }
+            window.KeyTextInput("!");
+            Assert.Equal("ab!cd\nef!gh\nij!kl\n!", editor.Text);
+            editor.Undo();
+            Assert.Equal(original, editor.Text);
         }
         finally { await CloseAsync(window); }
     });
@@ -2398,12 +2439,14 @@ public sealed class WorkspaceTests
     });
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public Task CtrlClicksAboveCaretLimitKeepExistingSelections(bool doubleClick) => HeadlessTests.RunAsync(async profile =>
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public Task CtrlClicksAboveCaretLimitKeepExistingSelections(bool doubleClick, bool column) => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "ctrl-click-limit.txt");
-        await File.WriteAllTextAsync(path, "a b\n" + string.Join('\n', Enumerable.Repeat("a", 9_999)));
+        var rows = MultiCaretEditing.MaxCarets + (column ? 1 : 0);
+        await File.WriteAllTextAsync(path, "a b\n" + string.Join('\n', Enumerable.Repeat("a", rows - 1)));
         var window = await OpenWorkspaceAsync(path);
         try
         {
@@ -2413,11 +2456,12 @@ public sealed class WorkspaceTests
             view.EnsureVisualLines();
             area.Focus();
             area.Caret.Offset = 0;
-            Press(window, Key.L, RawInputModifiers.Control | RawInputModifiers.Shift, PhysicalKey.L, "L");
+            if (column) area.Selection = new RectangleSelection(area, new TextViewPosition(rows, 2), new TextViewPosition(1, 1));
+            else Press(window, Key.L, RawInputModifiers.Control | RawInputModifiers.Shift, PhysicalKey.L, "L");
 
-            Assert.Equal(MultiCaretEditing.MaxCarets, MultiCaretEditing.Count(area));
             var originalRanges = area.Selection.Segments
                 .Select(segment => (segment.StartOffset, segment.EndOffset)).ToArray();
+            Assert.Equal(rows, originalRanges.Length);
             var originalPrimary = MultiCaretEditing.Primary(area);
             var point = view.TranslatePoint(view.GetVisualPosition(new TextViewPosition(1, 3),
                 VisualYPosition.LineMiddle) - view.ScrollOffset, window)!.Value;
@@ -2430,7 +2474,7 @@ public sealed class WorkspaceTests
                 window.MouseUp(point, MouseButton.Left, RawInputModifiers.Control);
             }
 
-            Assert.Equal(MultiCaretEditing.MaxCarets, MultiCaretEditing.Count(area));
+            if (column) Assert.IsType<RectangleSelection>(area.Selection);
             Assert.Equal(originalRanges, area.Selection.Segments
                 .Select(segment => (segment.StartOffset, segment.EndOffset)));
             Assert.Equal(originalPrimary, MultiCaretEditing.Primary(area));

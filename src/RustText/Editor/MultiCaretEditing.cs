@@ -153,21 +153,27 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         if (e.KeyModifiers is KeyModifiers.Control or KeyModifiers.Alt)
         {
             var point = e.GetPosition(view);
-            var documentPoint = point + view.ScrollOffset;
-            if (view.GetPosition(documentPoint) is not { } position) return;
-
             if (e.KeyModifiers == KeyModifiers.Control && e.ClickCount == 2
                 && lastCtrlClick is { } first && first.Click.Pointer == e.Pointer && first.Click.IsCurrent(Document)
                 && ReferenceEquals(first.Selection, _area.Selection) && first.CaretOffset == _area.Caret.Offset)
             {
-                // Use the state before the first click toggled a caret or selection.
-                _caretClick = first.Click with { Point = point, Word = WordAt(documentPoint) };
+                // Toggling a distant caret on the first release may have scrolled the document.
+                _caretClick = first.Click with { Point = point, Word = WordAt(first.Click.Character) };
             }
             else
             {
+                var documentPoint = point + view.ScrollOffset;
+                if (view.GetPosition(documentPoint) is not { } position) return;
+                var (ranges, primary) = ClickRanges();
+                if (ranges.Length > MaxCarets)
+                {
+                    ReportCaretLimit();
+                    e.Handled = e.KeyModifiers == KeyModifiers.Control;
+                    return;
+                }
                 // A weak version check avoids retaining the document's edit history between clicks.
                 _caretClick = new(e.Pointer, point, e.KeyModifiers, new(Document.Version), Document.GetOffset(position.Location),
-                    Current?.Ranges ?? [Primary(_area)], Current?.PrimaryIndex ?? 0);
+                    ranges, primary, e.KeyModifiers == KeyModifiers.Control ? view.GetPositionFloor(documentPoint) : null);
             }
 
             // Let AvaloniaEdit handle drags, including rectangular selection with Alt.
@@ -213,6 +219,21 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         e.Handled = true;
     }
 
+    private (CaretRange[] Ranges, int PrimaryIndex) ClickRanges()
+    {
+        if (Current is { } multi) return (multi.Ranges, multi.PrimaryIndex);
+        if (_area.Selection is RectangleSelection column)
+        {
+            var backwards = column.EndPosition.VisualColumn < column.StartPosition.VisualColumn;
+            var ranges = column.Segments.Take(MaxCarets + 1).Select(s => backwards
+                ? new CaretRange(s.EndOffset, s.StartOffset) : new CaretRange(s.StartOffset, s.EndOffset)).ToArray();
+            if (ranges.Length > 0) return (ranges, column.EndPosition.Line < column.StartPosition.Line ? 0 : ranges.Length - 1);
+        }
+        return ([Primary(_area)], 0);
+    }
+
+    private void ReportCaretLimit() => _status($"Слишком много курсоров. Допустимо до {LineNumbers.Format(MaxCarets)}.");
+
     private void ToggleCaret(CaretClick click)
     {
         var ranges = click.Ranges;
@@ -221,7 +242,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         {
             if (ranges.Length >= MaxCarets)
             {
-                _status($"Слишком много курсоров. Допустимо до {LineNumbers.Format(MaxCarets)}.");
+                ReportCaretLimit();
                 SetCarets(ranges, click.PrimaryIndex);
             }
             else
@@ -242,9 +263,9 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         }
     }
 
-    private CaretRange WordAt(Point documentPoint)
+    private CaretRange WordAt(TextViewPosition? character)
     {
-        if (_area.TextView.GetPositionFloor(documentPoint) is not { IsAtEndOfLine: false } position) return default;
+        if (character is not { IsAtEndOfLine: false } position) return default;
         var line = Document.GetLineByNumber(position.Line);
         var offset = line.Offset + position.Column - 1;
         if (offset >= line.EndOffset || char.IsWhiteSpace(Document.GetCharAt(offset))) return default;
@@ -261,7 +282,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
     }
 
     private sealed record CaretClick(IPointer Pointer, Point Point, KeyModifiers Modifiers, WeakReference<ITextSourceVersion> Version,
-        int Offset, CaretRange[] Ranges, int PrimaryIndex, CaretRange? Word = null)
+        int Offset, CaretRange[] Ranges, int PrimaryIndex, TextViewPosition? Character, CaretRange? Word = null)
     {
         public bool IsCurrent(TextDocument document) => Version.TryGetTarget(out var version) && ReferenceEquals(version, document.Version);
     }
@@ -420,7 +441,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         var (normalized, primary) = Normalize(ranges, primaryIndex);
         if (normalized.Length > MaxCarets)
         {
-            _status($"Слишком много курсоров. Допустимо до {LineNumbers.Format(MaxCarets)}.");
+            ReportCaretLimit();
             return false;
         }
         _area.Caret.Offset = normalized[primary].Caret;
