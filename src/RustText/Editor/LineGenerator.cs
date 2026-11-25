@@ -14,9 +14,34 @@ internal sealed class LineGenerator(string template, long rows)
 
     public async Task<string> GenerateTextAsync(IProgress<double>? progress, CancellationToken token)
     {
+        // System.String.MaxLength in the Windows x64 runtime, measured in UTF-16 code units.
+        const int maxStringLength = 0x3FFFFFDF;
+        Int128 length = rows - 1;
+        foreach (var part in _parts)
+        {
+            if (length > maxStringLength) break;
+            length += part.Kind switch
+            {
+                PartKind.Integer => IntegerCharacters(part.Number),
+                PartKind.Guid => (Int128)36 * rows,
+                PartKind.Random => (Int128)part.Number * rows,
+                _ => (Int128)part.Text.Length * rows
+            };
+        }
+        if (length > maxStringLength)
+            throw new InvalidDataException("Результат не помещается в одну строку .NET. Выберите «В файл…».");
         using var writer = new StringWriter(CultureInfo.InvariantCulture);
         await GenerateAsync(writer, progress, token);
         return writer.ToString();
+    }
+
+    private Int128 IntegerCharacters(Int128 first)
+    {
+        var end = first + rows;
+        var characters = rows + Int128.Clamp(-first, 0, rows); // One digit per row and a sign for negatives.
+        for (Int128 place = 10; place <= Int128.Max(-first, end - 1); place *= 10)
+            characters += Int128.Clamp(end - place, 0, rows) + Int128.Clamp(1 - place - first, 0, rows);
+        return characters;
     }
 
     public async Task GenerateFileAsync(string path, IProgress<double>? progress, CancellationToken token)

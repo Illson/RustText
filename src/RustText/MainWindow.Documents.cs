@@ -35,15 +35,25 @@ public partial class MainWindow
     private void NewTab(string text = "")
     {
         var focusEditor = CaptureEditorFocusRequest();
-        var tab = AddTab();
-        AttachEditor(tab, text);
-        if (text.Length > 0)
+        var document = new TextDocument(text);
+        document.UndoStack.MarkAsOriginalFile();
+        var tab = AddTab(select: false);
+        try
         {
-            tab.RestoredDirty = tab.Dirty = true;
-            UpdateTab(tab);
+            AttachEditor(tab, document, resetDirtyState: true);
+            if (text.Length > 0)
+            {
+                tab.RestoredDirty = tab.Dirty = true;
+                UpdateTab(tab);
+            }
+            TrackDetachedDraft(tab);
+            Select(tab);
         }
-
-        TrackDetachedDraft(tab);
+        catch
+        {
+            RemoveTab(tab);
+            throw;
+        }
         focusEditor(tab);
     }
 

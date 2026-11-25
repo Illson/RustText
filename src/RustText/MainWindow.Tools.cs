@@ -381,7 +381,7 @@ public partial class MainWindow
             }
             catch (OutOfMemoryException) when (!export)
             {
-                status.Text = "Недостаточно памяти для открытия результата во вкладке.";
+                status.Text = "Недостаточно памяти для открытия результата во вкладке. Выберите «В файл…».";
             }
             catch (Exception error) when (IsUserError(error))
             {

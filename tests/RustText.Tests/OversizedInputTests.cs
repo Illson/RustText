@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Collections.Specialized;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
@@ -97,12 +98,64 @@ public sealed class OversizedInputTests(ITestOutputHelper output)
                 Assert.StartsWith(prefix + "1\n", editor.Text);
                 Assert.EndsWith(prefix + "100000", editor.Text);
                 Assert.Equal("исходный текст", Assert.IsType<TextEditor>(Property(original, "Editor")).Text);
+                inputs.Single(box => box.AcceptsReturn).Text = "";
+                inputs.Single(box => Equals(box.PlaceholderText, "Количество строк")).Text = "2147483649";
+                generate.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await HeadlessTests.WaitForAsync(() => generate.IsEnabled);
+                Assert.Contains(dialog.GetVisualDescendants().OfType<TextBlock>(), box => box.Text?.Contains("не помещается") == true);
+                Assert.Equal(tabCount + 1, Tabs(window).Count());
+                Assert.Same(generated, ActiveTab(window));
             }
             finally
             {
                 dialog.Close();
                 await pending;
             }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData("", 2_147_483_649L)]
+    [InlineData("{guid}", 40_000_000)]
+    [InlineData("{rand_string_9223372036854775807}", 1)]
+    [InlineData("{int_from_-99999999}", 150_000_000)]
+    public async Task ImpossibleTextIsRejectedBeforeWriting(string template, long rows)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        var generator = new LineGenerator(template, rows);
+        await Assert.ThrowsAsync<InvalidDataException>(() => generator.GenerateTextAsync(null, timeout.Token));
+    }
+
+    [Fact]
+    public Task FailedEditorAttachmentPreservesTheActiveDocument() => HeadlessTests.RunAsync(async _ =>
+    {
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            Invoke(window, "NewTab", "исходный текст");
+            var original = ActiveTab(window);
+            var count = Tabs(window).Count();
+            var group = (TabControl)Property(Property(original, "Group")!, "Tabs")!;
+            var items = group.Items.Count;
+            void FailDuringAttachment(object? sender, NotifyCollectionChangedEventArgs e)
+            {
+                if (e.NewItems?[0] is TabItem item)
+                    item.PropertyChanged += (_, change) =>
+                    {
+                        if (change.Property == ContentControl.ContentProperty && item.Content is Grid) throw new OutOfMemoryException();
+                    };
+            }
+            group.Items.CollectionChanged += FailDuringAttachment;
+            try
+            {
+                var error = Assert.Throws<TargetInvocationException>(() => Invoke(window, "NewTab", "результат"));
+                Assert.IsType<OutOfMemoryException>(error.InnerException);
+            }
+            finally { group.Items.CollectionChanged -= FailDuringAttachment; }
+            Assert.Equal(count, Tabs(window).Count());
+            Assert.Equal(items, group.Items.Count);
+            Assert.Same(original, ActiveTab(window));
         }
         finally { await CloseAsync(window); }
     });
