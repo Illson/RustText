@@ -99,8 +99,9 @@
                 <TranslateTransform />
             </Path.RenderTransform>
         </Path>
-        <ContentControl Grid.Row="2" x:Name="PanelHost" IsVisible="False"
-                        HorizontalContentAlignment="Stretch" />
+        <Border Grid.Row="2" x:Name="PanelHost" IsVisible="False" Padding="8,5"
+                Background="{x:Static local:FocusTheme.Panel}" BorderBrush="{x:Static local:FocusTheme.Border}"
+                BorderThickness="0,1,0,0" />
         <Border Grid.Row="3" x:Name="StatusBar" Padding="12,3" MinHeight="26" BorderBrush="{x:Static local:FocusTheme.StatusBorder}"
                 BorderThickness="0,1,0,0" Background="{x:Static local:FocusTheme.StatusBar}">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">

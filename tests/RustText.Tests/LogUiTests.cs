@@ -1148,7 +1148,7 @@ public sealed class LogUiTests
             {
                 log.GetType().GetMethod("FocusSearch")!.Invoke(log, null);
                 ((TextBox)Field(log, "_searchBox")).Text = "needle";
-                await InvokeTask(log, "SearchAsync", false);
+                await InvokeTask(log, "SearchAsync", false, false);
                 await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy")
                     && ((System.Collections.ICollection)Field(log, "_searchResults")).Count == 8);
                 await HeadlessTests.WaitForAsync(() => text.Bounds.Height > 0);
@@ -1200,6 +1200,35 @@ public sealed class LogUiTests
     });
 
     [Fact]
+    public Task TypingInLogSearchOpensTheFirstMatchingPageAndKeepsFocus() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-scroll.log");
+        var padding = string.Concat(Enumerable.Repeat("other row\n", 200));
+        var second = padding + new string('x', 9000) + "needle-one\n" + padding;
+        await File.WriteAllTextAsync(path, second + new string('x', 8996) + "needle-two\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, WordWrap: true));
+        try
+        {
+            var text = (TextBox)Field(log, "_logText");
+            var input = (TextBox)Field(log, "_searchBox");
+            text.Focus();
+            window.KeyPress(Key.F, RawInputModifiers.Control, PhysicalKey.F, "f");
+            Assert.True(input.IsFocused);
+
+            window.KeyTextInput("needle");
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == padding.Length && text.SelectedText == "needle"
+                && Field(log, "_logScrollViewer") is ScrollViewer { Offset.Y: > 0 });
+            Assert.True(input.IsFocused);
+
+            window.KeyTextInput("-two");
+            await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == second.Length && text.SelectedText == "needle-two"
+                && Field(log, "_logScrollViewer") is ScrollViewer { Offset.Y: > 0 });
+            Assert.True(input.IsFocused);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
     public Task GigabyteLogWaitsForTheFindCommand() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "gigabyte.log");
@@ -1219,7 +1248,8 @@ public sealed class LogUiTests
             await Task.Delay(650);
             Assert.Empty(results.Children);
             ((Button)Field(log, "_searchButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await HeadlessTests.WaitForAsync(() => results.Children.Count == 32);
+            var text = (TextBox)Field(log, "_logText");
+            await HeadlessTests.WaitForAsync(() => results.Children.Count == 32 && text.SelectedText == "needle");
         }
         finally { await CloseMainWindowAsync(window); }
     });
@@ -1408,8 +1438,8 @@ public sealed class LogUiTests
         try
         {
             ((TextBox)Field(log, "_searchBox")).Text = "hit";
-            await InvokeTask(log, "SearchAsync", false);
-            await InvokeTask(log, "SearchAsync", true);
+            await InvokeTask(log, "SearchAsync", false, false);
+            await InvokeTask(log, "SearchAsync", true, false);
             var buttons = (StackPanel)Field(log, "_searchResultButtons");
             var labels = buttons.Children.Cast<Button>().Select(button => ((TextBlock)button.Content!).Text!.Split(' ')[0]);
             Assert.Equal(Enumerable.Range(1, 34).Select(n => n.ToString()), labels);
@@ -1427,7 +1457,7 @@ public sealed class LogUiTests
         try
         {
             ((TextBox)Field(log, "_searchBox")).Text = "needle";
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             await InvokeTask(log, "NavigateMatchAsync", false);
 
             var pageEditor = PageEditor(log);
@@ -1460,7 +1490,7 @@ public sealed class LogUiTests
             var search = (TextBox)Field(log, "_searchBox");
             search.Text = "needle";
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             await HeadlessTests.WaitForAsync(() => ((System.Collections.ICollection)Field(log, "_searchResults")).Count > 0);
             await InvokeTask(log, "NavigateMatchAsync", false);
             await AssertSelectedNeedleAfterAsync(text, 128 * 1024);
@@ -1503,7 +1533,7 @@ public sealed class LogUiTests
         try
         {
             ((TextBox)Field(log, "_searchBox")).Text = "needle";
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             var results = (System.Collections.ICollection)Field(log, "_searchResults");
             Assert.Equal(32, results.Count);
             Assert.True((bool)Field(log, "_searchHasMore"));
@@ -1534,7 +1564,7 @@ public sealed class LogUiTests
         {
             ((TextBox)Field(log, "_searchBox")).Text = "(?=a)";
             ((ToggleButton)Field(log, "_regexBox")).IsChecked = true;
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             var results = (System.Collections.IList)Field(log, "_searchResults");
             Assert.Equal(32, results.Count);
             Assert.Equal(Enumerable.Range(0, 32), results.Cast<object>().Select(hit => (int)hit.GetType().GetProperty("MatchIndex")!.GetValue(hit)!));
@@ -1560,7 +1590,7 @@ public sealed class LogUiTests
         try
         {
             ((TextBox)Field(log, "_searchBox")).Text = "needle";
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             var hit = Assert.Single(((System.Collections.IList)Field(log, "_searchResults")).Cast<object>());
             Assert.True((long)hit.GetType().GetProperty("Offset")!.GetValue(hit)! > 1024 * 1024);
             Assert.Contains("Пропущена строка", log.StatusText);
@@ -1579,7 +1609,7 @@ public sealed class LogUiTests
         try
         {
             ((TextBox)Field(log, "_searchBox")).Text = "needle";
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             Assert.NotEmpty((System.Collections.ICollection)Field(log, "_searchResults"));
             var originalOffset = log.CurrentOffset;
 
@@ -1625,7 +1655,7 @@ public sealed class LogUiTests
         try
         {
             ((TextBox)Field(log, "_searchBox")).Text = "needle";
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             Assert.Equal(2, ((System.Collections.ICollection)Field(log, "_searchResults")).Count);
 
             await File.AppendAllTextAsync(path, " extended\nneedle appended\n");
@@ -1671,7 +1701,7 @@ public sealed class LogUiTests
         try
         {
             ((TextBox)Field(log, "_searchBox")).Text = "needle";
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             Assert.Single(((System.Collections.ICollection)Field(log, "_searchResults")).Cast<object>());
 
             await using (var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
@@ -1760,11 +1790,11 @@ public sealed class LogUiTests
             search.Text = "😀";
             await HeadlessTests.WaitForAsync(() => !(bool)Field(log, "_busy"));
             await WriteAppend(path, [0xF0, 0x9F]);
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             Assert.Empty((System.Collections.ICollection)Field(log, "_searchResults"));
 
             await WriteAppend(path, [0x98, 0x80, (byte)'\n', (byte)'n', (byte)'u', (byte)'l', (byte)'l', 0, (byte)'a', (byte)'f', (byte)'t', (byte)'e', (byte)'r', (byte)'\n']);
-            await InvokeTask(log, "SearchAsync", false);
+            await InvokeTask(log, "SearchAsync", false, false);
             await HeadlessTests.WaitForAsync(() => ((System.Collections.ICollection)Field(log, "_searchResults")).Count == 1);
             await InvokeTask(log, "NavigateMatchAsync", false);
             Assert.Equal("😀", SelectedText((TextBox)Field(log, "_logText")));

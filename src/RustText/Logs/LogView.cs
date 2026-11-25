@@ -439,7 +439,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
     }
 
-    private async Task<bool> OpenSearchHitAsync(LogSearchHit hit, LogSearchSnapshot snapshot)
+    private async Task<bool> OpenSearchHitAsync(LogSearchHit hit, LogSearchSnapshot snapshot, CancellationToken token = default)
     {
         if (!IsSearchSnapshotCurrent(snapshot))
         {
@@ -457,8 +457,11 @@ internal sealed partial class LogView : UserControl, IDisposable
             var pageBytes = Math.Clamp(hit.LineLengthBytes, LogDataReader.DefaultPageBytes, LogDataReader.MaximumSearchLineBytes);
             var readStamp = FileStamp.Read(_path, _file);
             if (readStamp.Identity != snapshot.Stamp.Identity) return false;
-            await LoadPageAsync(hit.Offset, saveHistory: true, maxPageBytes: pageBytes, expectedPageStamp: readStamp);
-            if (_closed) return false;
+            await LoadPageAsync(hit.Offset, saveHistory: true, maxPageBytes: pageBytes, expectedPageStamp: readStamp,
+                searchToken: token);
+            // Let the new page reset its scroll position before revealing the match.
+            await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Loaded);
+            if (_closed || token.IsCancellationRequested) return false;
             if (!IsSearchSnapshotCurrent(snapshot))
             {
                 ClearSearchResults();
@@ -472,12 +475,15 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_pageEdit is not null)
         {
             _pageEditor!.Select(hit.MatchIndex, hit.MatchLength);
+            _pageEditor.TextArea.Caret.BringCaretToView();
             return true;
         }
         var end = hit.MatchIndex + hit.MatchLength;
         _logText.CaretIndex = end;
         _logText.SelectionStart = hit.MatchIndex;
         _logText.SelectionEnd = end;
+        if (_logText.GetVisualDescendants().OfType<TextPresenter>().FirstOrDefault() is { } presenter)
+            presenter.BringIntoView(presenter.CursorRectangle);
         return true;
     }
 
@@ -862,7 +868,11 @@ internal sealed partial class LogView : UserControl, IDisposable
         };
         _trimButton.Click += async (_, _) => await TrimBeginningAsync();
         _cancelTrimButton.Click += (_, _) => _trimCancellation?.Cancel();
-        _searchButton.Click += async (_, _) => await SearchAsync(false);
+        _searchButton.Click += async (_, _) =>
+        {
+            _searchBox.Focus();
+            await SearchAsync(false, jumpToFirst: true);
+        };
         _moreButton.Click += async (_, _) => await SearchAsync(true);
         _searchBox.PropertyChanged += (_, e) =>
         {
@@ -876,7 +886,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             if (_busy) return;
             _searchDebounce.Stop();
             if (!_searchPanel.IsVisible || PageNavigationBlocked) return;
-            if (_file.Length < TextOperations.AutomaticSearchMaxBytes) await SearchAsync(false);
+            if (_file.Length < TextOperations.AutomaticSearchMaxBytes) await SearchAsync(false, jumpToFirst: true);
             else ScheduleSearch();
         };
         _timeButton.Click += async (_, _) => await JumpToTimeAsync();
@@ -884,8 +894,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         {
             if (e.Key == Key.Enter)
             {
-                await SearchAsync(false);
                 e.Handled = true;
+                await SearchAsync(false, jumpToFirst: true);
             }
         };
         _logText.AddHandler(KeyDownEvent, OnLogKeyDown, RoutingStrategies.Tunnel);
@@ -1007,7 +1017,8 @@ internal sealed partial class LogView : UserControl, IDisposable
     }
 
     private async Task LoadPageAsync(long offset, bool saveHistory = true, PagePosition position = PagePosition.Start,
-        int maxPageBytes = LogDataReader.DefaultPageBytes, FileStamp? expectedPageStamp = null, ScrollAnchor? scrollAnchor = null)
+        int maxPageBytes = LogDataReader.DefaultPageBytes, FileStamp? expectedPageStamp = null, ScrollAnchor? scrollAnchor = null,
+        CancellationToken searchToken = default)
     {
         if (_closed || _busy || PageNavigationBlocked)
         {
@@ -1016,12 +1027,12 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         _busy = true;
         RefreshButtons();
+        var token = searchToken.CanBeCanceled ? searchToken : _closing.Token;
         try
         {
             var firstOffset = _hiddenOffset;
             var reader = _reader;
             var generation = _dataGeneration;
-            var token = _closing.Token;
             var stamp = expectedPageStamp ?? _fileStamp;
             var rowsToRead = LogDataReader.DefaultPageSize;
             // Reread the whole scrolling window, not just its first block, after an append.
@@ -1041,7 +1052,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                 var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token) : null;
                 return (result, first, pageEdit, index);
             }, token);
-            if (_closed || generation != _dataGeneration || !ReferenceEquals(reader, _reader)
+            if (_closed || token.IsCancellationRequested || generation != _dataGeneration || !ReferenceEquals(reader, _reader)
                 || (position == PagePosition.FollowEnd && !FollowEnd && _page is not null))
             {
                 return;
@@ -1138,7 +1149,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
             RefreshButtons();
         }
-        catch (OperationCanceledException) when (_closing.IsCancellationRequested)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
         }
         catch (ObjectDisposedException) when (_closed)
@@ -1341,7 +1352,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         SetStatus(message);
     }
 
-    private async Task SearchAsync(bool continueSearch)
+    private async Task SearchAsync(bool continueSearch, bool jumpToFirst = false)
     {
         _searchDebounce.Stop();
         var query = _searchBox.Text ?? string.Empty;
@@ -1413,13 +1424,15 @@ internal sealed partial class LogView : UserControl, IDisposable
             if (_searchHasMore) status += " · нажмите «Ещё»";
             if (result.Message is not null) status += $" · {result.Message}";
             SetSearchStatus(status);
+            if (jumpToFirst && !continueSearch && count > 0 && _searchBox.IsFocused)
+                await OpenSearchHitAsync(_searchResults[0], snapshot, token);
         }
         catch (Exception error) when (token.IsCancellationRequested && error is OperationCanceledException or ObjectDisposedException)
         {
             if (!_closed && _searchPanel.IsVisible && ReferenceEquals(_searchCancellation, source))
                 SetSearchStatus("Поиск остановлен");
         }
-        catch (Exception error) when (error is IOException or ArgumentException or RegexMatchTimeoutException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or RegexMatchTimeoutException)
         {
             if (ReferenceEquals(_searchCancellation, source)) SetSearchStatus($"Поиск остановлен. {error.Message}");
         }
