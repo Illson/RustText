@@ -27,6 +27,7 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
     private readonly Func<IReadOnlyList<CaretEdit>, bool> _canEdit;
     private readonly Action<string> _status;
     private CaretClick? _caretClick;
+    private (CaretClick Click, Selection Selection, int CaretOffset)? _lastCtrlClick;
     private TextDocument Document => _area.Document;
     private MultiSelection? Current => _area.Selection as MultiSelection;
     public bool IsActive => Current is not null;
@@ -140,6 +141,8 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
 
     private void PointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        var lastCtrlClick = _lastCtrlClick;
+        _lastCtrlClick = null;
         _caretClick = null;
         var view = _area.TextView;
         if (e.Source is not Visual source || !view.IsVisualAncestorOf(source) && !ReferenceEquals(view, source)
@@ -150,12 +153,24 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         if (e.KeyModifiers is KeyModifiers.Control or KeyModifiers.Alt)
         {
             var point = e.GetPosition(view);
-            if (view.GetPosition(point + view.ScrollOffset) is not { } position) return;
+            var documentPoint = point + view.ScrollOffset;
+            if (view.GetPosition(documentPoint) is not { } position) return;
 
-            // AvaloniaEdit handles drags, including rectangular selection with Alt.
-            // A click restores the saved carets and toggles the one at the clicked position.
-            _caretClick = new(e.Pointer, point, e.KeyModifiers, Document.Version, Document.GetOffset(position.Location),
-                Current?.Ranges ?? [Primary(_area)], Current?.PrimaryIndex ?? 0);
+            if (e.KeyModifiers == KeyModifiers.Control && e.ClickCount == 2
+                && lastCtrlClick is { } first && first.Click.Pointer == e.Pointer && first.Click.IsCurrent(Document)
+                && ReferenceEquals(first.Selection, _area.Selection) && first.CaretOffset == _area.Caret.Offset)
+            {
+                // Use the state before the first click toggled a caret or selection.
+                _caretClick = first.Click with { Point = point, Word = WordAt(documentPoint) };
+            }
+            else
+            {
+                // A weak version check avoids retaining the document's edit history between clicks.
+                _caretClick = new(e.Pointer, point, e.KeyModifiers, new(Document.Version), Document.GetOffset(position.Location),
+                    Current?.Ranges ?? [Primary(_area)], Current?.PrimaryIndex ?? 0);
+            }
+
+            // Let AvaloniaEdit handle drags, including rectangular selection with Alt.
             _area.ClearSelection();
             return;
         }
@@ -180,8 +195,26 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
     {
         if (_caretClick is not { } click || click.Pointer != e.Pointer || e.InitialPressMouseButton != MouseButton.Left) return;
         _caretClick = null;
-        if (MovedSincePress(e, click) || !ReferenceEquals(click.Version, Document.Version)) return;
+        if (MovedSincePress(e, click) || !click.IsCurrent(Document)) return;
 
+        if (click.Word is { } word)
+        {
+            var ranges = click.Ranges is [{ Length: 0 }] ? [] : click.Ranges;
+            if (word.Length == 0 || !SetCarets([.. ranges, word], ranges.Length))
+                SetCarets(click.Ranges, click.PrimaryIndex);
+        }
+        else
+        {
+            ToggleCaret(click);
+            if (click.Modifiers == KeyModifiers.Control) _lastCtrlClick = (click, _area.Selection, _area.Caret.Offset);
+        }
+
+        _area.Focus();
+        e.Handled = true;
+    }
+
+    private void ToggleCaret(CaretClick click)
+    {
         var ranges = click.Ranges;
         var existing = Array.FindIndex(ranges, range => click.Offset >= range.Start && click.Offset <= range.End);
         if (existing < 0)
@@ -207,9 +240,18 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         {
             SetCarets(ranges, primaryIndex: 0);
         }
+    }
 
-        _area.Focus();
-        e.Handled = true;
+    private CaretRange WordAt(Point documentPoint)
+    {
+        if (_area.TextView.GetPositionFloor(documentPoint) is not { IsAtEndOfLine: false } position) return default;
+        var line = Document.GetLineByNumber(position.Line);
+        var offset = line.Offset + position.Column - 1;
+        if (offset >= line.EndOffset || char.IsWhiteSpace(Document.GetCharAt(offset))) return default;
+
+        var start = Math.Max(line.Offset, Step(offset + 1, forward: false, CaretPositioningMode.WordStartOrSymbol));
+        var end = Math.Min(line.EndOffset, Step(start, forward: true, CaretPositioningMode.WordBorderOrSymbol));
+        return new(start, end);
     }
 
     private bool MovedSincePress(PointerEventArgs e, CaretClick click)
@@ -218,8 +260,11 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         return Math.Abs(movement.X) > 2 || Math.Abs(movement.Y) > 2;
     }
 
-    private sealed record CaretClick(IPointer Pointer, Point Point, KeyModifiers Modifiers, ITextSourceVersion Version, int Offset,
-        CaretRange[] Ranges, int PrimaryIndex);
+    private sealed record CaretClick(IPointer Pointer, Point Point, KeyModifiers Modifiers, WeakReference<ITextSourceVersion> Version,
+        int Offset, CaretRange[] Ranges, int PrimaryIndex, CaretRange? Word = null)
+    {
+        public bool IsCurrent(TextDocument document) => Version.TryGetTarget(out var version) && ReferenceEquals(version, document.Version);
+    }
 
     private void AddVertical(int direction)
     {
@@ -370,19 +415,20 @@ internal sealed class MultiCaretEditing : IDisposable, IBackgroundRenderer
         return next >= 0 ? next : forward ? Document.TextLength : 0;
     }
 
-    private void SetCarets(IReadOnlyList<CaretRange> ranges, int primaryIndex, int? preferredColumn = null)
+    private bool SetCarets(IReadOnlyList<CaretRange> ranges, int primaryIndex, int? preferredColumn = null)
     {
         var (normalized, primary) = Normalize(ranges, primaryIndex);
         if (normalized.Length > MaxCarets)
         {
             _status($"Слишком много курсоров. Допустимо до {LineNumbers.Format(MaxCarets)}.");
-            return;
+            return false;
         }
         _area.Caret.Offset = normalized[primary].Caret;
         _area.Selection = normalized.Length == 1
             ? Selection.Create(_area, normalized[0].Anchor, normalized[0].Caret)
             : new MultiSelection(this, normalized, primary, preferredColumn);
         _area.Caret.BringCaretToView();
+        return true;
     }
 
     private void Apply(MultiSelection selection, CaretEdit[] edits)
