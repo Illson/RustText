@@ -127,6 +127,7 @@ public partial class MainWindow : Window
         EnsureIdleUnloadTimer();
         if (!_restoreWorkspace)
         {
+            _wordWrapMenu.IsChecked = _wordWrap;
             RefreshHistoryMenusLocal();
             _restoreFinished = true;
             RefreshWorkspaceButton();
