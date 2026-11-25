@@ -162,6 +162,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private CancellationTokenSource? _indexCancellation;
     private CancellationTokenSource? _trimCancellation;
     private LogPage? _page;
+    private TaskCompletionSource? _pageLoadFinished;
     private FileStamp _fileStamp;
     private byte[]? _observedDigest;
     private LogFileIdentity? _bookmarkIdentity;
@@ -1026,6 +1027,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
 
         _busy = true;
+        var loaded = _pageLoadFinished = new(TaskCreationOptions.RunContinuationsAsynchronously);
         RefreshButtons();
         var token = searchToken.CanBeCanceled ? searchToken : _closing.Token;
         try
@@ -1162,6 +1164,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         finally
         {
             _busy = false;
+            _pageLoadFinished = null;
+            loaded.SetResult();
             RefreshButtons();
             if (!_closed && FollowEnd && position != PagePosition.FollowEnd)
             {
@@ -1424,8 +1428,13 @@ internal sealed partial class LogView : UserControl, IDisposable
             if (_searchHasMore) status += " · нажмите «Ещё»";
             if (result.Message is not null) status += $" · {result.Message}";
             SetSearchStatus(status);
-            if (jumpToFirst && !continueSearch && count > 0 && _searchBox.IsFocused)
-                await OpenSearchHitAsync(_searchResults[0], snapshot, token);
+            if (jumpToFirst && !continueSearch && result.Hits.Count > 0 && _searchBox.IsFocused)
+            {
+                // A live refresh can still own the page when the search finishes.
+                while (_pageLoadFinished is { } loading) await loading.Task.WaitAsync(token);
+                if (!token.IsCancellationRequested && _searchBox.IsFocused && ReferenceEquals(_searchSnapshot, snapshot))
+                    await OpenSearchHitAsync(result.Hits[0], snapshot, token);
+            }
         }
         catch (Exception error) when (token.IsCancellationRequested && error is OperationCanceledException or ObjectDisposedException)
         {

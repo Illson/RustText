@@ -1228,6 +1228,53 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("focus")]
+    [InlineData("query")]
+    public Task FirstSearchHitWaitsForLiveRefreshWhileStillWanted(string? change) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "live-search.log");
+        await File.WriteAllTextAsync(path, "needle early\n" + string.Concat(Enumerable.Repeat("other row\n", 1200)));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: true));
+        try
+        {
+            await InvokeTask(log, "GoToEndAsync");
+            Assert.True(Page(log)!.StartOffset > 0);
+            var search = (TextBox)Field(log, "_searchBox");
+            var text = (TextBox)Field(log, "_logText");
+            var overlapped = false;
+            var changedWhileBusy = false;
+            log.StatusChanged += status =>
+            {
+                if (overlapped || !status.StartsWith("Найдено", StringComparison.Ordinal)) return;
+                File.AppendAllText(path, "appended\n");
+                lock (Field(log, "_lineIndexGate"))
+                {
+                    if (change is not null)
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                        {
+                            changedWhileBusy = (bool)Field(log, "_busy");
+                            if (change == "focus") text.Focus();
+                            else search.Text += "-absent";
+                        }, Avalonia.Threading.DispatcherPriority.Send);
+                    typeof(LogView).GetMethod("OnRefreshTimerTick", Private)!.Invoke(log, [null, EventArgs.Empty]);
+                    overlapped = (bool)Field(log, "_busy");
+                }
+            };
+            log.FocusSearch();
+            window.KeyTextInput("needle");
+            await HeadlessTests.WaitForAsync(() => overlapped && !(bool)Field(log, "_busy") && Field(log, "_searchCancellation") is null);
+            if (change == "query")
+                await HeadlessTests.WaitForAsync(() => ((TextBlock)Field(log, "_searchStatusText")).Text == "Совпадений не найдено.");
+            if (change is not null) Assert.True(changedWhileBusy);
+            Assert.Equal(change is null, Page(log)!.StartOffset == 0);
+            Assert.Equal(change is null ? "needle" : "", text.SelectedText);
+            Assert.Equal(change != "focus", search.IsFocused);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Fact]
     public Task GigabyteLogWaitsForTheFindCommand() => HeadlessTests.RunAsync(async profile =>
     {
