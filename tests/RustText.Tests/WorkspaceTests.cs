@@ -4,6 +4,7 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Input;
@@ -2061,7 +2062,7 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
-    public Task CtrlWheelChangesEditorFontSizeAndPlainWheelDoesNot()
+    public Task CtrlWheelChangesTextSizeWithoutScrollingTheEditorOrLog()
         => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "zoom.txt");
@@ -2070,26 +2071,53 @@ public sealed class WorkspaceTests
         try
         {
             var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var scroll = Assert.Single(editor.GetVisualDescendants().OfType<ScrollViewer>());
+            var view = editor.TextArea.TextView;
             var original = editor.FontSize;
             var point = editor.TranslatePoint(new Point(12, 12), window)!.Value;
 
-            window.MouseWheel(point, new Vector(0, 1));
+            window.MouseWheel(point, new Vector(0, -1));
+            Assert.True(scroll.Offset.Y > 0);
             Assert.Equal(original, editor.FontSize);
+
+            scroll.Offset = new Vector(0, view.GetVisualTopByDocumentLine(100) + 2);
+            window.UpdateLayout();
             window.MouseWheel(point, new Vector(0, 1), RawInputModifiers.Control);
+            window.UpdateLayout();
             Assert.Equal(original + 1, editor.FontSize);
-            window.MouseWheel(point, new Vector(0, -1), RawInputModifiers.Control);
+            Assert.Equal(100, view.VisualLines[0].FirstDocumentLine.LineNumber);
+
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var mapPoint = minimap.TranslatePoint(new Point(12, 12), window)!.Value;
+            window.MouseWheel(mapPoint, new Vector(0, -1), RawInputModifiers.Control);
+            window.UpdateLayout();
             Assert.Equal(original, editor.FontSize);
+            Assert.Equal(100, view.VisualLines[0].FirstDocumentLine.LineNumber);
 
             var openLog = (Task?)Invoke(window, "OpenPathAsync", path, true, null);
             Assert.NotNull(openLog);
             await openLog;
             await HeadlessTests.WaitForAsync(() => Property(ActiveTab(window), "Log") is LogView);
             var log = Assert.IsType<LogView>(Property(ActiveTab(window), "Log"));
+            await log.InitialPageLoad;
+            log.WordWrap = false;
             var logText = Assert.Single(log.GetVisualDescendants().OfType<TextBox>(), textBox => textBox.IsReadOnly);
+            var logScroll = Assert.Single(logText.GetVisualDescendants().OfType<ScrollViewer>());
             var logPoint = logText.TranslatePoint(new Point(12, 12), window)!.Value;
             var logOriginal = logText.FontSize;
+            var page = log.CurrentOffset;
+            await HeadlessTests.WaitForAsync(() => logScroll.ScrollBarMaximum.Y > 200);
+            window.MouseWheel(logPoint, new Vector(0, -4));
+            window.UpdateLayout();
+            var first = FirstLogTextIndex();
+            Assert.True(first > 0);
+            Assert.Equal(logOriginal, logText.FontSize);
             window.MouseWheel(logPoint, new Vector(0, 1), RawInputModifiers.Control);
+            window.UpdateLayout();
             Assert.Equal(logOriginal + 1, logText.FontSize);
+            Assert.Equal(first, FirstLogTextIndex());
+            Assert.Equal(page, log.CurrentOffset);
+            Assert.False(log.WordWrap);
 
             Invoke(window, "ResizeText", 48d);
             window.MouseWheel(logPoint, new Vector(0, 1), RawInputModifiers.Control);
@@ -2097,6 +2125,87 @@ public sealed class WorkspaceTests
             Invoke(window, "ResizeText", -48d);
             window.MouseWheel(logPoint, new Vector(0, -1), RawInputModifiers.Control);
             Assert.Equal(8d, logText.FontSize);
+
+            int FirstLogTextIndex()
+            {
+                var presenter = Assert.Single(logText.GetVisualDescendants().OfType<TextPresenter>());
+                var origin = presenter.TranslatePoint(default, logScroll.Presenter!)!.Value;
+                return presenter.TextLayout.HitTestPoint(new Point(0, -origin.Y + 1)).TextPosition;
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task CtrlWheelKeepsTheVisibleLogColumn() => HeadlessTests.RunAsync(async profile =>
+    {
+        await StorageService.OpenForTesting(profile).SaveSettingsAsync(new UserSettings { FontSize = 20, WordWrap = false });
+        var path = Path.Combine(profile, "wide.log");
+        await File.WriteAllLinesAsync(path, Enumerable.Repeat(new string('x', 1600), 100));
+        var window = await OpenWorkspaceAsync();
+        try
+        {
+            await CallAsync(window, "OpenPathAsync", path, true, null);
+            var log = Read<LogView>(ActiveTab(window), "Log");
+            await log.InitialPageLoad;
+            var text = LogText(log);
+            var scroll = Assert.Single(text.GetVisualDescendants().OfType<ScrollViewer>());
+            var presenter = Assert.Single(text.GetVisualDescendants().OfType<TextPresenter>());
+            await HeadlessTests.WaitForAsync(() => scroll.ScrollBarMaximum.X > 8000);
+            scroll.Offset = new Vector(8000, 0);
+            window.UpdateLayout();
+            int Column()
+            {
+                var origin = presenter.TranslatePoint(default, scroll.Presenter!)!.Value;
+                return presenter.TextLayout.HitTestPoint(new Point(-origin.X, 1)).TextPosition;
+            }
+            var column = Column();
+            Assert.InRange(column, 250, 1400);
+            window.MouseWheel(text.TranslatePoint(new Point(12, 12), window)!.Value, new Vector(0, 1), RawInputModifiers.Control);
+            window.UpdateLayout();
+            Assert.Equal(21, text.FontSize);
+            Assert.InRange(Column(), column - 1, column + 1);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(200)]
+    public Task CtrlWheelKeepsTheColumnAndBothVisiblePanes(int row) => HeadlessTests.RunAsync(async profile =>
+    {
+        await StorageService.OpenForTesting(profile).SaveSettingsAsync(new UserSettings { FontSize = 20, WordWrap = false });
+        var a = Path.Combine(profile, "left.txt");
+        var b = Path.Combine(profile, "right.txt");
+        await File.WriteAllLinesAsync(a, Enumerable.Range(1, 900).Select(i => i == row ? new string('x', 1600) : $"left {i}"));
+        await File.WriteAllLinesAsync(b, Enumerable.Range(1, 900).Select(i => $"right {i}"));
+        var window = await OpenWorkspaceAsync(a, b);
+        try
+        {
+            Invoke(window, "SplitGroup", Assert.Single(Groups(window)), Orientation.Horizontal);
+            window.UpdateLayout();
+            var left = Read<TextEditor>(Tabs(window).Single(t => Equals(Property(t, "Path"), a)), "Editor");
+            var right = Read<TextEditor>(Tabs(window).Single(t => Equals(Property(t, "Path"), b)), "Editor");
+            var view = left.TextArea.TextView;
+            var scroll = Assert.Single(left.GetVisualDescendants().OfType<ScrollViewer>());
+            var other = Assert.Single(right.GetVisualDescendants().OfType<ScrollViewer>());
+            scroll.Offset = new Vector(0, view.GetVisualTopByDocumentLine(row));
+            other.Offset = new Vector(0, right.TextArea.TextView.GetVisualTopByDocumentLine(600) + 2);
+            window.UpdateLayout();
+            scroll.Offset = scroll.Offset.WithX(800 * view.WideSpaceWidth + .25);
+            window.UpdateLayout();
+            int Column() => view.GetPositionFloor(new Point(scroll.Offset.X, scroll.Offset.Y + 1))!.Value.Column;
+            var column = Column();
+            Assert.InRange(column, 800, 802);
+            Assert.Equal(600, right.TextArea.TextView.VisualLines[0].FirstDocumentLine.LineNumber);
+
+            window.MouseWheel(left.TranslatePoint(new Point(12, 12), window)!.Value, new Vector(0, 1), RawInputModifiers.Control);
+            window.UpdateLayout();
+            Assert.Equal(21, left.FontSize);
+            Assert.Equal(21, right.FontSize);
+            Assert.Equal(row, view.VisualLines[0].FirstDocumentLine.LineNumber);
+            Assert.Equal(600, right.TextArea.TextView.VisualLines[0].FirstDocumentLine.LineNumber);
+            Assert.InRange(Column(), column - 1, column + 1);
         }
         finally { await CloseAsync(window); }
     });

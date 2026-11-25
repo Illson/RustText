@@ -7,6 +7,8 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
+using AvaloniaEdit;
+using AvaloniaEdit.Rendering;
 using RustText.Demo.Editor;
 using RustText.Demo.Platform;
 
@@ -177,17 +179,26 @@ public partial class MainWindow
             return;
         }
 
-        var editor = ActiveTab?.EditorLogFilter?.VisibleEditor ?? ActiveTab?.Editor;
-        var log = ActiveTab?.Log;
-        var isInEditor = editor?.IsVisualAncestorOf(source) == true;
-        var isInLog = log?.IsVisualAncestorOf(source) == true;
-        if (!isInEditor && !isInLog)
-        {
-            return;
-        }
+        if (_home) return;
+        if (!Groups().Select(SelectedIn).Any(tab =>
+            (tab?.Editor is not null || tab?.Log is not null || tab?.ConsoleText is not null)
+            && tab.Item.Content is Visual content && (content == source || content.IsVisualAncestorOf(source)))) return;
 
-        ResizeText(Math.Sign(e.Delta.Y));
         e.Handled = true;
+        ResizeText(Math.Sign(e.Delta.Y));
+    }
+
+    private static Action? CaptureEditorZoomAnchor(TextEditor editor)
+    {
+        var view = editor.TextArea.TextView;
+        var y = view.VerticalOffset;
+        if (!view.VisualLinesValid || view.FindAncestorOfType<ScrollViewer>() is not { } scroll || scroll.Offset == default
+            || view.GetPositionFloor(new Point(0, y)) is not { } anchor) return null;
+
+        var columns = scroll.Offset.X / view.WideSpaceWidth;
+        var clipped = (y - view.GetVisualPosition(anchor, VisualYPosition.LineTop).Y) / view.DefaultLineHeight;
+        return () => scroll.SetCurrentValue(ScrollViewer.OffsetProperty,
+            new Vector(columns * view.WideSpaceWidth, view.GetVisualPosition(anchor, VisualYPosition.LineTop).Y + clipped * view.DefaultLineHeight));
     }
 
     private void ReloadActive(TextEncodingKind? encoding)
@@ -220,34 +231,49 @@ public partial class MainWindow
     private void ResizeText(double delta)
     {
         var size = Math.Clamp(_fontSize + delta, 8, 48);
+        if (size == _fontSize) return;
         foreach (var window in _workspace.Windows)
         {
+            Action? restore = null;
+            if (window.IsVisible && !window._home)
+            {
+                foreach (var tab in window.Groups().Select(window.SelectedIn).OfType<WorkTab>())
+                {
+                    var editor = tab.EditorLogFilter?.VisibleEditor ?? tab.Editor ?? tab.ConsoleText?.Editor ?? tab.Log?.VisiblePageEditor;
+                    restore += editor is not null ? CaptureEditorZoomAnchor(editor) : tab.Log?.CaptureZoomAnchor();
+                }
+            }
             window._fontSize = size;
-            window.ApplyTextAppearance();
+            window.ApplyTextAppearance(applyWrap: false);
+            if (restore is not null)
+            {
+                window.UpdateLayout();
+                restore();
+            }
         }
         Run(() => SaveWorkspaceSettingsAsync(settings => settings with { FontSize = size }));
     }
 
-    private void ApplyTextAppearance()
+    private void ApplyTextAppearance(bool applyWrap = true)
     {
         foreach (var tab in _tabs.Values)
         {
-            if (tab.Editor is { } editor)
+            if (tab.Editor is { } editor) ApplyEditorAppearance(editor);
+            if (tab.EditorLogFilter is { IsFiltering: true } filter) ApplyEditorAppearance(filter.VisibleEditor);
+
+            tab.Log?.SetTextSize(_fontSize);
+            if (applyWrap && tab.Log is { } log) log.WordWrap = _wordWrap;
+            if (tab.ConsoleText is { } console) console.SetAppearance(_fontSize, applyWrap ? _wordWrap : console.Editor.WordWrap);
+        }
+
+        void ApplyEditorAppearance(TextEditor editor)
+        {
+            if (applyWrap)
             {
                 editor.WordWrap = _wordWrap;
                 editor.HorizontalScrollBarVisibility = _wordWrap ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
-                editor.FontSize = _fontSize;
-                if (tab.EditorLogFilter is { IsFiltering: true } filter)
-                {
-                    filter.VisibleEditor.WordWrap = _wordWrap;
-                    filter.VisibleEditor.HorizontalScrollBarVisibility = editor.HorizontalScrollBarVisibility;
-                    filter.VisibleEditor.FontSize = _fontSize;
-                }
             }
-
-            tab.Log?.SetTextSize(_fontSize);
-            if (tab.Log is { } log) log.WordWrap = _wordWrap;
-            tab.ConsoleText?.SetAppearance(_fontSize, _wordWrap);
+            editor.FontSize = _fontSize;
         }
     }
 
