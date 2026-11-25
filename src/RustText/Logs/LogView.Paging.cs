@@ -193,17 +193,20 @@ internal sealed partial class LogView
     internal Action? CaptureZoomAnchor()
     {
         var filtered = _levelFilterViewport?.IsVisible == true;
-        if (!filtered && FollowEnd) return null;
         if ((filtered ? _filteredLogScrollViewer : _logScrollViewer) is not { Viewport.Height: > 0 } scroll) return null;
 
         var text = filtered ? _filteredLogText : _logText;
-        if (GetTextScrollAnchor(text, scroll, 0) is not { } anchor) return null;
+        var anchor = !filtered && FollowEnd ? null : GetTextScrollAnchor(text, scroll, 0);
+        var x = scroll.Offset.X;
+        if (anchor is null && x == 0) return null;
         var fontSize = text.FontSize;
         return () =>
         {
-            var scaledAnchor = anchor with { ViewportY = anchor.ViewportY * text.FontSize / fontSize };
-            var y = ResolveScrollAnchor(text, scroll, scaledAnchor, anchor.First);
-            scroll.SetCurrentValue(ScrollViewer.OffsetProperty, scroll.Offset.WithY(y));
+            var scale = text.FontSize / fontSize;
+            var y = anchor is { } row
+                ? ResolveScrollAnchor(text, scroll, row with { ViewportY = row.ViewportY * scale }, row.First)
+                : scroll.Offset.Y;
+            scroll.SetCurrentValue(ScrollViewer.OffsetProperty, new Vector(x * scale, y));
         };
     }
 

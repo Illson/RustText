@@ -180,31 +180,25 @@ public partial class MainWindow
         }
 
         if (_home) return;
-        var target = Groups().Select(SelectedIn).FirstOrDefault(tab =>
+        if (!Groups().Select(SelectedIn).Any(tab =>
             (tab?.Editor is not null || tab?.Log is not null || tab?.ConsoleText is not null)
-            && tab.Item.Content is Visual content && (content == source || content.IsVisualAncestorOf(source)));
-        if (target is null) return;
+            && tab.Item.Content is Visual content && (content == source || content.IsVisualAncestorOf(source)))) return;
 
         e.Handled = true;
-        var editor = target.EditorLogFilter?.VisibleEditor ?? target.Editor ?? target.ConsoleText?.Editor ?? target.Log?.VisiblePageEditor;
-        var restore = editor is not null ? CaptureEditorZoomAnchor(editor) : target.Log?.CaptureZoomAnchor();
-        if (ResizeText(Math.Sign(e.Delta.Y)) && restore is not null)
-        {
-            UpdateLayout();
-            restore();
-        }
+        ResizeText(Math.Sign(e.Delta.Y));
     }
 
     private static Action? CaptureEditorZoomAnchor(TextEditor editor)
     {
         var view = editor.TextArea.TextView;
         var y = view.VerticalOffset;
-        if (y <= 0 || !view.VisualLinesValid || view.FindAncestorOfType<ScrollViewer>() is not { } scroll
+        if (!view.VisualLinesValid || view.FindAncestorOfType<ScrollViewer>() is not { } scroll || scroll.Offset == default
             || view.GetPositionFloor(new Point(0, y)) is not { } anchor) return null;
 
+        var columns = scroll.Offset.X / view.WideSpaceWidth;
         var clipped = (y - view.GetVisualPosition(anchor, VisualYPosition.LineTop).Y) / view.DefaultLineHeight;
         return () => scroll.SetCurrentValue(ScrollViewer.OffsetProperty,
-            scroll.Offset.WithY(view.GetVisualPosition(anchor, VisualYPosition.LineTop).Y + clipped * view.DefaultLineHeight));
+            new Vector(columns * view.WideSpaceWidth, view.GetVisualPosition(anchor, VisualYPosition.LineTop).Y + clipped * view.DefaultLineHeight));
     }
 
     private void ReloadActive(TextEncodingKind? encoding)
@@ -234,17 +228,30 @@ public partial class MainWindow
         Run(() => SaveWorkspaceSettingsAsync(settings => settings with { WordWrap = enabled }));
     }
 
-    private bool ResizeText(double delta)
+    private void ResizeText(double delta)
     {
         var size = Math.Clamp(_fontSize + delta, 8, 48);
-        if (size == _fontSize) return false;
+        if (size == _fontSize) return;
         foreach (var window in _workspace.Windows)
         {
+            Action? restore = null;
+            if (window.IsVisible && !window._home)
+            {
+                foreach (var tab in window.Groups().Select(window.SelectedIn).OfType<WorkTab>())
+                {
+                    var editor = tab.EditorLogFilter?.VisibleEditor ?? tab.Editor ?? tab.ConsoleText?.Editor ?? tab.Log?.VisiblePageEditor;
+                    restore += editor is not null ? CaptureEditorZoomAnchor(editor) : tab.Log?.CaptureZoomAnchor();
+                }
+            }
             window._fontSize = size;
             window.ApplyTextAppearance(applyWrap: false);
+            if (restore is not null)
+            {
+                window.UpdateLayout();
+                restore();
+            }
         }
         Run(() => SaveWorkspaceSettingsAsync(settings => settings with { FontSize = size }));
-        return true;
     }
 
     private void ApplyTextAppearance(bool applyWrap = true)
