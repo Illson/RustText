@@ -18,6 +18,7 @@ public partial class MainWindow
         if (tab is null)
         {
             tab = AddTab(select: false);
+            tab.IsTransient = true;
             tab.CustomTitle = "Поиск процессов";
             tab.Item.Content = new ProcessFinderView();
             tab.Item.ContextMenu = new ContextMenu
