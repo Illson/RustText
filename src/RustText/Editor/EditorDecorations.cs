@@ -22,6 +22,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private readonly TextEditor _editor;
     private readonly Pen _viewportBorder = new(FocusTheme.Accent, 1);
     private WriteableBitmap? _preview;
+    private (double Height, double Width, double LineHeight) _previewLayout;
     private bool _previewDirty = true;
     private bool _dragging;
     private bool _disposed;
@@ -75,11 +76,12 @@ internal sealed class DocumentMinimap : Control, IDisposable
         if (_disposed || _editor.Document is not { } document) return;
 
         context.FillRectangle(FocusTheme.Editor, new Rect(Bounds.Size));
-        var rows = GetRowCount(document.LineCount, Bounds.Height);
+        var (lineCount, layoutHeight) = GetPreviewRows(document);
+        var rows = GetRowCount(lineCount, Bounds.Height);
         if (rows == 0) return;
 
-        var height = PreviewHeight;
-        var marker = ViewportMarker(document);
+        var height = GetPreviewHeight(lineCount, Bounds.Height);
+        var marker = ViewportMarker(document, height);
         if (marker.Height > 0)
             context.FillRectangle(FocusTheme.MinimapViewport, marker);
 
@@ -91,9 +93,12 @@ internal sealed class DocumentMinimap : Control, IDisposable
             _previewDirty = true;
         }
 
-        if (_previewDirty)
+        var view = _editor.TextArea.TextView;
+        var layout = layoutHeight > 0 ? (layoutHeight, view.Bounds.Width, view.DefaultLineHeight) : default;
+        if (_previewDirty || _previewLayout != layout)
         {
-            PaintPreview(_preview, document, rows);
+            PaintPreview(_preview, document, rows, lineCount, layoutHeight);
+            _previewLayout = layout;
             _previewDirty = false;
         }
         context.DrawImage(_preview, new Rect(Padding, Padding, PreviewColumns, height));
@@ -101,13 +106,13 @@ internal sealed class DocumentMinimap : Control, IDisposable
             context.DrawRectangle(null, _viewportBorder, marker.Deflate(.5));
     }
 
-    private Rect ViewportMarker(TextDocument document)
+    private Rect ViewportMarker(TextDocument document, double track)
     {
         var viewport = _editor.ViewportHeight;
         if (document.TextLength == 0 || viewport <= 0) return default;
 
         var minimum = Math.Min(MinMarkerHeight, Math.Max(0, Bounds.Height - Padding * 2));
-        var track = Math.Max(NavigationHeight, minimum);
+        track = Math.Max(track, minimum);
         var maximum = _editor.ExtentHeight - viewport;
         var markerHeight = maximum <= 0 ? track : Math.Clamp(track * viewport / _editor.ExtentHeight, minimum, track);
         var fraction = maximum <= 0 ? 0 : Math.Clamp(_editor.VerticalOffset / maximum, 0, 1);
@@ -120,7 +125,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private static double GetPreviewHeight(int lineCount, double height) =>
         Math.Clamp(height - Padding * 2, 0, lineCount * (double)RowPitch);
 
-    private unsafe void PaintPreview(WriteableBitmap preview, TextDocument document, int rows)
+    private unsafe void PaintPreview(WriteableBitmap preview, TextDocument document, int rows, int lineCount, double layoutHeight)
     {
         using var pixels = preview.Lock();
         new Span<byte>((void*)pixels.Address, pixels.RowBytes * pixels.Size.Height).Clear();
@@ -129,13 +134,31 @@ internal sealed class DocumentMinimap : Control, IDisposable
         var letter = PremultipliedPixel(color, 65);
         var punctuation = PremultipliedPixel(color, 40);
         var tabWidth = Math.Max(1, _editor.Options.IndentationSize);
-        var lastLineIndex = document.LineCount - 1;
+        var view = _editor.TextArea.TextView;
+        var lineHeight = view.DefaultLineHeight;
+        var sampleHeight = layoutHeight / lineCount;
         for (var row = 0; row < rows; row++)
         {
-            var index = rows == 1 ? 0 : (int)((long)row * lastLineIndex / (rows - 1));
-            var line = document.GetLineByNumber(index + 1);
+            var index = rows == 1 ? 0 : (int)((long)row * (lineCount - 1) / (rows - 1));
+            var y = (index + .5) * sampleHeight;
+            var line = layoutHeight > 0 ? view.GetDocumentLineByVisualTop(y) : document.GetLineByNumber(index + 1);
+            var start = 0;
+            var length = line.Length;
+            if (layoutHeight > 0 && length > 0)
+            {
+                var top = view.GetVisualTopByDocumentLine(line.LineNumber);
+                var bottom = line.NextLine is { } next ? view.GetVisualTopByDocumentLine(next.LineNumber) : layoutHeight;
+                var wrappedRows = (int)Math.Round((bottom - top) / lineHeight);
+                if (wrappedRows > 1)
+                {
+                    // shortcut: sample wrapped text without formatting off-screen lines.
+                    var part = Math.Clamp((int)((y - top) / (bottom - top) * wrappedRows), 0, wrappedRows - 1);
+                    start = (int)((long)part * length / wrappedRows);
+                    length = (int)((long)(part + 1) * length / wrappedRows) - start;
+                }
+            }
             var scanline = (uint*)(pixels.Address + row * RowPitch * pixels.RowBytes);
-            var text = document.GetTextAsMemory(line.Offset, Math.Min(line.Length, PreviewColumns)).Span;
+            var text = document.GetTextAsMemory(line.Offset + start, Math.Min(length, PreviewColumns)).Span;
             var column = 0;
             foreach (var character in text)
             {
@@ -165,7 +188,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     {
         base.OnPointerPressed(e);
         var point = e.GetCurrentPoint(this);
-        if (!point.Properties.IsLeftButtonPressed || point.Position.Y > Padding + NavigationHeight) return;
+        if (!point.Properties.IsLeftButtonPressed || point.Position.Y > Padding + PreviewHeight) return;
 
         _dragging = true;
         e.Pointer.Capture(this);
@@ -204,52 +227,20 @@ internal sealed class DocumentMinimap : Control, IDisposable
         }
     }
 
-    private double PreviewHeight => GetPreviewHeight(_editor.Document?.LineCount ?? 0, Bounds.Height);
-    private double NavigationHeight
+    internal double PreviewHeight => _editor.Document is { } document
+        ? GetPreviewHeight(GetPreviewRows(document).Count, Bounds.Height) : 0;
+
+    private (int Count, double LayoutHeight) GetPreviewRows(TextDocument document)
     {
-        get
-        {
-            var previewHeight = PreviewHeight;
-            var availableHeight = Math.Max(0, Bounds.Height - Padding * 2);
-            if (previewHeight >= availableHeight) return previewHeight;
-
-            var view = _editor.TextArea.TextView;
-            var lineHeight = Math.Max(1, view.DefaultLineHeight);
-            var document = _editor.Document;
-            var logicalHeight = (document?.LineCount ?? 0) * lineHeight;
-            var documentHeight = view.DocumentHeight;
-            var extraHeight = documentHeight - logicalHeight;
-            var paddingAllowance = lineHeight / 2;
-            var hasWrappedRows = _editor.WordWrap && (extraHeight > paddingAllowance || HasWrappedLines(view, document));
-            return documentHeight > _editor.ViewportHeight && hasWrappedRows
-                ? Math.Max(previewHeight, availableHeight)
-                : previewHeight;
-        }
-    }
-
-    private static bool HasWrappedLines(AvaloniaEdit.Rendering.TextView view, TextDocument? document)
-    {
-        if (document is null || document.LineCount > MaxRows || view.Bounds.Width <= 0 || view.WideSpaceWidth <= 0)
-            return false;
-
-        var likelyWrapLength = (int)(view.Bounds.Width / view.WideSpaceWidth);
-        var longestCandidate = 0;
-        foreach (var line in document.Lines)
-        {
-            longestCandidate = Math.Max(longestCandidate, line.Length);
-        }
-        if (longestCandidate <= likelyWrapLength) return false;
-        if (longestCandidate > likelyWrapLength * 2) return true;
-
-        var candidate = document.Lines.First(line => line.Length == longestCandidate);
-        var first = view.GetVisualPosition(new TextViewPosition(candidate.LineNumber, 1), VisualYPosition.LineMiddle).Y;
-        var last = view.GetVisualPosition(new TextViewPosition(candidate.LineNumber, candidate.Length + 1), VisualYPosition.LineMiddle).Y;
-        return last - first > view.DefaultLineHeight / 2;
+        var view = _editor.TextArea.TextView;
+        if (!_editor.WordWrap || view.DocumentHeight <= 0) return (document.LineCount, 0);
+        var rows = Math.Max(1, (int)Math.Round(view.DocumentHeight / view.DefaultLineHeight));
+        return (rows, view.DocumentHeight);
     }
 
     private void Jump(PointerEventArgs e)
     {
-        var height = NavigationHeight;
+        var height = PreviewHeight;
         if (height > 0 && FindScrollViewer() is { } scroll)
         {
             var fraction = Math.Clamp((e.GetPosition(this).Y - Padding) / height, 0, 1);

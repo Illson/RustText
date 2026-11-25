@@ -18,6 +18,7 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
+using AvaloniaEdit.Folding;
 using AvaloniaEdit.Rendering;
 using AvaloniaEdit.Editing;
 using RustText.Demo;
@@ -208,6 +209,16 @@ public sealed class WorkspaceTests
             Assert.Equal(expectedWrap, saved.WordWrap);
             Assert.Equal(expectedSize, saved.FontSize);
             Assert.Equal("neon", saved.Theme);
+
+            var tools = window.FindControl<Menu>("TopMenu")!.Items.OfType<MenuItem>()
+                .Single(item => Equals(item.Header, "_Инструменты"));
+            var wrap = tools.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Редактор и просмотр"))
+                .Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Перенос строк"));
+            Assert.Equal(MenuItemToggleType.CheckBox, wrap.ToggleType);
+            Assert.Equal(expectedWrap, wrap.IsChecked);
+            wrap.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Assert.Equal(!expectedWrap, wrap.IsChecked);
+            Assert.Equal(!expectedWrap, editor.WordWrap);
         }
         finally { await CloseAsync(window); }
     });
@@ -3347,6 +3358,79 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task TextMinimapKeepsTheViewportOutlineOnTheWrappedPreview() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "wrapped-preview.txt");
+        var lines = Enumerable.Range(1, 101).Select(i => i % 4 == 0 ? new string('x', 230) : $"row {i}");
+        await File.WriteAllTextAsync(path, string.Join('\n', lines));
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var scroll = Assert.Single(editor.GetVisualDescendants().OfType<ScrollViewer>());
+            await HeadlessTests.WaitForAsync(() => minimap.Bounds.Height > 450 && scroll.ScrollBarMaximum.Y > 0);
+            scroll.Offset = new Vector(0, scroll.ScrollBarMaximum.Y);
+            window.UpdateLayout();
+
+            var view = editor.TextArea.TextView;
+            var previewEnd = 3 + (int)(2 * Math.Round(view.DocumentHeight / view.DefaultLineHeight));
+            Assert.InRange(previewEnd, 210, (int)minimap.Bounds.Height - 10);
+            var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+            using var bitmap = new RenderTargetBitmap(size);
+            using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+            using var frame = pixels.Lock();
+            bitmap.Render(minimap);
+            bitmap.CopyPixels(frame);
+
+            Assert.NotEqual(FocusTheme.Editor.Color, ReadPixel(0, previewEnd - 6));
+            Assert.NotEqual(ReadPixel(65, previewEnd - 2), ReadPixel(3, previewEnd - 2));
+            Assert.Equal(FocusTheme.Editor.Color, ReadPixel(0, previewEnd + 2));
+
+            Color ReadPixel(int x, int y)
+            {
+                var address = frame.Address + y * frame.RowBytes + x * 4;
+                return Color.FromRgb(Marshal.ReadByte(address, 2), Marshal.ReadByte(address, 1), Marshal.ReadByte(address, 0));
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapUsesVisibleRowsWhenFoldingOffsetsWrapping() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "folded-wrap.json");
+        await File.WriteAllTextAsync(path, "[\n [\n      1,\n      2,\n      3\n ],\ntrue,\n\"x\"\n]");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var view = editor.TextArea.TextView;
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            await HeadlessTests.WaitForAsync(() => view.Bounds.Width > 200
+                && view.GetService(typeof(FoldingManager)) is FoldingManager m && m.AllFoldings.Count() == 2);
+            var manager = (FoldingManager)view.GetService(typeof(FoldingManager))!;
+            manager.AllFoldings.Last().IsFolded = true;
+            var line = editor.Document.GetLineByNumber(8);
+            editor.Document.Replace(line.Offset + 1, 1, new string('x', (int)(4.3 * view.Bounds.Width / view.WideSpaceWidth)));
+            window.UpdateLayout();
+            Assert.Equal(editor.Document.LineCount, (int)Math.Round(view.DocumentHeight / view.DefaultLineHeight));
+            Assert.Equal(7, view.GetDocumentLineByVisualTop(2.5 * view.DefaultLineHeight).LineNumber);
+
+            var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+            using var bitmap = new RenderTargetBitmap(size);
+            using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+            using var frame = pixels.Lock();
+            bitmap.Render(minimap);
+            bitmap.CopyPixels(frame);
+            var thirdRow = frame.Address + 7 * frame.RowBytes;
+            // The visible row starts with "true,", not the six spaces of the folded line.
+            Assert.NotEqual(Marshal.ReadInt32(thirdRow, 50 * 4), Marshal.ReadInt32(thirdRow, 3 * 4));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task TextMinimapNavigatesWithinWrappedSingleLine() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "wrapped-line.txt");
@@ -3362,7 +3446,7 @@ public sealed class WorkspaceTests
             await HeadlessTests.WaitForAsync(() => view.VisualLinesValid
                 && scroll.Extent.Height > scroll.Viewport.Height * 2);
 
-            var navigationHeight = minimap.Bounds.Height - 6;
+            var navigationHeight = minimap.PreviewHeight;
             Assert.True(navigationHeight > 100);
             Assert.True(view.GetVisualPosition(new TextViewPosition(1, line.Length + 1), VisualYPosition.LineMiddle).Y
                 > view.GetVisualPosition(new TextViewPosition(1, 1), VisualYPosition.LineMiddle).Y);
@@ -3402,7 +3486,6 @@ public sealed class WorkspaceTests
             await HeadlessTests.WaitForAsync(() => view.VisualLinesValid
                 && scroll.Extent.Height > scroll.Viewport.Height * 2);
 
-            var navigationHeight = minimap.Bounds.Height - 6;
             JumpTo(.75);
             await HeadlessTests.WaitForAsync(() => scroll.Offset.Y > 0);
 
@@ -3421,7 +3504,8 @@ public sealed class WorkspaceTests
 
             void JumpTo(double fraction)
             {
-                var point = minimap.TranslatePoint(new Point(12, 3 + navigationHeight * fraction), window)!.Value;
+                window.UpdateLayout();
+                var point = minimap.TranslatePoint(new Point(12, 3 + minimap.PreviewHeight * fraction), window)!.Value;
                 window.MouseDown(point, MouseButton.Left);
                 window.MouseUp(point, MouseButton.Left);
             }
@@ -3455,7 +3539,7 @@ public sealed class WorkspaceTests
 
             var maximum = scroll.Extent.Height - scroll.Viewport.Height;
             Assert.True(maximum > 0);
-            var point = minimap.TranslatePoint(new Point(12, 3 + (minimap.Bounds.Height - 6) * .75), window)!.Value;
+            var point = minimap.TranslatePoint(new Point(12, 3 + minimap.PreviewHeight * .75), window)!.Value;
             window.MouseDown(point, MouseButton.Left);
             window.MouseUp(point, MouseButton.Left);
             await HeadlessTests.WaitForAsync(() => scroll.Offset.Y / (scroll.Extent.Height - scroll.Viewport.Height)
