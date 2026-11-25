@@ -114,6 +114,7 @@ public partial class MainWindow
         if (tab.Log is { } log)
         {
             var view = new ConsoleTextView(capture.Path, _fontSize, log.WordWrap);
+            view.Editor.TextChanged += (_, _) => tab.Revision++;
             if (tab.ConsoleDisconnectStatus is { } status) view.ReportDisconnected(status);
             log.Close();
             tab.Log = null;
@@ -129,5 +130,8 @@ public partial class MainWindow
             view.Dispose();
             if (tab.ConsoleDisconnectStatus is { } status) tab.Log!.ReportConsoleDisconnected(status);
         }
+        tab.Revision++;
+        ForgetSearchTab(tab);
+        if (PanelHost.IsVisible) ScheduleSearch();
     }
 }

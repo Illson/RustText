@@ -1174,7 +1174,7 @@ public partial class MainWindow
     {
         if (tab.EditorLogFilter?.IsFiltering == true) CloseEditorLevelFilter(tab);
         Select(tab);
-        if (tab.Editor is not { } editor)
+        if (tab.SearchEditor is not { } editor)
         {
             return;
         }
@@ -1449,6 +1449,7 @@ public partial class MainWindow
         public Control HeaderMarks { get; set; } = null!;
         public string? Path { get; set; }
         public TextEditor? Editor { get; set; }
+        public TextEditor? SearchEditor => Editor ?? ConsoleText?.Editor;
         public EditorLogFilter? EditorLogFilter { get; set; }
         public MultiCaretEditing? MultiCaret { get; set; }
         public LogView? Log { get; set; }

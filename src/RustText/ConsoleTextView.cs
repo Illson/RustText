@@ -6,6 +6,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Media;
 using Avalonia.Threading;
 using AvaloniaEdit;
+using RustText.Demo.Editor;
 
 namespace RustText.Demo;
 
@@ -15,12 +16,14 @@ internal sealed class ConsoleTextView : Grid, IDisposable
     internal const int TextLimit = 250_000;
     private readonly StreamReader _reader;
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(150) };
-    private readonly char[] _buffer = new char[32 * 1024];
+    private readonly char[] _buffer = new char[TextLimit];
     private readonly TextBlock _status = new() { Margin = new Thickness(8, 4), TextWrapping = TextWrapping.Wrap };
     private string? _disconnected;
     private bool _earlierOutput;
     private bool _reading;
     private bool _disposed;
+    internal bool HasEarlierOutput => _earlierOutput;
+    internal SearchHighlights Highlights { get; }
 
     internal TextEditor Editor { get; } = new()
     {
@@ -33,6 +36,8 @@ internal sealed class ConsoleTextView : Grid, IDisposable
     {
         RowDefinitions = new RowDefinitions("*,Auto");
         Editor.Document.UndoStack.SizeLimit = 0;
+        Highlights = new SearchHighlights(Editor);
+        Editor.TextArea.TextView.BackgroundRenderers.Add(Highlights);
         Editor.Background = FocusTheme.Editor;
         Editor.Foreground = FocusTheme.Text;
         SetAppearance(fontSize, wordWrap);
@@ -45,14 +50,6 @@ internal sealed class ConsoleTextView : Grid, IDisposable
             4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
         try
         {
-            if (file.Length > TextLimit)
-            {
-                _earlierOutput = true;
-                file.Position = file.Length - TextLimit;
-                int next;
-                do { next = file.ReadByte(); } while ((next & 0xC0) == 0x80);
-                if (next >= 0) file.Position--;
-            }
             _reader = new StreamReader(file, Encoding.UTF8, detectEncodingFromByteOrderMarks: false);
         }
         catch { file.Dispose(); throw; }
@@ -89,6 +86,17 @@ internal sealed class ConsoleTextView : Grid, IDisposable
         _reading = true;
         try
         {
+            var file = _reader.BaseStream;
+            var tail = file.Length - TextLimit;
+            var skip = file.Position < tail;
+            if (skip)
+            {
+                _reader.DiscardBufferedData();
+                file.Position = tail;
+                int next;
+                do { next = file.ReadByte(); } while ((next & 0xC0) == 0x80);
+                if (next >= 0) file.Position--;
+            }
             var read = await _reader.ReadBlockAsync(_buffer.AsMemory());
             if (_disposed) return;
             if (read == 0)
@@ -99,20 +107,23 @@ internal sealed class ConsoleTextView : Grid, IDisposable
 
             var follow = Editor.SelectionLength == 0 && Editor.VerticalOffset >= Editor.ExtentHeight - Editor.ViewportHeight - 1;
             var document = Editor.Document;
-            document.Insert(document.TextLength, new string(_buffer, 0, read));
-            if (document.TextLength > TextLimit)
+            var text = new string(_buffer, 0, read);
+            if (skip) document.Text = text;
+            else document.Insert(document.TextLength, text);
+            var trimmed = document.TextLength > TextLimit;
+            if (trimmed)
             {
                 var excess = document.TextLength - TextLimit;
                 var line = document.GetLineByOffset(excess);
-                var remove = line.NextLine?.Offset ?? excess;
+                var remove = line.Offset == excess || line.TotalLength > TextLimit ? excess : line.NextLine?.Offset ?? excess;
                 if (remove == excess && char.IsLowSurrogate(document.GetCharAt(remove))
                     && char.IsHighSurrogate(document.GetCharAt(remove - 1))) remove++;
                 document.Remove(0, remove);
-                if (!_earlierOutput)
-                {
-                    _earlierOutput = true;
-                    UpdateStatus();
-                }
+            }
+            if ((skip || trimmed) && !_earlierOutput)
+            {
+                _earlierOutput = true;
+                UpdateStatus();
             }
             if (follow) Editor.ScrollToLine(document.LineCount);
         }

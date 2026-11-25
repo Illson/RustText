@@ -1,6 +1,8 @@
 using System.Reflection;
 using System.Text;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Threading;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using AvaloniaEdit;
@@ -55,6 +57,18 @@ public sealed class LogModeSwitchTests
             await writer.WriteLineAsync("[WARN] новый вывод");
             await HeadlessTests.WaitForAsync(() => plain.Editor.Text.Contains("новый вывод", StringComparison.Ordinal));
             Assert.Same(plain, item.Content);
+            typeof(MainWindow).GetMethod("OpenSearchPanel", Private)!.Invoke(window, [false]);
+            ((TextBox)Field(window, "_searchInput")).Text = "новый вывод";
+            var results = (ListBox)Field(window, "_searchResults");
+            foreach (var allTabs in new[] { false, true })
+            {
+                ((ToggleButton)Field(window, "_allTabs")).IsChecked = allTabs;
+                await InvokeTask(window, "FindAsync");
+                Assert.Single(results.Items);
+                results.SelectedIndex = 0;
+                Assert.Equal("новый вывод", plain.Editor.SelectedText);
+            }
+            typeof(MainWindow).GetMethod("CloseSearchPanel", Private)!.Invoke(window, null);
 
             ModeToggle(false).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
             menu.Close();
@@ -66,11 +80,48 @@ public sealed class LogModeSwitchTests
             Assert.False(capture.IsDisposed);
             ModeToggle(true).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
             menu.Close();
-            Assert.IsType<ConsoleTextView>(item.Content);
+            plain = Assert.IsType<ConsoleTextView>(item.Content);
+            await writer.WriteLineAsync(new string('x', ConsoleTextView.TextLimit) + "latest");
+            await HeadlessTests.WaitForAsync(() => plain.Editor.Text.Contains("latest"));
+            ((TextBox)Field(window, "_searchInput")).Text = "first frame";
+            await InvokeTask(window, "FindAsync");
+            Assert.Empty(results.Items);
+            Assert.Contains("неполные", ((TextBlock)Field(window, "_searchStatus")).Text);
             await InvokeTask(window, "CloseTabAsync", tab);
             Assert.True(capture.IsDisposed);
         }
         finally { await CloseMainWindowAsync(window); }
+    });
+
+    [Fact]
+    public Task LiveBurstShowsTheLatestUtf8InOneRefresh() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "burst.log");
+        await File.WriteAllTextAsync(path, "old output\n");
+        using var view = new ConsoleTextView(path, 12, false);
+        await HeadlessTests.WaitForAsync(() => view.Editor.Text.Contains("old output"));
+        ((DispatcherTimer)Field(view, "_timer")).Stop();
+        var burst = new string('a', 2 * 1024 * 1024) + "Я" + new string('x', ConsoleTextView.TextLimit - 6) + "\nend\n";
+        await File.AppendAllTextAsync(path, burst);
+        typeof(ConsoleTextView).GetMethod("ReadOutput", Private)!.Invoke(view, [null, EventArgs.Empty]);
+        await HeadlessTests.WaitForAsync(() => !(bool)Field(view, "_reading"));
+        Assert.Equal(new string('x', ConsoleTextView.TextLimit - 6) + "\nend\n", view.Editor.Text);
+        Assert.Equal("old output\n" + burst, await File.ReadAllTextAsync(path));
+    });
+
+    [Fact]
+    public Task CompletingAnOversizedLiveLineKeepsItsTail() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "long-line.log");
+        var initial = "😀" + new string('x', ConsoleTextView.TextLimit - 12);
+        await File.WriteAllTextAsync(path, initial);
+        using var view = new ConsoleTextView(path, 12, false);
+        await HeadlessTests.WaitForAsync(() => view.Editor.Document.TextLength == initial.Length);
+        const string end = "xxxxxEND!\r\n";
+        await File.AppendAllTextAsync(path, end);
+        await HeadlessTests.WaitForAsync(() => (bool)Field(view, "_earlierOutput"));
+        Assert.Equal(initial[2..] + end, view.Editor.Text);
+        Assert.Equal(initial + end, await File.ReadAllTextAsync(path));
     });
 
     [Fact]
