@@ -4,6 +4,7 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Input;
@@ -2061,7 +2062,7 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
-    public Task CtrlWheelChangesEditorFontSizeAndPlainWheelDoesNot()
+    public Task CtrlWheelChangesTextSizeWithoutScrollingTheEditorOrLog()
         => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "zoom.txt");
@@ -2070,26 +2071,53 @@ public sealed class WorkspaceTests
         try
         {
             var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var scroll = Assert.Single(editor.GetVisualDescendants().OfType<ScrollViewer>());
+            var view = editor.TextArea.TextView;
             var original = editor.FontSize;
             var point = editor.TranslatePoint(new Point(12, 12), window)!.Value;
 
-            window.MouseWheel(point, new Vector(0, 1));
+            window.MouseWheel(point, new Vector(0, -1));
+            Assert.True(scroll.Offset.Y > 0);
             Assert.Equal(original, editor.FontSize);
+
+            scroll.Offset = new Vector(0, view.GetVisualTopByDocumentLine(100) + 2);
+            window.UpdateLayout();
             window.MouseWheel(point, new Vector(0, 1), RawInputModifiers.Control);
+            window.UpdateLayout();
             Assert.Equal(original + 1, editor.FontSize);
-            window.MouseWheel(point, new Vector(0, -1), RawInputModifiers.Control);
+            Assert.Equal(100, view.VisualLines[0].FirstDocumentLine.LineNumber);
+
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var mapPoint = minimap.TranslatePoint(new Point(12, 12), window)!.Value;
+            window.MouseWheel(mapPoint, new Vector(0, -1), RawInputModifiers.Control);
+            window.UpdateLayout();
             Assert.Equal(original, editor.FontSize);
+            Assert.Equal(100, view.VisualLines[0].FirstDocumentLine.LineNumber);
 
             var openLog = (Task?)Invoke(window, "OpenPathAsync", path, true, null);
             Assert.NotNull(openLog);
             await openLog;
             await HeadlessTests.WaitForAsync(() => Property(ActiveTab(window), "Log") is LogView);
             var log = Assert.IsType<LogView>(Property(ActiveTab(window), "Log"));
+            await log.InitialPageLoad;
+            log.WordWrap = false;
             var logText = Assert.Single(log.GetVisualDescendants().OfType<TextBox>(), textBox => textBox.IsReadOnly);
+            var logScroll = Assert.Single(logText.GetVisualDescendants().OfType<ScrollViewer>());
             var logPoint = logText.TranslatePoint(new Point(12, 12), window)!.Value;
             var logOriginal = logText.FontSize;
+            var page = log.CurrentOffset;
+            await HeadlessTests.WaitForAsync(() => logScroll.ScrollBarMaximum.Y > 200);
+            window.MouseWheel(logPoint, new Vector(0, -4));
+            window.UpdateLayout();
+            var first = FirstLogTextIndex();
+            Assert.True(first > 0);
+            Assert.Equal(logOriginal, logText.FontSize);
             window.MouseWheel(logPoint, new Vector(0, 1), RawInputModifiers.Control);
+            window.UpdateLayout();
             Assert.Equal(logOriginal + 1, logText.FontSize);
+            Assert.Equal(first, FirstLogTextIndex());
+            Assert.Equal(page, log.CurrentOffset);
+            Assert.False(log.WordWrap);
 
             Invoke(window, "ResizeText", 48d);
             window.MouseWheel(logPoint, new Vector(0, 1), RawInputModifiers.Control);
@@ -2097,6 +2125,13 @@ public sealed class WorkspaceTests
             Invoke(window, "ResizeText", -48d);
             window.MouseWheel(logPoint, new Vector(0, -1), RawInputModifiers.Control);
             Assert.Equal(8d, logText.FontSize);
+
+            int FirstLogTextIndex()
+            {
+                var presenter = Assert.Single(logText.GetVisualDescendants().OfType<TextPresenter>());
+                var origin = presenter.TranslatePoint(default, logScroll.Presenter!)!.Value;
+                return presenter.TextLayout.HitTestPoint(new Point(0, -origin.Y + 1)).TextPosition;
+            }
         }
         finally { await CloseAsync(window); }
     });

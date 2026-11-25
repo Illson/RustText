@@ -190,6 +190,23 @@ internal sealed partial class LogView
         return new(page, forward, anchor, keep);
     }
 
+    internal Action? CaptureZoomAnchor()
+    {
+        var filtered = _levelFilterViewport?.IsVisible == true;
+        if (!filtered && FollowEnd) return null;
+        if ((filtered ? _filteredLogScrollViewer : _logScrollViewer) is not { Viewport.Height: > 0 } scroll) return null;
+
+        var text = filtered ? _filteredLogText : _logText;
+        if (GetTextScrollAnchor(text, scroll, 0) is not { } anchor) return null;
+        var fontSize = text.FontSize;
+        return () =>
+        {
+            var scaledAnchor = anchor with { ViewportY = anchor.ViewportY * text.FontSize / fontSize };
+            var y = ResolveScrollAnchor(text, scroll, scaledAnchor, anchor.First);
+            scroll.SetCurrentValue(ScrollViewer.OffsetProperty, scroll.Offset.WithY(y));
+        };
+    }
+
     private static TextScrollAnchor? GetTextScrollAnchor(TextBox text, ScrollViewer? scroll, double steps)
     {
         if (scroll is not { Presenter: { } viewport, Viewport.Height: > 0 }

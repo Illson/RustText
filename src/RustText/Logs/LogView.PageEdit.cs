@@ -37,6 +37,7 @@ internal sealed partial class LogView
     internal Action<string>? PreserveExternalPageEdit { get; init; }
     public bool HasPendingEdit => IsWritingPage || _editedPageChanged;
     internal bool IsWritingPage => _pageWrite is not null;
+    internal TextEditor? VisiblePageEditor => _pageEditor is { IsEffectivelyVisible: true } editor ? editor : null;
 
     internal void SetWindowCloseInputBlocked(bool blocked)
     {
