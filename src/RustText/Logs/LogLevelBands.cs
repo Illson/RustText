@@ -12,7 +12,7 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
 {
     private readonly List<int> _starts = [];
     private readonly List<LogLevel> _levels = [];
-    private readonly List<(long Start, long End)> _filteredOffsets = [];
+    private readonly List<(long Start, long End)> _sourceOffsets = [];
 
     private long _nextOffset = -1;
 
@@ -30,13 +30,19 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
         base.OnDetachedFromVisualTree(e);
     }
 
-    internal void SetPage(LogPage page)
+    internal void SetPage(LogPage page, bool keepOverlap = false)
     {
         var carried = page.StartOffset == _nextOffset && _levels.Count > 0 ? _levels[^1] : LogLevel.Other;
+        if (keepOverlap && page.Rows is [{ StartsWithinLine: true } first, ..])
+        {
+            var end = page.Rows.TakeWhile(row => row.StartsWithinLine).Last().EndOffset;
+            var overlap = _sourceOffsets.FindIndex(old => old.Start < end && first.StartOffset < old.End);
+            if (overlap >= 0) carried = _levels[overlap];
+        }
         _nextOffset = page.NextOffset;
         _levels.Clear();
         _starts.Clear();
-        _filteredOffsets.Clear();
+        _sourceOffsets.Clear();
         var offset = 0;
         foreach (var row in page.Rows)
         {
@@ -45,7 +51,9 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
                 if (_starts.Count > 0) offset += Environment.NewLine.Length;
                 _starts.Add(offset);
                 _levels.Add(row.StartsWithinLine ? carried : LogLevels.Classify(row.Text));
+                _sourceOffsets.Add((row.StartOffset, row.EndOffset));
             }
+            else _sourceOffsets[^1] = (_sourceOffsets[^1].Start, row.EndOffset);
             offset += row.Text.Length;
         }
         InvalidateVisual();
@@ -55,7 +63,7 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
     {
         _starts.Clear();
         _levels.Clear();
-        _filteredOffsets.Clear();
+        _sourceOffsets.Clear();
         _nextOffset = -1;
         var text = new StringBuilder();
         foreach (var row in page.Rows)
@@ -65,9 +73,9 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
                 if (_starts.Count != 0) text.Append(Environment.NewLine);
                 _starts.Add(text.Length);
                 _levels.Add(row.Level);
-                _filteredOffsets.Add((row.StartOffset, row.EndOffset));
+                _sourceOffsets.Add((row.StartOffset, row.EndOffset));
             }
-            else _filteredOffsets[^1] = (_filteredOffsets[^1].Start, row.EndOffset);
+            else _sourceOffsets[^1] = (_sourceOffsets[^1].Start, row.EndOffset);
             text.Append(row.Text);
         }
         InvalidateVisual();
@@ -78,7 +86,7 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
     {
         _starts.Clear();
         _levels.Clear();
-        _filteredOffsets.Clear();
+        _sourceOffsets.Clear();
         _nextOffset = -1;
         foreach (var row in LogLevelFilter.EditorRows(text, 0, default))
         {
@@ -90,7 +98,7 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
 
     internal (long Start, long End)? VisibleFilteredOffsets(ScrollViewer scroll)
     {
-        if (_filteredOffsets.Count == 0 || scroll.Viewport.Height <= 0 || scroll.Presenter is not { } viewport
+        if (_sourceOffsets.Count == 0 || scroll.Viewport.Height <= 0 || scroll.Presenter is not { } viewport
             || FindTextPresenter() is not { } presenter
             || presenter.TranslatePoint(default, viewport) is not { } origin) return null;
 
@@ -110,7 +118,7 @@ internal sealed class LogLevelBands(TextBox textBox) : Control
             }
             top += line.Height;
         }
-        return first < 0 || last < first ? null : (_filteredOffsets[first].Start, _filteredOffsets[last].End);
+        return first < 0 || last < first ? null : (_sourceOffsets[first].Start, _sourceOffsets[last].End);
     }
 
     public override void Render(DrawingContext context)

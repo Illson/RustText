@@ -891,6 +891,12 @@ internal sealed partial class LogView : UserControl, IDisposable
             }
         };
         _logText.AddHandler(KeyDownEvent, OnLogKeyDown, RoutingStrategies.Tunnel);
+        foreach (var text in new[] { _logText, _filteredLogText })
+        {
+            text.AddHandler(PointerPressedEvent, TrackSelectionPointer, RoutingStrategies.Tunnel, handledEventsToo: true);
+            text.AddHandler(PointerMovedEvent, TrackSelectionPointer, RoutingStrategies.Tunnel, handledEventsToo: true);
+            text.AddHandler(PointerReleasedEvent, TrackSelectionPointer, RoutingStrategies.Tunnel, handledEventsToo: true);
+        }
         _logText.PropertyChanged += (_, e) =>
         {
             if (e.Property == TextBox.CaretIndexProperty || e.Property == TextBox.SelectionStartProperty
@@ -994,35 +1000,16 @@ internal sealed partial class LogView : UserControl, IDisposable
 
     private void OnMinimapPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
-        if (e.Delta.Y == 0)
-        {
-            return;
-        }
-
-        if (_levelFilterViewport?.IsVisible == true)
-        {
-            if (_filteredPage is not { Rows.Count: > 0 } filteredPage) return;
-            var first = filteredPage.Rows[0];
-            var last = filteredPage.Rows[^1];
-            var filteredPageBytes = Math.Max(1, last.EndOffset - first.StartOffset);
-            var filteredNext = Math.Clamp(first.StartOffset - (long)Math.Sign(e.Delta.Y) * filteredPageBytes,
-                _hiddenOffset, _filterSnapshotLength);
-            var filteredRange = Math.Max(1, _filterSnapshotLength - _hiddenOffset);
-            _ = NavigateMinimapToRatioAsync((filteredNext - _hiddenOffset) / (double)filteredRange);
-            e.Handled = true;
-            return;
-        }
-
-        if (_page is not { } page) return;
-        var pageBytes = Math.Max(1, page.NextOffset - page.StartOffset);
-        var next = Math.Clamp(page.StartOffset - (long)Math.Sign(e.Delta.Y) * pageBytes, _hiddenOffset, _file.Length);
-        var range = Math.Max(1, _file.Length - _hiddenOffset);
-        _ = NavigateMinimapToRatioAsync((next - _hiddenOffset) / (double)range);
+        var viewer = _levelFilterViewport?.IsVisible == true ? _filteredLogScrollViewer : _logScrollViewer;
+        if (e.Delta.Y == 0 || viewer?.Presenter is not { } presenter || VisualRoot is not Visual root) return;
+        var point = e.GetCurrentPoint(root);
         e.Handled = true;
+        presenter.RaiseEvent(new PointerWheelEventArgs(presenter, e.Pointer, root,
+            point.Position, e.Timestamp, point.Properties, e.KeyModifiers, e.Delta));
     }
 
     private async Task LoadPageAsync(long offset, bool saveHistory = true, PagePosition position = PagePosition.Start,
-        int maxPageBytes = LogDataReader.DefaultPageBytes, FileStamp? expectedPageStamp = null)
+        int maxPageBytes = LogDataReader.DefaultPageBytes, FileStamp? expectedPageStamp = null, ScrollAnchor? scrollAnchor = null)
     {
         if (_closed || _busy || PageNavigationBlocked)
         {
@@ -1038,20 +1025,38 @@ internal sealed partial class LogView : UserControl, IDisposable
             var generation = _dataGeneration;
             var token = _closing.Token;
             var stamp = expectedPageStamp ?? _fileStamp;
-            var (page, firstLine, edit) = await Task.Run(() =>
+            var rowsToRead = LogDataReader.DefaultPageSize;
+            // Reread the whole scrolling window, not just its first block, after an append.
+            if (position == PagePosition.Preserve && _pageEdit is null && _page is { } currentPage)
             {
-                var pageBytes = maxPageBytes;
+                rowsToRead = Math.Max(rowsToRead, currentPage.Rows.Count);
+                maxPageBytes = Math.Max(maxPageBytes, (int)Math.Min(LogDataReader.MaximumPageBytes,
+                    currentPage.NextOffset - currentPage.StartOffset));
+            }
+            var (page, firstLine, edit, scrollIndex) = await Task.Run(() =>
+            {
                 var requested = Math.Max(firstOffset, position == PagePosition.FollowEnd ? reader.GetEndOffset(token) : offset);
-                var result = reader.ReadPage(requested, maxPageBytes: pageBytes, cancellationToken: token);
+                var (result, index) = scrollAnchor is { } anchor
+                    ? ReadScrolledPage(reader, anchor, firstOffset, token)
+                    : (reader.ReadPage(requested, pageSize: rowsToRead, maxPageBytes: maxPageBytes, cancellationToken: token), -1);
                 var first = result.Rows.Count > 0 ? FindLineNumber(reader, result.Rows[0].StartOffset, token) : null;
                 var pageEdit = EditsPagesByDefault ? ReadPageEdit(result, reader, stamp, token) : null;
-                return (result, first, pageEdit);
+                return (result, first, pageEdit, index);
             }, token);
             if (_closed || generation != _dataGeneration || !ReferenceEquals(reader, _reader)
                 || (position == PagePosition.FollowEnd && !FollowEnd && _page is not null))
             {
                 return;
             }
+            if (scrollAnchor is { } pending && (ReferenceEquals(page, pending.Page)
+                || !ReferenceEquals(_page, pending.Page) || _levelFilterViewport?.IsVisible == true
+                || Math.Abs((_logScrollViewer?.Offset.Y ?? 0) - pending.Text.Offset) > 1)) return;
+            ScrollSelection? selection = null;
+            if (scrollAnchor is { } scrolled && !TryKeepScrollSelection(_logText,
+                scrollIndex < 0 ? new ScrollOverlap(0, 0, -1) : scrolled.Keep,
+                scrolled.Forward ? -scrolled.Keep.Start : scrollIndex - scrolled.Text.First, out selection,
+                limitReached: page.Rows.Count > LogDataReader.MaximumPageSize
+                    || page.NextOffset - page.StartOffset > LogDataReader.MaximumPageBytes)) return;
             // The user can still type in the current page while the next one is being read.
             if (EditsPagesByDefault && HasPendingEdit)
             {
@@ -1088,19 +1093,21 @@ internal sealed partial class LogView : UserControl, IDisposable
                     displayText.Append(row.Text);
                 }
                 _logText.Text = displayText.ToString();
-                _levelBands.SetPage(page);
+                selection?.Restore(_logText);
+                _levelBands.SetPage(page, keepOverlap: scrollIndex >= 0 || position == PagePosition.Preserve);
             }
             Dispatcher.UIThread.Post(() =>
             {
                 if (!ReferenceEquals(_page, page) || _logScrollViewer is not { } scroll) return;
                 if (position == PagePosition.FollowEnd && !FollowEnd) return;
-                var y = position switch
+                var y = scrollAnchor is { } anchor ? ResolveScrollAnchor(_logText, scroll, anchor.Text, scrollIndex) : position switch
                 {
                     PagePosition.End or PagePosition.FollowEnd => scroll.ScrollBarMaximum.Y,
                     PagePosition.Preserve => previousY,
                     _ => 0
                 };
                 scroll.Offset = new Vector(scroll.Offset.X, y);
+                if (scrollAnchor is not null) QueueSelectionAtPointer(_logText);
             }, DispatcherPriority.Loaded);
             var rows = page.Rows.Count == 0 ? 0 : 1 + page.Rows.Skip(1).Count(row => !row.StartsWithinLine);
             _countLabel.Text = $"Строк на странице · {LineNumbers.Format(rows)}";
@@ -1933,6 +1940,7 @@ internal sealed partial class LogView : UserControl, IDisposable
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
         if (_closed || _busy || _pageWrite is not null || !_autoRefresh
+            || IsDraggingSelection(_levelFilterViewport?.IsVisible == true ? _filteredLogText : _logText)
             || (_pageEdit is not null && PreserveExternalPageEdit is null))
         {
             return;
@@ -2436,7 +2444,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _timeButton.IsEnabled = enabled;
         if (_levelFilterViewport?.IsVisible == true)
         {
-            _previousButton.IsEnabled = !_busy && _filterReading is null && _filterHistory.Count > 0;
+            _previousButton.IsEnabled = !_busy && _filterReading is null && (_filterHistory.Count > 0 || CanReadEarlierMatches);
             _nextButton.IsEnabled = !_busy && _filterReading is null && _filterNext.HasValue;
             _startButton.IsEnabled = _endButton.IsEnabled = _middleButton.IsEnabled = false;
             _openSearchButton.IsEnabled = _timeButton.IsEnabled = false;

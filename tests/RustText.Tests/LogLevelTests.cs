@@ -138,6 +138,28 @@ public sealed class LogLevelTests
     }
 
     [Fact]
+    public void BackwardFilterFindsTheLevelAndLineNumberOfALongRecordPastUnmatchedBlocks()
+    {
+        using var folder = new TempDirectory();
+        var path = Path.Combine(folder.Path, "reverse.log");
+        const string noise = "[INFO] no match\r\n";
+        var unmatched = string.Concat(Enumerable.Repeat(noise, 5000));
+        var prefix = "[ERR] " + new string('Ж', 170_000) + "\r\n";
+        File.WriteAllText(path, prefix + unmatched + "[WARN] target\r\n", Encoding.Unicode);
+        using var file = LogDataReader.Open(path);
+        var reader = new LogDataReader(file, TextEncodingKind.Utf16LittleEndian);
+        var cursor = new FilterCursor(reader.PreambleLength + Encoding.Unicode.GetByteCount(prefix + unmatched),
+            SourceLine: 5002);
+
+        var rows = LogLevelFilter.ReadBefore(reader, 0, cursor, LogLevel.Error, default);
+
+        Assert.NotEmpty(rows);
+        Assert.All(rows, row => { Assert.Equal(LogLevel.Error, row.Level); Assert.Equal(1L, row.SourceLine); });
+        Assert.True(rows[0].Continuation);
+        Assert.Equal(reader.PreambleLength + Encoding.Unicode.GetByteCount(prefix), rows[^1].EndOffset);
+    }
+
+    [Fact]
     public Task FilterButtonsPageThroughWholeLogAndLeaveSourceUntouched() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "filter.log");

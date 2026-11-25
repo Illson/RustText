@@ -14,9 +14,10 @@ internal sealed partial class LogDataReader
     internal const int MinimapColumns = 32;
     private const int LookaheadBytes = 4;
     private const int MidpointScanBytes = 64 * 1024;
-    private const int MaximumPageBytes = 1024 * 1024;
+    internal const int MaximumPageBytes = 1024 * 1024;
     private const int MaximumFrameBytes = 64 * 1024;
-    private const int DefaultPageSize = 80;
+    internal const int DefaultPageSize = 80;
+    internal const int MaximumPageSize = 2_048;
     internal const int DefaultFrameBytes = 16 * 1024;
     private const int IndexBufferBytes = 256 * 1024;
     internal const int DefaultPageBytes = 128 * 1024;
@@ -246,7 +247,7 @@ internal sealed partial class LogDataReader
     private LogPage ReadPage(long offset, int pageSize, int maxFrameBytes, int maxPageBytes,
         CancellationToken cancellationToken, long endOffset, SequentialScan? scan)
     {
-        if (pageSize is < 1 or > 100)
+        if (pageSize is < 1 or > MaximumPageSize)
         {
             throw new ArgumentOutOfRangeException(nameof(pageSize));
         }
@@ -500,7 +501,7 @@ internal sealed partial class LogDataReader
     public long GetEndOffset(CancellationToken cancellationToken = default) =>
         GetPreviousPageOffset(_file.Length, cancellationToken);
 
-    public long GetPreviousPageOffset(long endOffset, CancellationToken cancellationToken = default)
+    public long GetPreviousPageOffset(long endOffset, CancellationToken cancellationToken = default, bool fullBlock = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var length = Math.Clamp(endOffset, 0, _file.Length);
@@ -515,8 +516,14 @@ internal sealed partial class LogDataReader
         var buffer = ArrayPool<byte>.Shared.Rent(scanLength);
         try
         {
-            var read = ReadWindowInto(_file.SafeFileHandle, aligned, buffer.AsSpan(0, scanLength), cancellationToken);
-            return FindPreviousPageStart(buffer.AsSpan(0, read), aligned, cancellationToken);
+            var handle = _file.SafeFileHandle;
+            var read = ReadWindowInto(handle, aligned, buffer.AsSpan(0, scanLength), cancellationToken);
+            var bytes = buffer.AsSpan(0, read);
+            if (!fullBlock) return FindPreviousPageStart(bytes, aligned, cancellationToken);
+            if (aligned <= _bomLength || IsNewlineBefore(handle, aligned)) return aligned;
+            var ending = FindLineEnding(bytes);
+            var after = ending.Index + ending.Length;
+            return ending.Index >= 0 && after < read ? aligned + after : aligned;
         }
         finally
         {

@@ -3,6 +3,7 @@ using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using RustText.Demo.Editor;
 
@@ -39,6 +40,9 @@ internal sealed partial class LogView
     private long?[] _filteredSourceLineNumbers = [];
     private FilterPage? _filteredPage;
     private ScrollViewer? _filteredLogScrollViewer;
+    private long _noFilteredMatchesBefore;
+
+    private sealed record FilterScroll(FilterPage Page, bool Forward, TextScrollAnchor Text, ScrollOverlap Keep);
 
     private Grid BuildLevelFilterViewport()
     {
@@ -122,7 +126,11 @@ internal sealed partial class LogView
         return Task.CompletedTask;
     }
 
-    private async Task LoadFilteredPageAsync(FilterCursor cursor, FilterPage? previous = null)
+    private bool CanReadEarlierMatches => _filteredPage is { Rows.Count: > 0 }
+        && _filterCurrent.Offset > Math.Max(_hiddenOffset, _noFilteredMatchesBefore);
+
+    private async Task LoadFilteredPageAsync(FilterCursor cursor, FilterPage? previous = null, FilterScroll? scroll = null,
+        bool readBefore = false)
     {
         if (_closed || _levelFilter is null) return;
         _filterReading?.Cancel();
@@ -131,11 +139,19 @@ internal sealed partial class LogView
         _filterReading = reading;
         var token = reading.Token;
         var generation = ++_filterGeneration;
-        if (previous is null) _filterCurrent = cursor;
+        const string scrollingStatus = "Поиск соседних совпадений…";
+        var oldStatus = _filterStatus.Text;
+        if (scroll is not null) _filterStatus.Text = scrollingStatus;
+        var reset = previous is null && scroll is null && !readBefore;
+        if (reset)
+        {
+            _filterCurrent = cursor;
+            if (cursor.Offset == _hiddenOffset) _noFilteredMatchesBefore = 0;
+        }
         _filterNext = null;
         // A re-entrant click must not see enabled navigation while the old text is being cleared.
         RefreshButtons();
-        if (previous is null)
+        if (reset)
         {
             _filteredLogText.Text = string.Empty;
             _filteredSourceLineNumbers = [];
@@ -155,9 +171,10 @@ internal sealed partial class LogView
         var originalDigest = _observedDigest;
         var encoding = _reader.Encoding;
         var levels = _levelFilter.SelectedLevels;
+        var firstOffset = _hiddenOffset;
         try
         {
-            var page = await Task.Run(() =>
+            var (page, scrollIndex) = await Task.Run(() =>
             {
                 using var file = LogDataReader.Open(_path);
                 var reader = new LogDataReader(file, encoding);
@@ -168,17 +185,52 @@ internal sealed partial class LogView
                 var sourceLine = cursor.SourceLine ?? (cursor.Offset < reader.PreambleLength
                     ? 1 : FindLineNumber(reader, cursor.Offset, token));
                 var start = cursor with { SourceLine = sourceLine };
+                if (readBefore)
+                    return (new FilterPage(LogLevelFilter.ReadBefore(reader, firstOffset, start, levels, token), start), 0);
+                if (scroll is { Forward: false } backward)
+                    return PrependFilteredRows(backward, LogLevelFilter.ReadBefore(reader, firstOffset, start, levels, token));
                 // The last frame may not be a complete line yet. Keep earlier results and reread that frame.
                 var prefix = previous?.Rows.Where(row => row.StartOffset < cursor.Offset).ToList();
                 IEnumerable<LogRow> ReadRows(long offset, CancellationToken token) =>
                     LogLevelFilter.FileRows(reader, offset, stamp.Length, token);
-                return LogLevelFilter.Read(ReadRows, start, levels, token, prefix);
+                var result = LogLevelFilter.Read(ReadRows, start, levels, token, prefix,
+                    Math.Max(LogLevelFilter.PageRows, previous?.Rows.Count ?? 0),
+                    Math.Max(LogDataReader.DefaultPageBytes, previous?.Rows.Sum(row => row.Text.Length) ?? 0));
+                if (scroll is not { } forward) return (result, 0);
+                if (result.Rows.Count == 0) return (forward.Page with { Next = null }, forward.Text.First);
+                result.Rows.InsertRange(0, forward.Page.Rows.Skip(forward.Keep.Index));
+                return (result, Math.Max(0, forward.Text.First - forward.Keep.Start));
             }, token);
             if (reading.IsCancellationRequested || generation != _filterGeneration || dataGeneration != _dataGeneration || _closed
                 || !_levelFilterOpen || _levelFilterViewport?.IsVisible != true) return;
+            ScrollSelection? selection = null;
+            if (readBefore && page.Rows.Count == 0)
+            {
+                _noFilteredMatchesBefore = cursor.Offset;
+                return;
+            }
+            if (readBefore) _filterCurrent = CursorAt(page.Rows[0]);
+            if (reset && cursor.Offset == firstOffset && page.Rows.Count > 0) _noFilteredMatchesBefore = page.Rows[0].StartOffset;
+            if (scroll is { } pending)
+            {
+                if (ReferenceEquals(page, pending.Page))
+                {
+                    _noFilteredMatchesBefore = cursor.Offset;
+                    return;
+                }
+                if (_filteredLogScrollViewer is not { } view || !AtFilteredScrollEdge(view, pending.Forward)) return;
+                if (!TryKeepScrollSelection(_filteredLogText, pending.Keep,
+                    pending.Forward ? -pending.Keep.Start : scrollIndex - pending.Text.First, out selection,
+                    limitReached: page.Rows.Count > LogDataReader.MaximumPageSize
+                        || page.Rows.Sum(row => row.Text.Length) > LogDataReader.MaximumPageBytes)) return;
+                if (pending.Page.Rows.Count == 0 || page.Rows[0].StartOffset != pending.Page.Rows[0].StartOffset)
+                    _filterHistory.Clear(); // The wheel left the button's page; Back now reads from the first visible match.
+                _filterCurrent = CursorAt(page.Rows[0]);
+            }
             _filterSnapshotLength = stamp.Length;
-            if (previous is null || !page.Rows.SequenceEqual(previous.Rows))
+            if ((previous ?? scroll?.Page) is not { } old || !page.Rows.SequenceEqual(old.Rows))
                 _filteredLogText.Text = _filteredLevelBands?.SetFilteredPage(page) ?? string.Empty;
+            selection?.Restore(_filteredLogText);
             _filteredPage = page;
             UpdateFilteredLineGutter(page);
             UpdateFilteredMinimap(page);
@@ -186,7 +238,18 @@ internal sealed partial class LogView
                 && page.Rows[0].StartOffset <= _indexedTo)
                 _ = RefreshFilteredLineNumbersAsync(_reader, page, generation);
             _filterNext = page.Next;
-            _filterStatus.Text = page.Rows.Count == 0 ? "Совпадений нет" : $"Страница {LineNumbers.Format(_filterHistory.Count + 1)}";
+            _filterStatus.Text = page.Rows.Count == 0 ? "Совпадений нет" : page.Rows[0].SourceLine is { } line
+                ? $"От строки {LineNumbers.Format(line)}" : $"От байта {LineNumbers.Format(page.Rows[0].StartOffset)}";
+            if (scroll is { } moved)
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (_filterGeneration != generation || _filteredLogScrollViewer is not { } view) return;
+                    var y = ResolveScrollAnchor(_filteredLogText, view, moved.Text, scrollIndex);
+                    view.Offset = new Vector(view.Offset.X, y);
+                    QueueSelectionAtPointer(_filteredLogText);
+                }, DispatcherPriority.Loaded);
+            }
         }
         catch (OperationCanceledException) when (reading.IsCancellationRequested) { }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ObjectDisposedException)
@@ -198,11 +261,55 @@ internal sealed partial class LogView
         {
             if (ReferenceEquals(_filterReading, reading))
             {
+                if ((scroll is not null || readBefore) && generation == _filterGeneration)
+                {
+                    _filterNext = _filteredPage?.Next;
+                    if (_filterStatus.Text == scrollingStatus) _filterStatus.Text = oldStatus;
+                }
                 _filterReading = null;
                 reading.Dispose();
                 RefreshButtons();
             }
         }
+    }
+
+    private static FilterCursor CursorAt(FilterRow row) => new(row.StartOffset, row.Level, row.SourceLine, row.RelativeLine);
+
+    private static bool AtFilteredScrollEdge(ScrollViewer view, bool forward) =>
+        forward ? view.Offset.Y >= view.ScrollBarMaximum.Y - 1 : view.Offset.Y <= 1;
+
+    private static (FilterPage Page, int TextIndex) PrependFilteredRows(FilterScroll scroll, List<FilterRow> earlier)
+    {
+        var page = scroll.Page;
+        if (earlier.Count == 0) return (page, 0);
+        if (page.Rows.Count == 0) return (page with { Rows = earlier }, -1);
+        var prefixLength = earlier.Sum(row => row.Text.Length)
+            + (earlier.Skip(1).Count(row => !row.Continuation) + (page.Rows[0].Continuation ? 0 : 1)) * Environment.NewLine.Length;
+        earlier.AddRange(page.Rows.Take(scroll.Keep.Index));
+        var next = scroll.Keep.Index < page.Rows.Count ? CursorAt(page.Rows[scroll.Keep.Index]) : page.Next;
+        return (page with { Rows = earlier, Next = next }, prefixLength + scroll.Text.First);
+    }
+
+    private bool TryContinueFilteredScroll(double wheel)
+    {
+        if (_filterReading is not null || _filteredPage is not { } page || _filteredLogScrollViewer is not { } view) return false;
+        var forward = wheel < 0;
+        if (!AtFilteredScrollEdge(view, forward)) return false;
+        var start = page.Rows.Count == 0 ? _filterCurrent : CursorAt(page.Rows[0]);
+        if (forward ? _filterNext is null : start.Offset <= Math.Max(_hiddenOffset, _noFilteredMatchesBefore)) return false;
+        var anchor = GetTextScrollAnchor(_filteredLogText, view, -wheel);
+        if (anchor is null && page.Rows.Count > 0) return false;
+        var text = anchor ?? new TextScrollAnchor(0, 0, view.Offset.Y, 0, 0);
+        var length = _filteredLogText.Text?.Length ?? 0;
+        var dragging = IsDraggingSelection(_filteredLogText);
+        var overlapRows = dragging ? LogDataReader.MaximumPageSize - LogLevelFilter.PageRows : LogLevelFilter.PageRows;
+        var overlapCharacters = dragging ? LogDataReader.MaximumPageBytes - LogDataReader.DefaultPageBytes : LogDataReader.DefaultPageBytes;
+        var keep = FindScrollOverlap(_filteredLogText, page.Rows, text, forward, row => row.Text.Length, row => row.Continuation,
+            (i, position) => forward
+                ? page.Rows.Count - i <= overlapRows && length - position <= overlapCharacters
+                : i < overlapRows && position <= overlapCharacters);
+        _ = LoadFilteredPageAsync(forward ? _filterNext!.Value : start, scroll: new FilterScroll(page, forward, text, keep));
+        return true;
     }
 
     private async Task NavigateFilteredAsync(bool forward)
@@ -215,6 +322,7 @@ internal sealed partial class LogView
             await LoadFilteredPageAsync(next);
         }
         else if (_filterHistory.TryPop(out var previous)) await LoadFilteredPageAsync(previous);
+        else if (CanReadEarlierMatches) await LoadFilteredPageAsync(_filterCurrent, readBefore: true);
     }
 
     private void UpdateFilteredLineGutter(FilterPage page)
