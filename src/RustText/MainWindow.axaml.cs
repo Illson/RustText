@@ -259,7 +259,6 @@ public partial class MainWindow : Window
     {
         var tab = new WorkTab(id ?? NextId(), group);
         _workspace.NextId = Math.Max(_workspace.NextId, tab.Id);
-        tabs.Add(tab.Id, tab);
         var label = new TextBlock
         {
             Text = "Без имени", TextTrimming = TextTrimming.CharacterEllipsis,
@@ -362,7 +361,13 @@ public partial class MainWindow : Window
             e.Handled = true;
             if (_draggedTabId != tab.Id) Run(() => CloseTabAsync(tab));
         };
-        group.Tabs.Items.Add(tab.Item);
+        tabs.Add(tab.Id, tab);
+        try { group.Tabs.Items.Add(tab.Item); }
+        catch
+        {
+            RemoveTab(tab, tabs);
+            throw;
+        }
         if (select)
         {
             _active = group;
