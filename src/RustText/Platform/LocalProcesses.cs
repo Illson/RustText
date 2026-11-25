@@ -7,11 +7,12 @@ using Microsoft.Win32.SafeHandles;
 
 namespace RustText.Demo.Platform;
 
-[SupportedOSPlatform("windows")]
-internal static class FileLockProcesses
+internal static class LocalProcesses
 {
     private const uint QueryLimitedInformation = 0x1000;
     private const uint Terminate = 0x0001;
+    private const uint Synchronize = 0x00100000;
+    private const uint WaitTimeout = 258;
     private const uint TokenQuery = 0x0008;
 
     internal sealed record Owner(int Id, string Name, long Started, bool CanClose)
@@ -19,14 +20,22 @@ internal static class FileLockProcesses
         public string Label => $"{Name} (PID {Id})";
     }
 
+    [SupportedOSPlatform("windows")]
     public static IReadOnlyList<Owner> Describe(IReadOnlyList<LockedFileInspection.BlockedItem> blocked)
     {
         // Windows reports all users of a file, not which handle denied delete sharing.
         // A process is eligible only if it is the sole possible owner for every item it uses.
         var ambiguous = blocked.Where(item => item.ProcessIds.Count != 1).SelectMany(item => item.ProcessIds).ToHashSet();
+        return Describe(blocked.SelectMany(item => item.ProcessIds))
+            .Select(owner => ambiguous.Contains(owner.Id) ? owner with { CanClose = false } : owner).ToArray();
+    }
+
+    [SupportedOSPlatform("windows")]
+    public static IReadOnlyList<Owner> Describe(IEnumerable<int> ids)
+    {
         using var caller = WindowsIdentity.GetCurrent();
         using var current = Process.GetCurrentProcess();
-        return blocked.SelectMany(item => item.ProcessIds).Distinct().Select(id =>
+        return ids.Distinct().Order().Select(id =>
         {
             using var handle = OpenProcess(QueryLimitedInformation, false, id);
             var name = "Неизвестный процесс";
@@ -38,19 +47,43 @@ internal static class FileLockProcesses
             catch (Exception error) when (error is ArgumentException or InvalidOperationException or Win32Exception) { }
 
             var start = ReadStart(handle);
-            var eligible = start != 0 && name != "Неизвестный процесс" && !ambiguous.Contains(id)
+            var eligible = start != 0 && name != "Неизвестный процесс"
                 && CanAct(handle, id, caller.User, current.SessionId, name);
             return new Owner(id, name, start, eligible);
-        }).OrderBy(owner => owner.Id).ToArray();
+        }).ToArray();
     }
 
-    public static void RequestClose(IEnumerable<Owner> candidates, CancellationToken token) =>
-        Act(candidates, force: false, token);
+    [SupportedOSPlatform("windows")]
+    public static void ForceClose(IEnumerable<Owner> candidates, CancellationToken token)
+    {
+        foreach (var owner in candidates) TryForceClose(owner, token);
+    }
 
-    public static void ForceClose(IEnumerable<Owner> candidates, CancellationToken token) =>
-        Act(candidates, force: true, token);
+    [SupportedOSPlatform("windows")]
+    public static bool TryForceClose(Owner expected, CancellationToken token, bool waitForExit = false)
+    {
+        token.ThrowIfCancellationRequested();
+        if (!expected.CanClose) return false;
+        using var caller = WindowsIdentity.GetCurrent();
+        using var current = Process.GetCurrentProcess();
+        using var target = OpenProcess(QueryLimitedInformation | Terminate | (waitForExit ? Synchronize : 0), false, expected.Id);
+        if (!Matches(expected, target, caller.User, current.SessionId)) return false;
+        token.ThrowIfCancellationRequested();
+        // Use the validated handle; a recycled PID cannot redirect termination.
+        if (!TerminateProcess(target, 1)) return false;
+        if (waitForExit)
+        {
+            var result = WaitForSingleObject(target, 5_000);
+            token.ThrowIfCancellationRequested();
+            if (result == WaitTimeout)
+                throw new TimeoutException("Запрос на завершение отправлен, но процесс ещё не закрылся.");
+            if (result != 0) throw new Win32Exception();
+        }
+        return true;
+    }
 
-    private static void Act(IEnumerable<Owner> candidates, bool force, CancellationToken token)
+    [SupportedOSPlatform("windows")]
+    public static void RequestClose(IEnumerable<Owner> candidates, CancellationToken token)
     {
         using var caller = WindowsIdentity.GetCurrent();
         using var current = Process.GetCurrentProcess();
@@ -58,16 +91,8 @@ internal static class FileLockProcesses
         {
             token.ThrowIfCancellationRequested();
             if (!expected.CanClose) continue;
-            using var target = OpenProcess(QueryLimitedInformation | (force ? Terminate : 0), false, expected.Id);
-            if (ReadStart(target) != expected.Started
-                || !CanAct(target, expected.Id, caller.User, current.SessionId, expected.Name))
-                continue;
-            if (force)
-            {
-                // Use the validated handle; a recycled PID cannot redirect termination.
-                TerminateProcess(target, 1);
-                continue;
-            }
+            using var target = OpenProcess(QueryLimitedInformation, false, expected.Id);
+            if (!Matches(expected, target, caller.User, current.SessionId)) continue;
             try
             {
                 using var process = Process.GetProcessById(expected.Id);
@@ -78,6 +103,12 @@ internal static class FileLockProcesses
         }
     }
 
+    [SupportedOSPlatform("windows")]
+    private static bool Matches(Owner expected, SafeProcessHandle process, SecurityIdentifier? user, int session) =>
+        expected.Started != 0 && ReadStart(process) == expected.Started
+        && CanAct(process, expected.Id, user, session, expected.Name);
+
+    [SupportedOSPlatform("windows")]
     private static bool CanAct(SafeProcessHandle process, int id, SecurityIdentifier? currentUser, int session, string name)
     {
         if (process.IsInvalid || id == Environment.ProcessId || id <= 4
@@ -123,6 +154,9 @@ internal static class FileLockProcesses
     [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TerminateProcess(SafeProcessHandle process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetShellWindow();

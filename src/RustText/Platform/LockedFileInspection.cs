@@ -92,7 +92,7 @@ internal static class LockedFileInspection
                 throw NativeError(path, error);
             var owners = FindProcessIds(path);
             // Keep our own PID in the evidence: otherwise a second reader can look like the sole blocker.
-            // FileLockProcesses excludes RustText itself from the processes that may be closed.
+            // LocalProcesses excludes RustText itself from the processes that may be closed.
             using var recheck = Open(path, DeleteAccess);
             if (!recheck.IsInvalid) return;
             var remainingError = Marshal.GetLastPInvokeError();

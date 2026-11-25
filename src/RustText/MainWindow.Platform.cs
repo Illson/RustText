@@ -3,7 +3,6 @@ using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
-using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -113,47 +112,6 @@ public partial class MainWindow
         {
             Run(() => ExplorerReveal.SelectFileAsync(path));
         }
-    }
-
-    private async Task ShowWindowFinderAsync()
-    {
-        var query = new TextBox { PlaceholderText = "PID или часть заголовка окна" };
-        var matches = new ListBox { MinHeight = 155, MaxHeight = 400 };
-        var status = new TextBlock { Foreground = FocusTheme.Muted };
-        var body = DialogPanel(query, matches, status);
-        var dialog = Dialog("Найти окно процесса", body, 650);
-        void Find()
-        {
-            var term = query.Text?.Trim() ?? "";
-            var byPid = uint.TryParse(term, out var pid);
-            matches.Items.Clear();
-            foreach (var window in WindowFinder.EnumerateVisibleWindows()
-                .Where(window => byPid ? window.ProcessId == pid : window.Title.Contains(term, StringComparison.OrdinalIgnoreCase)))
-            {
-                matches.Items.Add(new ListBoxItem { Content = $"{window.ProcessId} · {window.Title}", Tag = window });
-            }
-
-            status.Text = $"Окон найдено · {matches.Items.Count}";
-        }
-
-        body.Children.Add(Row(FocusButton(Button("Найти", Find), primary: true), FocusButton(Button("Вывести", () =>
-        {
-            if (matches.SelectedItem is ListBoxItem { Tag: WindowIdentity window })
-            {
-                status.Text = WindowFinder.ActivateWindow(window)
-                    ? "Окно выведено на передний план."
-                    : "Windows отклонила переключение либо окно было закрыто.";
-            }
-        }))));
-        query.KeyDown += (_, e) =>
-        {
-            if (e.Key == Key.Enter)
-            {
-                e.Handled = true;
-                Find();
-            }
-        };
-        await dialog.ShowDialog(this);
     }
 
     private VersionHistory VersionStore() => VersionHistory.OpenDefault(Settings.VersionFileLimitBytes, Settings.VersionTotalLimitBytes);

@@ -684,6 +684,7 @@ public partial class MainWindow
         else _ = DetachEditor(tab);
         log.SetTextSize(_fontSize);
         tab.Log = log;
+        if (console is not null) tab.IsTransient = true;
         if (_closing) log.SetWindowCloseInputBlocked(true);
         if (draftName is null)
         {
@@ -1433,6 +1434,8 @@ public partial class MainWindow
         public Group Group { get; set; } = group;
         public TabItem Item { get; } = new();
         public ProxyCheckerView? ProxyChecker => Item.Content as ProxyCheckerView;
+        public ProcessFinderView? ProcessFinder => Item.Content as ProcessFinderView;
+        public bool IsTool => ProxyChecker is not null || ProcessFinder is not null;
         public string? CustomTitle { get; set; }
         public TextBlock LineCountLabel { get; } = new()
         {
@@ -1448,7 +1451,7 @@ public partial class MainWindow
         public MultiCaretEditing? MultiCaret { get; set; }
         public LogView? Log { get; set; }
         public ShellTab? Shell { get; set; }
-        public bool IsTransient => ProxyChecker is not null || Shell is not null || Log?.IsConsole == true;
+        public bool IsTransient { get; set; }
         public bool IsLog => PendingFileOpenMode is FileOpenMode.PagedEditor or FileOpenMode.Log
             || Log is not null || Deferred?.Log is not null || Deferred?.LogOffset is not null;
         public bool OpensAsLog => IsLog && !(Log?.EditsPagesByDefault

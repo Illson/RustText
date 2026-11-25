@@ -598,7 +598,7 @@ public partial class MainWindow : Window
         }
 
         UpdateStatus(tab);
-        if (tab.ProxyChecker is not null && PanelHost.IsVisible) CloseSearchPanel();
+        if (tab.IsTool && PanelHost.IsVisible) CloseSearchPanel();
         else RefreshSearchForActiveTab();
     }
 
@@ -788,6 +788,7 @@ public partial class MainWindow : Window
     {
         tab.LoadCancellation?.Cancel();
         tab.ProxyChecker?.Dispose();
+        tab.ProcessFinder?.Dispose();
         tab.Log?.Close();
         tab.Log = null;
         tab.Shell?.Dispose();

@@ -1,7 +1,6 @@
 using System.Reflection;
 using Avalonia.Controls;
 using Avalonia.Headless;
-using Avalonia.Interactivity;
 using Avalonia.VisualTree;
 using RustText.Demo;
 using Xunit;
@@ -52,7 +51,7 @@ public sealed class HistoryMenuTests
                 Assert.Equal(new[]
                 {
                     "Терминал", "Редактор и просмотр", "Форматирование и данные", "Шифрование", "История и черновики", "Удалить с диска", "Обновления",
-                    "Найти окно процесса…", "Прокси-чекер…", "Настройки…"
+                    "Поиск процессов", "Прокси-чекер…", "Настройки…"
                 }, toolsGroups.Select(MenuHeader));
 
                 var terminalGroup = toolsGroups.Single(item => MenuHeader(item) == "Терминал");
@@ -75,13 +74,6 @@ public sealed class HistoryMenuTests
                 var deletionGroup = toolsGroups.Single(item => MenuHeader(item) == "Удалить с диска");
                 Assert.Equal(new[] { "Выбрать файл…", "Выбрать папку…" }, MenuLabels(deletionGroup));
                 Assert.Equal(new[] { "Проверить обновления…", "История выпусков…" }, MenuLabels(updatesGroup));
-
-                var finderCommand = toolsGroups.Single(item => MenuHeader(item) == "Найти окно процесса…");
-                finderCommand.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-                await HeadlessTests.WaitForAsync(() => window.OwnedWindows.Any(dialog => dialog.Title == "Найти окно процесса"));
-                var finderDialog = window.OwnedWindows.Single(dialog => dialog.Title == "Найти окно процесса");
-                finderDialog.Close();
-                await HeadlessTests.WaitForAsync(() => !finderDialog.IsVisible);
 
                 await (Task)Invoke(window, "ShowHomeAsync")!;
                 await HeadlessTests.WaitForAsync(() => window.GetVisualDescendants().OfType<TextBlock>()
