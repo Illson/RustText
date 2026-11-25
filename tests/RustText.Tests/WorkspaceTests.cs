@@ -1051,7 +1051,6 @@ public sealed class WorkspaceTests
             ((TextBox)Field(window, "_replacement")).Text = replacement;
             ((ToggleButton)Field(window, "_regexOption")).IsChecked = true;
             await CallAsync(window, "FindAsync");
-            await CallAsync(window, "NavigateSearchAsync", false);
             await CallAsync(window, "ReplaceAsync", false);
             Assert.Equal(expected, editor.Text);
             Assert.Equal(nextMatch, editor.SelectedText);
@@ -1095,7 +1094,8 @@ public sealed class WorkspaceTests
             ((TextBox)Field(window, "_searchInput")).Text = "$";
             ((ToggleButton)Field(window, "_regexOption")).IsChecked = true;
             await CallAsync(window, "FindAsync");
-            foreach (var offset in new[] { 1, 3, 1, 3 })
+            Assert.Equal(1, editor.CaretOffset);
+            foreach (var offset in new[] { 3, 1, 3, 1 })
             {
                 await CallAsync(window, "NavigateSearchAsync", false);
                 Assert.Equal(offset, editor.CaretOffset);
@@ -1135,6 +1135,43 @@ public sealed class WorkspaceTests
             input.Text = "A+Bthree";
             await HeadlessTests.WaitForAsync(() => results.Items.Count == 1
                 && ((ListBoxItem)results.Items[0]!).Content!.ToString()!.Contains("A+Bthree", StringComparison.Ordinal));
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TypingInSearchScrollsToTheFirstEditorMatchAndKeepsFocus() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-scroll.txt");
+        var padding = string.Concat(Enumerable.Repeat("other row\n", 200));
+        var first = padding + new string('x', 300);
+        var second = first + "needle-one\n" + padding;
+        var contents = second + "needle-two\n";
+        await File.WriteAllTextAsync(path, contents);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var input = (TextBox)Field(window, "_searchInput");
+            editor.WordWrap = false;
+            editor.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+            editor.TextArea.Focus();
+            Press(window, Key.F, RawInputModifiers.Control, PhysicalKey.F, "f");
+            Assert.True(input.IsFocused);
+
+            window.KeyTextInput("needle");
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => editor.SelectionStart == first.Length
+                && editor.SelectedText == "needle");
+            Assert.True(view.ScrollOffset.X > 0);
+            Assert.True(view.ScrollOffset.Y > 0);
+            Assert.True(input.IsFocused);
+
+            window.KeyTextInput("-two");
+            await HeadlessTests.WaitForAsync(() => editor.SelectionStart == second.Length
+                && editor.SelectedText == "needle-two");
+            Assert.True(input.IsFocused);
+            Assert.Equal(contents, editor.Text);
         }
         finally { await CloseAsync(window); }
     });
@@ -1709,20 +1746,20 @@ public sealed class WorkspaceTests
     [Fact]
     public Task OpeningTextTabDoesNotStealFocusFromSearchOpenedDuringLoading() => HeadlessTests.RunAsync(async profile =>
     {
+        var previousPath = Path.Combine(profile, "previous.txt");
         var path = Path.Combine(profile, "pending.txt");
+        await File.WriteAllTextAsync(previousPath, "previous");
         await File.WriteAllTextAsync(path, "file");
-        var window = await OpenWorkspaceAsync();
+        var window = await OpenWorkspaceAsync(previousPath);
         try
         {
-            Invoke(window, "OpenSearchPanel", false);
-            await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);
-            Invoke(window, "NewTab", "");
-            Read<TextEditor>(ActiveTab(window), "Editor").TextArea.Focus();
+            Assert.True(Read<TextEditor>(ActiveTab(window), "Editor").TextArea.Focus());
 
             var opening = CallAsync(window, "OpenPathsAsync", new[] { path }, false, null);
             Assert.True(Read<bool>(ActiveTab(window), "Loading"));
+            Invoke(window, "OpenSearchPanel", false);
             var input = (TextBox)Field(window, "_searchInput");
-            Assert.True(input.Focus());
+            Assert.True(input.IsFocused);
 
             await opening;
             await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Background);

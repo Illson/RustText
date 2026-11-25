@@ -1181,10 +1181,10 @@ public partial class MainWindow
         }, DispatcherPriority.Loaded);
     }
 
-    private void SelectText(WorkTab tab, int offset, int count)
+    private void SelectText(WorkTab tab, int offset, int count, bool focusEditor = true)
     {
         if (tab.EditorLogFilter?.IsFiltering == true) CloseEditorLevelFilter(tab);
-        Select(tab);
+        if (focusEditor) Select(tab);
         if (tab.SearchEditor is not { } editor)
         {
             return;
@@ -1194,9 +1194,14 @@ public partial class MainWindow
         count = Math.Clamp(count, 0, editor.Document.TextLength - offset);
         tab.JsonFolding?.Reveal(offset);
         editor.Select(offset, count);
-        editor.CaretOffset = offset + count;
         editor.ScrollToLine(editor.Document.GetLineByOffset(offset).LineNumber);
-        editor.Focus();
+        if (focusEditor) editor.Focus();
+        else
+        {
+            // Measure the new lines before scrolling horizontally to an off-screen match.
+            editor.TextArea.TextView.EnsureVisualLines();
+            editor.TextArea.Caret.BringCaretToView();
+        }
     }
 
     private static Control LoadingSurface(CancellationTokenSource source, string message)

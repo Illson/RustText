@@ -102,7 +102,7 @@ public sealed class LogRefreshTests
                 await (Task)Invoke(log, "HideBeginningAsync")!;
                 Assert.Equal(200, Field<long>(log, "_hiddenOffset"));
                 Field<TextBox>(log, "_searchBox").Text = "old";
-                await (Task)Invoke(log, "SearchAsync", false)!;
+                await (Task)Invoke(log, "SearchAsync", false, false)!;
                 Assert.NotEmpty((IEnumerable)Field<object>(log, "_searchResults"));
 
                 await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat("new sequence\n", 500)));

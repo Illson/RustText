@@ -47,7 +47,11 @@ public partial class MainWindow
         _searchStatus = SearchBar.Status();
 
         var rows = SearchBar.MakeRows();
-        var find = SearchBar.Command("Найти", () => Run(FindAsync), primary: true);
+        var find = SearchBar.Command("Найти", () =>
+        {
+            _searchInput.Focus();
+            Run(FindAsync);
+        }, primary: true);
         _findAll = SearchBar.Command("Найти все", () => Run(() => FindMatchesAsync(selectAll: true)),
             description: "Выделить все совпадения в текущем документе");
         SearchBar.AddRow(rows, 0, SearchBar.Options(_regexOption, _caseOption, _wordOption),
@@ -76,14 +80,7 @@ public partial class MainWindow
             SearchBar.Icon("↑", "Предыдущее совпадение (Shift+F3)", () => Run(() => NavigateSearchAsync(true))),
             SearchBar.Icon("↓", "Следующее совпадение (F3)", () => Run(() => NavigateSearchAsync(false))),
             SearchBar.ResultsToggle(_searchResults));
-        PanelHost.Content = new Border
-        {
-            Background = FocusTheme.Panel,
-            BorderBrush = FocusTheme.Border,
-            BorderThickness = new Thickness(0, 1, 0, 0),
-            Padding = new Thickness(8, 5),
-            Child = new StackPanel { Spacing = 2, Children = { rows, footer, _searchResults } },
-        };
+        PanelHost.Child = new StackPanel { Spacing = 2, Children = { rows, footer, _searchResults } };
 
         _searchInput.KeyDown += (_, e) =>
         {
@@ -278,6 +275,7 @@ public partial class MainWindow
 
         var active = ActiveTab;
         var allTabs = _allTabs.IsChecked == true;
+        var jumpToFirst = !selectAll && _searchInput.IsFocused;
         var candidates = allTabs && !selectAll ? _tabs.Values.ToArray() : active is { } selected ? [selected] : [];
         using var source = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _searchCancellation = source;
@@ -289,6 +287,7 @@ public partial class MainWindow
         var incomplete = false;
         var results = new List<SearchResult>(100);
         var total = 0L;
+        EditorSearchResult? firstMatch = null;
         SearchSummary? selection = null;
         TextEditor? selectionEditor = null;
         long selectionRevision = 0;
@@ -355,9 +354,11 @@ public partial class MainWindow
                 var text = editor.Text;
                 var revision = tab.Revision;
                 var previewLimit = 100 - results.Count;
+                var captureFirst = jumpToFirst && ReferenceEquals(tab, active);
+                var resultLimit = captureFirst ? Math.Max(1, previewLimit) : previewLimit;
                 var caretLimit = selectAll ? MultiCaretEditing.MaxCarets : 0;
                 var result = await Task.Run(
-                    () => TextOperations.Find(text, new TextMatcher(options, query), previewLimit, source.Token, caretLimit), source.Token);
+                    () => TextOperations.Find(text, new TextMatcher(options, query), resultLimit, source.Token, caretLimit), source.Token);
                 if (tab.Revision != revision || !ReferenceEquals(tab.SearchEditor, editor))
                 {
                     incomplete = true;
@@ -365,7 +366,10 @@ public partial class MainWindow
                 }
                 total += result.Count;
                 incomplete |= result.TimedOut;
-                foreach (var hit in result.Hits) results.Add(new EditorSearchResult(tab, hit, revision));
+                if (previewLimit > 0)
+                    foreach (var hit in result.Hits) results.Add(new EditorSearchResult(tab, hit, revision));
+                if (captureFirst && result.Hits.Count > 0)
+                    firstMatch = new EditorSearchResult(tab, result.Hits[0], revision);
                 if (selectAll)
                 {
                     selection = result;
@@ -390,7 +394,16 @@ public partial class MainWindow
             _searchStatus.Text = incomplete ? $"Найдено {total:N0} · результаты неполные" : $"Найдено {total:N0}";
             if (!preserveResults && total > results.Count)
                 ToolTip.SetTip(_searchStatus, $"В списке первые {results.Count:N0} совпадений");
-            if (!selectAll) return;
+            if (!selectAll)
+            {
+                if (_searchInput.IsFocused && firstMatch is { } first && ReferenceEquals(first.Tab, ActiveTab)
+                    && first.Tab.Revision == first.Revision)
+                {
+                    _searchFocus = (first.Tab, first.Hit);
+                    SelectText(first.Tab, first.Hit.Offset, first.Hit.Length, focusEditor: false);
+                }
+                return;
+            }
             if (!ReferenceEquals(ActiveTab, active) || active?.MultiCaret is not { } multiCaret || active.Revision != selectionRevision
                 || !ReferenceEquals(active.Editor, selectionEditor) || selectionEditor is not { IsReadOnly: false }
                 || selection is null) return;
