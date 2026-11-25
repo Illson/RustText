@@ -228,6 +228,51 @@ public sealed class LogUiTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public Task ScrollingDoesNotSpliceARewrittenFile(bool backward) => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "rewrite.log");
+        static string Rows(string prefix) => string.Concat(Enumerable.Range(1, 320).Select(n => $"{prefix}-{n:D4}\n"));
+        await File.WriteAllTextAsync(path, Rows("old"));
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            if (backward)
+            {
+                ((Button)Field(log, "_nextButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset > 0);
+            }
+            var old = Page(log)!;
+            await File.WriteAllTextAsync(path, Rows("new"));
+            await InvokeTask(log, "ContinueScrollingAsync", old, !backward, 1d);
+            var text = ((TextBox)Field(log, "_logText")).Text!;
+            Assert.Contains("new-", text);
+            Assert.DoesNotContain("old-", text);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task OverlappingWindowsKeepTheSeverityOfALongRecord() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "long-error.log");
+        await File.WriteAllTextAsync(path, "[ERR] " + new string('z', 400_000) + "\n[INFO] next\n");
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false, WordWrap: false));
+        try
+        {
+            while (Page(log) is { HasMore: true } page)
+            {
+                await InvokeTask(log, "ContinueScrollingAsync", page, true, 1d);
+                Assert.True(Page(log)!.NextOffset > page.NextOffset);
+                Assert.Equal(LogLevel.Error, ((List<LogLevel>)Field(Field(log, "_levelBands"), "_levels"))[0]);
+            }
+            Assert.True(Page(log)!.Rows[0].StartsWithinLine);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public Task WheelKeepsVisibleRowsWhenLoadingAnAdjacentLogPage(bool wrap) => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "smooth-scroll.log");
@@ -726,6 +771,11 @@ public sealed class LogUiTests
             await HeadlessTests.WaitForAsync(() => filtered.Text?.EndsWith("row-0398", StringComparison.Ordinal) == true
                 && FirstVisibleRowNumber(filtered, scroll) >= beforeBoundary);
             Assert.InRange(FirstVisibleRowNumber(filtered, scroll) - beforeBoundary, 0, 8);
+            var back = (Button)Field(log, "_previousButton");
+            Assert.True(back.IsEnabled);
+            Assert.NotEqual("Страница 1", ((TextBlock)Field(log, "_filterStatus")).Text);
+            back.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => filtered.Text?.StartsWith("Error row-0000") == true && !back.IsEnabled);
         }
         finally { await CloseLogAsync(window, log); }
     });
@@ -767,6 +817,11 @@ public sealed class LogUiTests
             Assert.InRange(target - FirstVisibleRowNumber(text, scroll), 0, 20);
             var gutter = (TextBlock)Field(log, "_lineGutterText");
             Assert.StartsWith(FirstRowNumber(text.Text) + Environment.NewLine, gutter.Text);
+            var back = (Button)Field(log, "_previousButton");
+            var afterWheel = FirstRowNumber(text.Text);
+            back.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await HeadlessTests.WaitForAsync(() => FirstRowNumber(text.Text) > 0 && FirstRowNumber(text.Text) < afterWheel);
+            Assert.InRange(afterWheel - FirstRowNumber(text.Text), 5, 5 * LogLevelFilter.PageRows);
         }
         finally { await CloseLogAsync(window, log); }
     });

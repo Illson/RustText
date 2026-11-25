@@ -126,7 +126,11 @@ internal sealed partial class LogView
         return Task.CompletedTask;
     }
 
-    private async Task LoadFilteredPageAsync(FilterCursor cursor, FilterPage? previous = null, FilterScroll? scroll = null)
+    private bool CanReadEarlierMatches => _filteredPage is { Rows.Count: > 0 }
+        && _filterCurrent.Offset > Math.Max(_hiddenOffset, _noFilteredMatchesBefore);
+
+    private async Task LoadFilteredPageAsync(FilterCursor cursor, FilterPage? previous = null, FilterScroll? scroll = null,
+        bool readBefore = false)
     {
         if (_closed || _levelFilter is null) return;
         _filterReading?.Cancel();
@@ -138,15 +142,16 @@ internal sealed partial class LogView
         const string scrollingStatus = "Поиск соседних совпадений…";
         var oldStatus = _filterStatus.Text;
         if (scroll is not null) _filterStatus.Text = scrollingStatus;
-        if (previous is null && scroll is null)
+        var reset = previous is null && scroll is null && !readBefore;
+        if (reset)
         {
             _filterCurrent = cursor;
-            _noFilteredMatchesBefore = 0;
+            if (cursor.Offset == _hiddenOffset) _noFilteredMatchesBefore = 0;
         }
         _filterNext = null;
         // A re-entrant click must not see enabled navigation while the old text is being cleared.
         RefreshButtons();
-        if (previous is null && scroll is null)
+        if (reset)
         {
             _filteredLogText.Text = string.Empty;
             _filteredSourceLineNumbers = [];
@@ -180,6 +185,8 @@ internal sealed partial class LogView
                 var sourceLine = cursor.SourceLine ?? (cursor.Offset < reader.PreambleLength
                     ? 1 : FindLineNumber(reader, cursor.Offset, token));
                 var start = cursor with { SourceLine = sourceLine };
+                if (readBefore)
+                    return (new FilterPage(LogLevelFilter.ReadBefore(reader, firstOffset, start, levels, token), start), 0);
                 if (scroll is { Forward: false } backward)
                     return PrependFilteredRows(backward, LogLevelFilter.ReadBefore(reader, firstOffset, start, levels, token));
                 // The last frame may not be a complete line yet. Keep earlier results and reread that frame.
@@ -197,6 +204,13 @@ internal sealed partial class LogView
             if (reading.IsCancellationRequested || generation != _filterGeneration || dataGeneration != _dataGeneration || _closed
                 || !_levelFilterOpen || _levelFilterViewport?.IsVisible != true) return;
             ScrollSelection? selection = null;
+            if (readBefore && page.Rows.Count == 0)
+            {
+                _noFilteredMatchesBefore = cursor.Offset;
+                return;
+            }
+            if (readBefore) _filterCurrent = CursorAt(page.Rows[0]);
+            if (reset && cursor.Offset == firstOffset && page.Rows.Count > 0) _noFilteredMatchesBefore = page.Rows[0].StartOffset;
             if (scroll is { } pending)
             {
                 if (ReferenceEquals(page, pending.Page))
@@ -209,6 +223,8 @@ internal sealed partial class LogView
                     pending.Forward ? -pending.Keep.Start : scrollIndex - pending.Text.First, out selection,
                     limitReached: page.Rows.Count > LogDataReader.MaximumPageSize
                         || page.Rows.Sum(row => row.Text.Length) > LogDataReader.MaximumPageBytes)) return;
+                if (pending.Page.Rows.Count == 0 || page.Rows[0].StartOffset != pending.Page.Rows[0].StartOffset)
+                    _filterHistory.Clear(); // The wheel left the button's page; Back now reads from the first visible match.
                 _filterCurrent = CursorAt(page.Rows[0]);
             }
             _filterSnapshotLength = stamp.Length;
@@ -222,7 +238,8 @@ internal sealed partial class LogView
                 && page.Rows[0].StartOffset <= _indexedTo)
                 _ = RefreshFilteredLineNumbersAsync(_reader, page, generation);
             _filterNext = page.Next;
-            _filterStatus.Text = page.Rows.Count == 0 ? "Совпадений нет" : $"Страница {LineNumbers.Format(_filterHistory.Count + 1)}";
+            _filterStatus.Text = page.Rows.Count == 0 ? "Совпадений нет" : page.Rows[0].SourceLine is { } line
+                ? $"От строки {LineNumbers.Format(line)}" : $"От байта {LineNumbers.Format(page.Rows[0].StartOffset)}";
             if (scroll is { } moved)
             {
                 Dispatcher.UIThread.Post(() =>
@@ -244,7 +261,7 @@ internal sealed partial class LogView
         {
             if (ReferenceEquals(_filterReading, reading))
             {
-                if (scroll is not null && generation == _filterGeneration)
+                if ((scroll is not null || readBefore) && generation == _filterGeneration)
                 {
                     _filterNext = _filteredPage?.Next;
                     if (_filterStatus.Text == scrollingStatus) _filterStatus.Text = oldStatus;
@@ -305,6 +322,7 @@ internal sealed partial class LogView
             await LoadFilteredPageAsync(next);
         }
         else if (_filterHistory.TryPop(out var previous)) await LoadFilteredPageAsync(previous);
+        else if (CanReadEarlierMatches) await LoadFilteredPageAsync(_filterCurrent, readBefore: true);
     }
 
     private void UpdateFilteredLineGutter(FilterPage page)

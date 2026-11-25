@@ -1094,7 +1094,7 @@ internal sealed partial class LogView : UserControl, IDisposable
                 }
                 _logText.Text = displayText.ToString();
                 selection?.Restore(_logText);
-                _levelBands.SetPage(page);
+                _levelBands.SetPage(page, keepOverlap: scrollIndex >= 0 || position == PagePosition.Preserve);
             }
             Dispatcher.UIThread.Post(() =>
             {
@@ -2443,7 +2443,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _timeButton.IsEnabled = enabled;
         if (_levelFilterViewport?.IsVisible == true)
         {
-            _previousButton.IsEnabled = !_busy && _filterReading is null && _filterHistory.Count > 0;
+            _previousButton.IsEnabled = !_busy && _filterReading is null && (_filterHistory.Count > 0 || CanReadEarlierMatches);
             _nextButton.IsEnabled = !_busy && _filterReading is null && _filterNext.HasValue;
             _startButton.IsEnabled = _endButton.IsEnabled = _middleButton.IsEnabled = false;
             _openSearchButton.IsEnabled = _timeButton.IsEnabled = false;

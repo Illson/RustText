@@ -247,27 +247,24 @@ internal sealed partial class LogView
         long firstOffset, CancellationToken token)
     {
         var old = anchor.Page;
-        if (anchor.Forward)
+        var first = anchor.Forward ? anchor.Keep.Index : 0;
+        var count = anchor.Forward ? old.Rows.Count - first : anchor.Keep.Index;
+        var start = anchor.Forward ? (first == 0 ? old.StartOffset : old.Rows[first].StartOffset)
+            : Math.Max(firstOffset, reader.GetPreviousPageOffset(old.StartOffset, token));
+        var bytes = (int)Math.Clamp(old.Rows[first + count - 1].EndOffset - start
+            + (anchor.Forward ? LogDataReader.DefaultPageBytes : 0), 4, LogDataReader.MaximumPageBytes);
+        // Read the overlap and the adjacent rows together: a paused file can be rewritten at the same offsets.
+        var page = reader.ReadPage(start, Math.Min(count + LogDataReader.DefaultPageSize, LogDataReader.MaximumPageSize),
+            Math.Min(bytes, LogDataReader.DefaultFrameBytes), bytes, token);
+        var prefix = 0;
+        var i = 0;
+        while (i < page.Rows.Count && page.Rows[i].StartOffset < old.Rows[first].StartOffset)
         {
-            var next = reader.ReadPage(old.NextOffset, cancellationToken: token);
-            if (next.Rows.Count == 0 || next.StartOffset != old.NextOffset) return (old, anchor.Text.First);
-            var kept = old.Rows.Skip(anchor.Keep.Index);
-            var start = anchor.Keep.Index == 0 ? old.StartOffset : old.Rows[anchor.Keep.Index].StartOffset;
-            return (next with { Rows = [.. kept, .. next.Rows], StartOffset = start },
-                Math.Max(0, anchor.Text.First - anchor.Keep.Start));
+            prefix += page.Rows[i++].Text.Length;
+            if (i < page.Rows.Count && !page.Rows[i].StartsWithinLine) prefix += Environment.NewLine.Length;
         }
-
-        var startBefore = Math.Max(firstOffset, reader.GetPreviousPageOffset(old.StartOffset, token));
-        var previous = reader.ReadPage(startBefore, cancellationToken: token, endOffset: old.StartOffset);
-        if (previous.Rows.Count == 0) return (old, anchor.Text.First);
-        if (previous.NextOffset != old.StartOffset)
-            return (reader.ReadPage(startBefore, cancellationToken: token), -1);
-        var keptRows = old.Rows.Take(anchor.Keep.Index).ToArray();
-        var prefixLength = previous.Rows.Sum(row => row.Text.Length)
-            + (previous.Rows.Skip(1).Count(row => !row.StartsWithinLine) + (keptRows[0].StartsWithinLine ? 0 : 1)) * Environment.NewLine.Length;
-        var nextOffset = keptRows.Length == old.Rows.Count ? old.NextOffset : keptRows[^1].EndOffset;
-        return (old with { Rows = [.. previous.Rows, .. keptRows], StartOffset = previous.StartOffset, NextOffset = nextOffset,
-            HasMore = nextOffset < old.FileLength }, prefixLength + anchor.Text.First);
+        if (!page.Rows.Skip(i).Take(count).SequenceEqual(old.Rows.Skip(first).Take(count))) return (page, -1);
+        return (page, prefix + Math.Max(0, anchor.Text.First - anchor.Keep.Start));
     }
 
     private static double ResolveScrollAnchor(TextBox text, ScrollViewer scroll, TextScrollAnchor anchor, int textIndex)
