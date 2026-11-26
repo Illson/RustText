@@ -1,13 +1,15 @@
 using System.Buffers.Binary;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Win32.SafeHandles;
 
 namespace RustText.Demo.Platform;
 
-public sealed class SingleInstanceCoordinator : IAsyncDisposable
+public sealed partial class SingleInstanceCoordinator : IAsyncDisposable
 {
     private const int ProtocolVersion = 1;
     private const int MaximumMessageBytes = 256 * 1024;
@@ -39,10 +41,18 @@ public sealed class SingleInstanceCoordinator : IAsyncDisposable
     /// Starts the primary instance or forwards its launch request to the existing owner.
     /// The primary coordinator must be disposed when the application exits.
     /// </summary>
-    public static async Task<SingleInstanceCoordinator?> StartAsync(
+    public static Task<SingleInstanceCoordinator?> StartAsync(
         string profileDirectory,
         LaunchRequest initialRequest,
         Func<LaunchRequest, CancellationToken, Task> onRequest,
+        CancellationToken cancellationToken = default) =>
+        StartAsync(profileDirectory, initialRequest, onRequest, AllowSetForegroundWindow, cancellationToken);
+
+    internal static async Task<SingleInstanceCoordinator?> StartAsync(
+        string profileDirectory,
+        LaunchRequest initialRequest,
+        Func<LaunchRequest, CancellationToken, Task> onRequest,
+        Func<uint, bool> allowForeground,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profileDirectory);
@@ -72,7 +82,7 @@ public sealed class SingleInstanceCoordinator : IAsyncDisposable
 
             try
             {
-                await ForwardAsync(pipeName, initialRequest, cancellationToken).ConfigureAwait(false);
+                await ForwardAsync(pipeName, initialRequest, allowForeground, cancellationToken).ConfigureAwait(false);
                 return null;
             }
             catch (IOException) when (DateTime.UtcNow < deadline)
@@ -216,6 +226,7 @@ public sealed class SingleInstanceCoordinator : IAsyncDisposable
     private static async Task ForwardAsync(
         string pipeName,
         LaunchRequest request,
+        Func<uint, bool> allowForeground,
         CancellationToken cancellationToken)
     {
         var envelope = new LaunchEnvelope(ProtocolVersion, request);
@@ -239,6 +250,12 @@ public sealed class SingleInstanceCoordinator : IAsyncDisposable
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
             throw new TimeoutException("The primary instance pipe is not ready yet.", exception);
+        }
+
+        // A launcher started from Explorer can pass its foreground permission to the running instance.
+        if (request.Activate && GetNamedPipeServerProcessId(pipe.SafePipeHandle, out var serverId))
+        {
+            _ = allowForeground(serverId);
         }
 
         using var messageTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -270,6 +287,14 @@ public sealed class SingleInstanceCoordinator : IAsyncDisposable
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToUpperInvariant()));
         return "RustText-" + Convert.ToHexString(hash.AsSpan(0, 16));
     }
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AllowSetForegroundWindow(uint processId);
 }
 
 internal sealed record LaunchEnvelope(int Version, LaunchRequest Request);
