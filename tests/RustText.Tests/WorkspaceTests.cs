@@ -3475,6 +3475,66 @@ public sealed class WorkspaceTests
         finally { await CloseAsync(window); }
     });
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public Task TextMinimapAlignsSearchMatchWithItsPositionInTheViewport(bool allowScrollBelowDocument, bool wrap) =>
+        HeadlessTests.RunAsync(async profile =>
+        {
+            var path = Path.Combine(profile, "search-viewport.txt");
+            var matchLine = wrap ? "row 89 (" + new string('\t', 200) + "video " + new string('x', 900) : "row 89 video";
+            await File.WriteAllLinesAsync(path, Enumerable.Range(1, 325)
+                .Select(i => i == 89 ? matchLine : i == 222 ? "row 222 video" : $"row {i}"));
+            var window = await OpenWorkspaceAsync(path);
+            try
+            {
+                var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+                var view = editor.TextArea.TextView;
+                var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+                var scroll = Assert.Single(editor.GetVisualDescendants().OfType<ScrollViewer>());
+                editor.Options.AllowScrollBelowDocument = allowScrollBelowDocument;
+                editor.WordWrap = wrap;
+                editor.TextArea.Focus();
+                Press(window, Key.F, RawInputModifiers.Control, PhysicalKey.F, "f");
+                ((TextBox)Field(window, "_searchInput")).Text = "video";
+                await HeadlessTests.WaitForAsync(() => editor.SelectedText == "video" && view.VisualLinesValid);
+
+                var position = new TextViewPosition(editor.Document.GetLocation(editor.SelectionStart));
+                var resultY = view.GetVisualPosition(position, VisualYPosition.LineMiddle).Y;
+                scroll.Offset = new Vector(0, resultY - view.Bounds.Height / 4);
+                window.UpdateLayout();
+                view.EnsureVisualLines();
+                resultY = view.GetVisualPosition(position, VisualYPosition.LineMiddle).Y;
+                var fraction = (resultY - view.ScrollOffset.Y) / view.Bounds.Height;
+                Assert.InRange(fraction, 0.10, 0.35);
+
+                var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+                using var bitmap = new RenderTargetBitmap(size);
+                using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+                using var frame = pixels.Lock();
+                bitmap.Render(minimap);
+                bitmap.CopyPixels(frame);
+
+                var outline = FindRows(0, FocusTheme.Accent.Color);
+                var match = FindRows(5, FocusTheme.CurrentMatchMarker.Color);
+                Assert.NotEmpty(outline);
+                Assert.NotEmpty(match);
+                var expected = outline[0] + fraction * (outline[^1] - outline[0] + 1);
+                var actual = (match[0] + match[^1] + 1) / 2d;
+                Assert.True(Math.Abs(actual - expected) <= 2,
+                    $"Match center {actual:F1}, expected {expected:F1}. Scroll extent {scroll.Extent.Height:F1}, document {view.DocumentHeight:F1}.");
+
+                int[] FindRows(int x, Color color)
+                {
+                    var packed = color.B | color.G << 8 | color.R << 16 | color.A << 24;
+                    return Enumerable.Range(0, size.Height).Where(y =>
+                        Marshal.ReadInt32(frame.Address + y * frame.RowBytes + x * 4) == packed).ToArray();
+                }
+            }
+            finally { await CloseAsync(window); }
+        });
+
     [Fact]
     public Task TextMinimapShowsTheViewportOutlineWhenAllTextFits() => HeadlessTests.RunAsync(async profile =>
     {

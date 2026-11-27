@@ -84,7 +84,8 @@ internal sealed class DocumentMinimap : Control, IDisposable
         if (rows == 0) return;
 
         var height = GetPreviewHeight(lineCount, Bounds.Height);
-        var marker = ViewportMarker(document, height);
+        var view = _editor.TextArea.TextView;
+        var marker = ViewportMarker(document, view, height, layoutHeight);
         if (marker.Height > 0)
             context.FillRectangle(FocusTheme.MinimapViewport, marker);
 
@@ -96,7 +97,6 @@ internal sealed class DocumentMinimap : Control, IDisposable
             _previewDirty = true;
         }
 
-        var view = _editor.TextArea.TextView;
         var layout = layoutHeight > 0 ? (layoutHeight, view.Bounds.Width, view.DefaultLineHeight) : default;
         if (_previewDirty || _previewLayout != layout)
         {
@@ -127,9 +127,17 @@ internal sealed class DocumentMinimap : Control, IDisposable
                 var bottom = line.NextLine is { } next ? view.GetVisualTopByDocumentLine(next.LineNumber) : layoutHeight;
                 if (bottom <= top) return;
                 var rowCount = Math.Max(1, (int)Math.Round((bottom - top) / view.DefaultLineHeight));
-                var row = (int)((long)(offset - line.Offset) * rowCount / Math.Max(1, line.Length));
-                var position = (Math.Min(row, rowCount - 1) + 0.5) / rowCount;
-                fraction = (top + (bottom - top) * position) / layoutHeight;
+                if (rowCount > 1 && view.VisualLinesValid && view.GetVisualLine(line.LineNumber) is not null)
+                {
+                    var position = new TextViewPosition(document.GetLocation(offset));
+                    fraction = view.GetVisualPosition(position, VisualYPosition.LineMiddle).Y / layoutHeight;
+                }
+                else
+                {
+                    var row = (int)((long)(offset - line.Offset) * rowCount / Math.Max(1, line.Length));
+                    var position = (Math.Min(row, rowCount - 1) + 0.5) / rowCount;
+                    fraction = (top + (bottom - top) * position) / layoutHeight;
+                }
             }
             MinimapSearchMarkers.Draw(context, Bounds.Width, Padding, height, fraction, current);
         }
@@ -149,17 +157,19 @@ internal sealed class DocumentMinimap : Control, IDisposable
         InvalidateVisual();
     }
 
-    private Rect ViewportMarker(TextDocument document, double track)
+    private Rect ViewportMarker(TextDocument document, TextView view, double track, double layoutHeight)
     {
-        var viewport = _editor.ViewportHeight;
-        if (document.TextLength == 0 || viewport <= 0) return default;
+        if (document.TextLength == 0 || view.Bounds.Height <= 0 || layoutHeight <= 0) return default;
 
         var minimum = Math.Min(MinMarkerHeight, Math.Max(0, Bounds.Height - Padding * 2));
         track = Math.Max(track, minimum);
-        var maximum = _editor.ExtentHeight - viewport;
-        var markerHeight = maximum <= 0 ? track : Math.Clamp(track * viewport / _editor.ExtentHeight, minimum, track);
-        var fraction = maximum <= 0 ? 0 : Math.Clamp(_editor.VerticalOffset / maximum, 0, 1);
-        return new Rect(0, Padding + fraction * (track - markerHeight), Bounds.Width, markerHeight);
+        // The scroll extent can include empty space after the last line.
+        var scale = track / layoutHeight;
+        var start = Math.Clamp(view.ScrollOffset.Y * scale, 0, track);
+        var end = Math.Clamp((view.ScrollOffset.Y + view.Bounds.Height) * scale, start, track);
+        var markerHeight = Math.Max(minimum, end - start);
+        var y = Math.Clamp((start + end - markerHeight) / 2, 0, track - markerHeight);
+        return new Rect(0, Padding + y, Bounds.Width, markerHeight);
     }
 
     internal static int GetRowCount(int lineCount, double height) =>
