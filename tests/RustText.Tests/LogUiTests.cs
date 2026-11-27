@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using Avalonia;
 using Avalonia.Automation;
@@ -11,6 +12,9 @@ using Avalonia.Headless;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using RustText.Demo;
@@ -1224,6 +1228,48 @@ public sealed class LogUiTests
             await HeadlessTests.WaitForAsync(() => Page(log)?.StartOffset == second.Length && text.SelectedText == "needle-two"
                 && Field(log, "_logScrollViewer") is ScrollViewer { Offset.Y: > 0 });
             Assert.True(input.IsFocused);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
+    [Fact]
+    public Task LogMinimapMarksSearchMatchesAndHidesThemWhenSearchCloses() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-minimap.log");
+        var content = "video\n" + string.Concat(Enumerable.Repeat("other row\n", 100));
+        await File.WriteAllTextAsync(path, content + content);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            log.FocusSearch();
+            window.KeyTextInput("video");
+            var text = (TextBox)Field(log, "_logText");
+            await HeadlessTests.WaitForAsync(() => text.SelectedText == "video");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<LogView.LogMinimap>());
+            Assert.Equal(FocusTheme.CurrentMatchMarker.Color, ReadPixel(6, 0));
+            Assert.Equal(FocusTheme.MatchMarker.Color, ReadPixel(46, 0.5));
+
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Equal((long)content.Length, Page(log)?.StartOffset);
+            Assert.Equal(FocusTheme.MatchMarker.Color, ReadPixel(46, 0));
+            Assert.Equal(FocusTheme.CurrentMatchMarker.Color, ReadPixel(6, 0.5));
+
+            Assert.True(log.CloseSearch());
+            Assert.NotEqual(FocusTheme.MatchMarker.Color, ReadPixel(46, 0));
+            Assert.NotEqual(FocusTheme.CurrentMatchMarker.Color, ReadPixel(6, 0.5));
+
+            Color ReadPixel(int x, double fraction)
+            {
+                var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+                using var bitmap = new RenderTargetBitmap(size);
+                using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+                using var frame = pixels.Lock();
+                bitmap.Render(minimap);
+                bitmap.CopyPixels(frame);
+                var y = Math.Max(1, (int)(minimap.Bounds.Height * fraction));
+                var address = frame.Address + y * frame.RowBytes + x * 4;
+                return Color.FromRgb(Marshal.ReadByte(address, 2), Marshal.ReadByte(address, 1), Marshal.ReadByte(address));
+            }
         }
         finally { await CloseLogAsync(window, log); }
     });

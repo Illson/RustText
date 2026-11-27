@@ -45,6 +45,8 @@ internal static class FocusTheme
         string JsonNumber,
         string JsonLiteral)
     {
+        public required string MatchMarker { get; init; }
+        public required string CurrentMatchMarker { get; init; }
         public string Toolbar { get; init; } = Muted;
         public string AppIconForeground { get; init; } = Warning;
         public string AppIconBackground { get; init; } = UpdateIconSurface;
@@ -91,6 +93,10 @@ internal static class FocusTheme
         public Pen InactiveEditorSelectionOutline { get; } = new(Brush(Focus.InactiveEditorSelectionOutline), 1);
         public SolidColorBrush Match { get; } = Brush(Focus.Match);
         public SolidColorBrush CurrentMatch { get; } = Brush(Focus.CurrentMatch);
+        public SolidColorBrush MatchMarker { get; } = Brush(Focus.MatchMarker);
+        public SolidColorBrush CurrentMatchMarker { get; } = Brush(Focus.CurrentMatchMarker);
+        public Pen MatchOutline { get; }
+        public Pen CurrentMatchOutline { get; }
         public SolidColorBrush Warning { get; } = Brush(Focus.Warning);
         public SolidColorBrush Danger { get; } = Brush(Focus.Danger);
         public SolidColorBrush DangerSurface { get; } = Brush(Focus.DangerSurface);
@@ -134,6 +140,12 @@ internal static class FocusTheme
             }
         };
 
+        public ThemeState()
+        {
+            MatchOutline = new(MatchMarker, .6);
+            CurrentMatchOutline = new(CurrentMatchMarker, 1);
+        }
+
         public void RaiseChanged() => Changed?.Invoke();
 
         public void Apply(Palette palette)
@@ -159,6 +171,8 @@ internal static class FocusTheme
             InactiveEditorSelectionOutline.Brush = Brush(palette.InactiveEditorSelectionOutline);
             Set(Match, palette.Match);
             Set(CurrentMatch, palette.CurrentMatch);
+            Set(MatchMarker, palette.MatchMarker);
+            Set(CurrentMatchMarker, palette.CurrentMatchMarker);
             Set(Warning, palette.Warning);
             Set(Danger, palette.Danger);
             Set(DangerSurface, palette.DangerSurface);
@@ -234,10 +248,12 @@ internal static class FocusTheme
         [AppTheme.Focus] = new(
             "#1D2227", "#181C21", "#303841", "#252C33", "#20262C", "#414B54",
             "#D8DEE9", "#A6B0BC", "#96A1AE", "#CCC6C6", "#DBD6D6", "#2C343C",
-            "#444D58", "#69583A", "#7B6543", "#E5BD85", "#F0A09D", "#4A3033",
+            "#444D58", "#66502A", "#785A29", "#E5BD85", "#F0A09D", "#4A3033",
             "#B3CEB4", "#72C7E6", "#342E28", "#6B5742", "#47392C", "#F3E4D2",
             "#AEC9E1", "#BDD3AA", "#E5BD85", "#CDB9E1")
         {
+            MatchMarker = "#DDA841",
+            CurrentMatchMarker = "#FFD160",
             EditorCaret = "#F2F7FF",
             EditorSelection = "#384857",
             EditorSelectionOutline = "#93BFE0",
@@ -247,10 +263,12 @@ internal static class FocusTheme
         [AppTheme.Neon] = new(
             "#090B15", "#070912", "#101426", "#171B2D", "#0D1120", "#33405D",
             "#E9F6FF", "#A4B4D0", "#7888AA", "#22E6FF", "#75F2FF", "#202D49",
-            "#284468", "#5A4A28", "#806127", "#FFD166", "#FF5C91", "#48233D",
+            "#284468", "#38461E", "#4C5B24", "#FFD166", "#FF5C91", "#48233D",
             "#66F5C8", "#76CFFF", "#262047", "#5E4F91", "#37275D", "#F0E9FF",
             "#8CDFFF", "#82F2D2", "#FFD166", "#FF7DB8")
         {
+            MatchMarker = "#A9D54D",
+            CurrentMatchMarker = "#DBFA75",
             EditorCaret = "#71F2FF",
             EditorSelection = "#192D46",
             EditorSelectionOutline = "#6CDFF6",
@@ -260,10 +278,12 @@ internal static class FocusTheme
         [AppTheme.ViceCity] = new(
             "#15121E", "#120F1A", "#191524", "#221B30", "#201A2D", "#4A3659",
             "#E8DEF3", "#B9AACA", "#9886AE", "#FF62AD", "#FF91C5", "#2D233D",
-            "#493052", "#554334", "#76503C", "#FFD08F", "#FF829C", "#3B1E32",
+            "#493052", "#653543", "#784252", "#FFD08F", "#FF829C", "#3B1E32",
             "#89E0CD", "#69E0D6", "#2F213C", "#825478", "#382541", "#F5DFEC",
             "#FF83BC", "#89E0CD", "#FFD08F", "#B6A4F4")
         {
+            MatchMarker = "#EF846F",
+            CurrentMatchMarker = "#FFAA8E",
             Toolbar = "#69E0D6",
             AppIconForeground = "#69E0D6",
             AppIconBackground = "#221B30",
@@ -318,6 +338,10 @@ internal static class FocusTheme
     public static Pen InactiveEditorSelectionOutline => State.InactiveEditorSelectionOutline;
     public static SolidColorBrush Match => State.Match;
     public static SolidColorBrush CurrentMatch => State.CurrentMatch;
+    public static SolidColorBrush MatchMarker => State.MatchMarker;
+    public static SolidColorBrush CurrentMatchMarker => State.CurrentMatchMarker;
+    public static Pen MatchOutline => State.MatchOutline;
+    public static Pen CurrentMatchOutline => State.CurrentMatchOutline;
     public static SolidColorBrush Warning => State.Warning;
     public static SolidColorBrush Danger => State.Danger;
     public static SolidColorBrush DangerSurface => State.DangerSurface;

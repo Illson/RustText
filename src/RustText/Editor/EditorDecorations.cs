@@ -26,6 +26,9 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private bool _previewDirty = true;
     private bool _dragging;
     private bool _disposed;
+    private IReadOnlyList<int> _searchOffsets = [];
+    private bool _showAllMatches;
+    private int? _currentMatchOffset;
 
     public DocumentMinimap(TextEditor editor)
     {
@@ -104,6 +107,46 @@ internal sealed class DocumentMinimap : Control, IDisposable
         context.DrawImage(_preview, new Rect(Padding, Padding, PreviewColumns, height));
         if (marker.Height > 1 && marker.Width > 1)
             context.DrawRectangle(null, _viewportBorder, marker.Deflate(.5));
+
+        if (_showAllMatches)
+        {
+            foreach (var offset in _searchOffsets)
+                DrawSearchMarker(offset, current: false);
+        }
+        if (_currentMatchOffset is { } current)
+            DrawSearchMarker(current, current: true);
+
+        void DrawSearchMarker(int offset, bool current)
+        {
+            if (offset >= document.TextLength) return;
+            var line = document.GetLineByOffset(offset);
+            var fraction = (line.LineNumber - 0.5) / lineCount;
+            if (layoutHeight > 0)
+            {
+                var top = view.GetVisualTopByDocumentLine(line.LineNumber);
+                var bottom = line.NextLine is { } next ? view.GetVisualTopByDocumentLine(next.LineNumber) : layoutHeight;
+                if (bottom <= top) return;
+                var rowCount = Math.Max(1, (int)Math.Round((bottom - top) / view.DefaultLineHeight));
+                var row = (int)((long)(offset - line.Offset) * rowCount / Math.Max(1, line.Length));
+                var position = (Math.Min(row, rowCount - 1) + 0.5) / rowCount;
+                fraction = (top + (bottom - top) * position) / layoutHeight;
+            }
+            MinimapSearchMarkers.Draw(context, Bounds.Width, Padding, height, fraction, current);
+        }
+    }
+
+    public void SetSearchOffsets(IReadOnlyList<int> offsets)
+    {
+        _searchOffsets = offsets;
+        InvalidateVisual();
+    }
+
+    public void ShowSearch(bool hasPattern, bool onlyCurrent, (int Offset, int Length)? current)
+    {
+        if (!hasPattern) _searchOffsets = [];
+        _showAllMatches = hasPattern && !onlyCurrent;
+        _currentMatchOffset = current is { Length: > 0 } match ? match.Offset : null;
+        InvalidateVisual();
     }
 
     private Rect ViewportMarker(TextDocument document, double track)
@@ -233,7 +276,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private (int Count, double LayoutHeight) GetPreviewRows(TextDocument document)
     {
         var view = _editor.TextArea.TextView;
-        if (!_editor.WordWrap || view.DocumentHeight <= 0) return (document.LineCount, 0);
+        if (view.DocumentHeight <= 0) return (document.LineCount, 0);
         var rows = Math.Max(1, (int)Math.Round(view.DocumentHeight / view.DefaultLineHeight));
         return (rows, view.DocumentHeight);
     }
@@ -251,7 +294,12 @@ internal sealed class DocumentMinimap : Control, IDisposable
 
     private ScrollViewer? FindScrollViewer() => _editor.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
 
-    private void OnTextChanged(object? sender, EventArgs e) => InvalidatePreview();
+    private void OnTextChanged(object? sender, EventArgs e)
+    {
+        _searchOffsets = [];
+        _currentMatchOffset = null;
+        InvalidatePreview();
+    }
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         if (e.OffsetDelta.Y != 0 || e.ViewportDelta != default || e.ExtentDelta != default)
@@ -270,16 +318,38 @@ internal sealed class DocumentMinimap : Control, IDisposable
         ScrollViewer.OffsetProperty, new Vector(scroll.Offset.X, y));
 }
 
-internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
+internal sealed class SearchHighlights : IBackgroundRenderer
 {
+    private readonly TextEditor _editor;
+
+    public SearchHighlights(TextEditor editor)
+    {
+        _editor = editor;
+        editor.TextArea.SelectionChanged += (_, _) => UpdateCurrentSelection();
+    }
+
     public Regex? Pattern { get; set; }
     public bool OnlyCurrent { get; set; }
-    public (int Offset, int Length)? Current { get; set; }
+    public (int Offset, int Length)? Current
+    {
+        get;
+        set
+        {
+            field = value;
+            UpdateCurrentSelection();
+        }
+    }
     public KnownLayer Layer => KnownLayer.Selection;
+
+    private void UpdateCurrentSelection()
+    {
+        _editor.TextArea.Classes.Set("search-current", Current is { Length: > 0 } current
+            && _editor.SelectionStart == current.Offset && _editor.SelectionLength == current.Length);
+    }
 
     public void Draw(TextView view, DrawingContext drawingContext)
     {
-        if (!view.VisualLinesValid || editor.Document is not { } document)
+        if (!view.VisualLinesValid || _editor.Document is not { } document)
         {
             return;
         }
@@ -324,7 +394,7 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
 
         if (all.CreateGeometry() is { } matches)
         {
-            drawingContext.DrawGeometry(FocusTheme.Match, null, matches);
+            drawingContext.DrawGeometry(FocusTheme.Match, FocusTheme.MatchOutline, matches);
         }
 
         if (Current is { Length: > 0 } current && current.Offset + current.Length <= document.TextLength)
@@ -333,7 +403,7 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
             active.AddSegment(view, new TextSegment { StartOffset = current.Offset, Length = current.Length });
             if (active.CreateGeometry() is { } selected)
             {
-                drawingContext.DrawGeometry(FocusTheme.CurrentMatch, null, selected);
+                drawingContext.DrawGeometry(FocusTheme.CurrentMatch, FocusTheme.CurrentMatchOutline, selected);
             }
         }
     }

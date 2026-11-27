@@ -9,7 +9,8 @@ namespace RustText.Demo.Editor;
 
 internal sealed record SearchOptions(string Pattern, bool IsRegex, bool MatchCase, bool WholeWord);
 internal readonly record struct SearchHit(int Offset, int Length, int Line, string Preview);
-internal sealed record SearchSummary(IReadOnlyList<SearchHit> Hits, int Count, bool TimedOut, IReadOnlyList<CaretRange>? Carets);
+internal sealed record SearchSummary(IReadOnlyList<SearchHit> Hits, int Count, bool TimedOut,
+    IReadOnlyList<CaretRange>? Carets, IReadOnlyList<int> MinimapOffsets);
 internal sealed record JsonProblem(int Offset, int Line, int Column, string Message);
 internal sealed record ListComparison(string Common, string LeftOnly, string RightOnly);
 internal sealed record ReplaceAllResult(string Text, int Count, ImmutableList<LineEndingKind>? MixedEndings = null);
@@ -44,11 +45,17 @@ internal static class TextOperations
         return new Regex(pattern, flags, SearchBudget);
     }
 
-    public static SearchSummary Find(string text, TextMatcher matcher, int resultLimit, CancellationToken cancellationToken, int caretLimit = 0)
+    public static SearchSummary Find(string text, TextMatcher matcher, int resultLimit, CancellationToken cancellationToken,
+        int caretLimit = 0, int minimapLineCount = 0)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var hits = new List<SearchHit>(Math.Min(resultLimit, 256));
         var carets = caretLimit > 0 ? new List<CaretRange>() : null;
+        var minimapOffsets = new List<int>();
+        const int maxMinimapMarkers = 1024;
+        // Keep the overview bounded even when most lines match.
+        var linesPerMarker = Math.Max(1, (minimapLineCount - 1) / maxMinimapMarkers + 1);
+        var lastMarker = -1;
         var count = 0;
         var line = 1;
         var lineStart = 0;
@@ -62,16 +69,15 @@ internal static class TextOperations
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     if (Stopwatch.GetElapsedTime(started) >= SearchBudget)
-                        return new SearchSummary(hits, count, true, carets);
+                        return Summary(timedOut: true);
                 }
 
                 count++;
                 if (carets is not null && carets.Count < caretLimit)
                     carets.Add(new CaretRange(match.Index, match.Index + match.Length));
-                if (hits.Count >= resultLimit)
-                {
-                    continue;
-                }
+                var showInResults = hits.Count < resultLimit;
+                var showOnMinimap = minimapLineCount > 0 && match.Length > 0;
+                if (!showInResults && !showOnMinimap) continue;
 
                 if (lineEnd < 0) lineEnd = EndOfLine(0);
                 while (lineEnd < match.Index)
@@ -81,6 +87,13 @@ internal static class TextOperations
                     lineEnd = EndOfLine(lineStart);
                 }
 
+                if (showOnMinimap && (line - 1) / linesPerMarker > lastMarker)
+                {
+                    lastMarker = (line - 1) / linesPerMarker;
+                    minimapOffsets.Add(match.Index);
+                }
+
+                if (!showInResults) continue;
                 var begin = Math.Max(lineStart, match.Index - 40);
                 var end = Math.Min(lineEnd, begin + 180);
                 hits.Add(new SearchHit(match.Index, match.Length, line, text[begin..end]));
@@ -88,11 +101,13 @@ internal static class TextOperations
         }
         catch (RegexMatchTimeoutException)
         {
-            return new SearchSummary(hits, count, true, carets);
+            return Summary(timedOut: true);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return new SearchSummary(hits, count, Stopwatch.GetElapsedTime(started) >= SearchBudget, carets);
+        return Summary(Stopwatch.GetElapsedTime(started) >= SearchBudget);
+
+        SearchSummary Summary(bool timedOut) => new(hits, count, timedOut, carets, minimapOffsets);
 
         int EndOfLine(int start) => text.IndexOf('\n', start) is var end && end >= 0 ? end : text.Length;
     }

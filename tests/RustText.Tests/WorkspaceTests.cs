@@ -3416,6 +3416,66 @@ public sealed class WorkspaceTests
     });
 
     [Fact]
+    public Task TextMinimapShowsSearchMatchesBeyondTheResultListAndTracksOnlyCurrent() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-minimap.txt");
+        await File.WriteAllTextAsync(path, string.Concat(Enumerable.Repeat("video\n", 100))
+            + new string('\n', 19) + "video");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            editor.WordWrap = false;
+            editor.TextArea.Focus();
+            Press(window, Key.F, RawInputModifiers.Control, PhysicalKey.F, "f");
+            var input = (TextBox)Field(window, "_searchInput");
+            input.Text = "video";
+            await HeadlessTests.WaitForAsync(() => editor.SelectedText == "video" && minimap.PreviewHeight >= 240);
+
+            var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
+            using var bitmap = new RenderTargetBitmap(size);
+            using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+            using var frame = pixels.Lock();
+            var lastRow = 3 + (int)minimap.PreviewHeight - 1;
+            Capture();
+            Assert.Equal(FocusTheme.CurrentMatchMarker.Color, ReadPixel(5, 4));
+            Assert.Equal(FocusTheme.MatchMarker.Color, ReadPixel(65, lastRow));
+            Assert.Same(FocusTheme.CurrentMatch, editor.TextArea.SelectionBrush);
+            Assert.Same(FocusTheme.CurrentMatchOutline, editor.TextArea.SelectionBorder);
+
+            ((ToggleButton)Field(window, "_onlyCurrent")).IsChecked = true;
+            Capture();
+            Assert.Equal(FocusTheme.CurrentMatchMarker.Color, ReadPixel(5, 4));
+            Assert.NotEqual(FocusTheme.MatchMarker.Color, ReadPixel(65, lastRow));
+
+            Press(window, Key.F3, RawInputModifiers.None, PhysicalKey.F3);
+            await HeadlessTests.WaitForAsync(() => editor.SelectionStart == 6);
+            Capture();
+            Assert.Equal(FocusTheme.CurrentMatchMarker.Color, ReadPixel(5, 6));
+            Assert.NotEqual(FocusTheme.CurrentMatchMarker.Color, ReadPixel(5, 3));
+
+            Invoke(window, "CloseSearchPanel");
+            Capture();
+            Assert.NotEqual(FocusTheme.CurrentMatchMarker.Color, ReadPixel(5, 6));
+            Assert.NotSame(FocusTheme.CurrentMatch, editor.TextArea.SelectionBrush);
+
+            void Capture()
+            {
+                bitmap.Render(minimap);
+                bitmap.CopyPixels(frame);
+            }
+
+            Color ReadPixel(int x, int y)
+            {
+                var address = frame.Address + y * frame.RowBytes + x * 4;
+                return Color.FromRgb(Marshal.ReadByte(address, 2), Marshal.ReadByte(address, 1), Marshal.ReadByte(address));
+            }
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
     public Task TextMinimapShowsTheViewportOutlineWhenAllTextFits() => HeadlessTests.RunAsync(async profile =>
     {
         var path = Path.Combine(profile, "short.txt");

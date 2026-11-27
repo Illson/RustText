@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
+using RustText.Demo.Editor;
 
 namespace RustText.Demo.Logs;
 
@@ -9,6 +10,7 @@ internal sealed partial class LogView
 {
     private void UpdateMinimapViewport()
     {
+        _minimap.SetSearchRange(_hiddenOffset, _fileStamp.Length);
         if (_levelFilterViewport?.IsVisible == true) return;
         if (_page is not { } page) return;
         var range = Math.Max(1, page.FileLength - _hiddenOffset);
@@ -21,12 +23,37 @@ internal sealed partial class LogView
         _minimap.UpdateViewport(start / range, end / range);
     }
 
+    private void UpdateMinimapSearch() =>
+        _minimap.SetSearchMarkers(_searchResults, _selectedSearchHit, _searchPanel.IsVisible);
+
     internal sealed class LogMinimap : Control
     {
         private readonly Pen _viewportBorder = new(FocusTheme.Accent, 1);
         private double _start;
         private double _end;
         private bool _hasPage;
+        private IReadOnlyList<LogSearchHit> _searchHits = [];
+        private LogSearchHit? _selectedHit;
+        private bool _showSearch;
+        private long _searchStart;
+        private long _searchLength;
+
+        public void SetSearchMarkers(IReadOnlyList<LogSearchHit> hits, LogSearchHit? selected, bool visible)
+        {
+            _searchHits = hits;
+            _selectedHit = selected;
+            _showSearch = visible;
+            InvalidateVisual();
+        }
+
+        public void SetSearchRange(long start, long end)
+        {
+            var length = end - start;
+            if (_searchStart == start && _searchLength == length) return;
+            _searchStart = start;
+            _searchLength = length;
+            if (_showSearch) InvalidateVisual();
+        }
 
         public byte[] Widths
         {
@@ -93,7 +120,27 @@ internal sealed partial class LogView
                 context.FillRectangle(FocusTheme.LogMinimapInk, new Rect(6, (index + .5) * rowHeight, width, 1));
             }
             if (marker.Height > 0) context.DrawRectangle(null, _viewportBorder, marker);
+
+            if (!_showSearch || _searchLength <= 0) return;
+            var lastRow = -1d;
+            foreach (var hit in _searchHits)
+            {
+                if (!IsInTrack(hit)) continue;
+                var fraction = (hit.Offset - _searchStart) / (double)_searchLength;
+                var row = Math.Floor(Bounds.Height * fraction);
+                if (row == lastRow) continue;
+                MinimapSearchMarkers.Draw(context, Bounds.Width, 0, Bounds.Height, fraction, current: false);
+                lastRow = row;
+            }
+            if (_selectedHit is { } current && IsInTrack(current))
+            {
+                var fraction = (current.Offset - _searchStart) / (double)_searchLength;
+                MinimapSearchMarkers.Draw(context, Bounds.Width, 0, Bounds.Height, fraction, current: true);
+            }
         }
+
+        private bool IsInTrack(LogSearchHit hit) => hit.MatchLength > 0
+            && hit.Offset >= _searchStart && hit.Offset - _searchStart < _searchLength;
 
         private void OnThemeChanged() => InvalidateVisual();
     }

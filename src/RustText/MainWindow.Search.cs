@@ -357,13 +357,18 @@ public partial class MainWindow
                 var captureFirst = jumpToFirst && ReferenceEquals(tab, active);
                 var resultLimit = captureFirst ? Math.Max(1, previewLimit) : previewLimit;
                 var caretLimit = selectAll ? MultiCaretEditing.MaxCarets : 0;
+                var minimap = tab.Minimap;
+                var lineCount = minimap is null ? 0 : editor.Document.LineCount;
                 var result = await Task.Run(
-                    () => TextOperations.Find(text, new TextMatcher(options, query), resultLimit, source.Token, caretLimit), source.Token);
+                    () => TextOperations.Find(text, new TextMatcher(options, query), resultLimit, source.Token, caretLimit, lineCount),
+                    source.Token);
+                source.Token.ThrowIfCancellationRequested();
                 if (tab.Revision != revision || !ReferenceEquals(tab.SearchEditor, editor))
                 {
                     incomplete = true;
                     continue;
                 }
+                minimap?.SetSearchOffsets(result.MinimapOffsets);
                 total += result.Count;
                 incomplete |= result.TimedOut;
                 if (previewLimit > 0)
@@ -556,6 +561,7 @@ public partial class MainWindow
             highlights.OnlyCurrent = _onlyCurrent.IsChecked == true;
             highlights.Current = PanelHost.IsVisible && _searchFocus is { } active && ReferenceEquals(active.Tab, tab)
                 ? (active.Hit.Offset, active.Hit.Length) : null;
+            tab.Minimap?.ShowSearch(highlights.Pattern is not null, highlights.OnlyCurrent, highlights.Current);
             editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
         }
     }
