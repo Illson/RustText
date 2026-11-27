@@ -481,6 +481,7 @@ internal sealed partial class LogView : UserControl, IDisposable
 
         if (localSearch)
         {
+            _workspaceSearchMatch = null;
             _selectedSearchHit = hit;
             UpdateMinimapSearch();
         }

@@ -88,7 +88,9 @@ internal sealed class DocumentMinimap : Control, IDisposable
         var view = _editor.TextArea.TextView;
         var scrollEnd = view.ScrollOffset.Y > 0 ? view.ScrollOffset.Y + view.Bounds.Height : 0;
         var trackHeight = Math.Max(layoutHeight, scrollEnd);
-        var marker = ViewportMarker(document, view, height, trackHeight);
+        var (marker, viewportStart, viewportEnd) = ViewportMarker(document, view, height, trackHeight);
+        var expandedViewport = height >= marker.Height && viewportEnd > viewportStart
+            && marker.Height - (viewportEnd - viewportStart) * height > .01;
         if (marker.Height > 0)
             context.FillRectangle(FocusTheme.MinimapViewport, marker);
 
@@ -130,24 +132,62 @@ internal sealed class DocumentMinimap : Control, IDisposable
             var fraction = (line.LineNumber - 0.5) / lineCount;
             if (layoutHeight > 0)
             {
-                var top = view.GetVisualTopByDocumentLine(line.LineNumber);
-                var bottom = line.NextLine is { } next ? view.GetVisualTopByDocumentLine(next.LineNumber) : layoutHeight;
-                if (bottom <= top) return;
-                var rowCount = Math.Max(1, (int)Math.Round((bottom - top) / view.DefaultLineHeight));
-                if (rowCount > 1 && view.VisualLinesValid && view.GetVisualLine(line.LineNumber) is not null)
-                {
-                    var position = new TextViewPosition(document.GetLocation(offset));
-                    fraction = view.GetVisualPosition(position, VisualYPosition.LineMiddle).Y / trackHeight;
-                }
-                else
-                {
-                    var row = (int)((long)(offset - line.Offset) * rowCount / Math.Max(1, line.Length));
-                    var position = (Math.Min(row, rowCount - 1) + 0.5) / rowCount;
-                    fraction = (top + (bottom - top) * position) / trackHeight;
-                }
+                var y = SearchMarkerDocumentY(view, document, folding, line, offset, layoutHeight);
+                if (y is null) return;
+                fraction = y.Value / trackHeight;
             }
+            if (expandedViewport)
+                fraction = ProjectMarkerThroughViewport(fraction, viewportStart, viewportEnd, marker, height);
             MinimapSearchMarkers.Draw(context, Bounds.Width, Padding, height, fraction, current);
         }
+    }
+
+    private static double? SearchMarkerDocumentY(TextView view, TextDocument document, FoldingManager? folding,
+        DocumentLine line, int offset, double layoutHeight)
+    {
+        double LineBottom(DocumentLine row) => row.NextLine is { } next
+            ? view.GetVisualTopByDocumentLine(next.LineNumber) : layoutHeight;
+
+        var anchor = line;
+        var anchorOffset = offset;
+        var top = view.GetVisualTopByDocumentLine(line.LineNumber);
+        var bottom = LineBottom(line);
+        // A folded section can join its closing line to an earlier visual line.
+        while (bottom <= top)
+        {
+            if (JsonFolding.FindCollapsed(folding, anchor.Offset) is not { } section
+                || section.StartOffset >= anchor.Offset) return null;
+            anchorOffset = section.StartOffset;
+            anchor = document.GetLineByOffset(anchorOffset);
+            top = view.GetVisualTopByDocumentLine(anchor.LineNumber);
+            bottom = LineBottom(anchor);
+        }
+
+        var rowCount = Math.Max(1, (int)Math.Round((bottom - top) / view.DefaultLineHeight));
+        if ((anchor != line || rowCount > 1) && view.VisualLinesValid
+            && view.GetVisualLine(anchor.LineNumber) is { } visibleLine
+            && visibleLine.LastDocumentLine.LineNumber >= line.LineNumber)
+        {
+            var column = visibleLine.GetVisualColumn(offset - visibleLine.FirstDocumentLine.Offset);
+            var textLine = visibleLine.GetTextLine(column, false);
+            return visibleLine.GetTextLineVisualYPosition(textLine, VisualYPosition.LineMiddle);
+        }
+
+        var row = (int)((long)(anchorOffset - anchor.Offset) * rowCount / Math.Max(1, anchor.Length));
+        var position = (Math.Min(row, rowCount - 1) + 0.5) / rowCount;
+        return top + (bottom - top) * position;
+    }
+
+    private static double ProjectMarkerThroughViewport(double fraction, double viewportStart, double viewportEnd,
+        Rect marker, double height)
+    {
+        // Keep the document ordered on both sides of the enlarged viewport.
+        fraction = Math.Clamp(fraction, 0, 1);
+        var top = (marker.Top - Padding) / height;
+        var bottom = (marker.Bottom - Padding) / height;
+        if (fraction < viewportStart) return fraction / viewportStart * top;
+        if (fraction > viewportEnd) return bottom + (fraction - viewportEnd) / (1 - viewportEnd) * (1 - bottom);
+        return top + (fraction - viewportStart) / (viewportEnd - viewportStart) * (bottom - top);
     }
 
     public void SetSearchOffsets(IReadOnlyList<int> offsets)
@@ -164,7 +204,8 @@ internal sealed class DocumentMinimap : Control, IDisposable
         InvalidateVisual();
     }
 
-    private Rect ViewportMarker(TextDocument document, TextView view, double track, double trackHeight)
+    private (Rect Bounds, double Start, double End) ViewportMarker(
+        TextDocument document, TextView view, double track, double trackHeight)
     {
         if (document.TextLength == 0 || view.Bounds.Height <= 0 || trackHeight <= 0) return default;
 
@@ -175,7 +216,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
         var end = Math.Clamp((view.ScrollOffset.Y + view.Bounds.Height) * scale, start, track);
         var markerHeight = Math.Max(minimum, end - start);
         var y = Math.Clamp((start + end - markerHeight) / 2, 0, track - markerHeight);
-        return new Rect(0, Padding + y, Bounds.Width, markerHeight);
+        return (new Rect(0, Padding + y, Bounds.Width, markerHeight), start / track, end / track);
     }
 
     internal static int GetRowCount(int lineCount, double height) =>
