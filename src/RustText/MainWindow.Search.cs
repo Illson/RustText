@@ -30,6 +30,7 @@ public partial class MainWindow
     private ListBox _searchResults = null!;
     private CancellationTokenSource? _searchCancellation;
     private (WorkTab Tab, SearchHit Hit)? _searchFocus;
+    private LogView? _workspaceSearchLog;
     private Regex? _highlightPattern;
 
     private void BuildSearchPanel()
@@ -106,7 +107,8 @@ public partial class MainWindow
         Closed += (_, _) => CancelSearch();
         _searchResults.SelectionChanged += (_, _) =>
         {
-            if (_searchResults.SelectedItem is not ListBoxItem { Tag: SearchResult result }
+            ClearWorkspaceSearchMatch();
+            if (_searchResults.SelectedItem is not ListBoxItem { Tag: SearchResult result } item
                 || !_tabs.ContainsKey(result.Tab.Id)) return;
             if (result is LogSearchResult fromLog)
             {
@@ -115,7 +117,16 @@ public partial class MainWindow
                     if (fromLog.Tab.Log is { } log && log.IsSearchSnapshotCurrent(fromLog.Snapshot))
                     {
                         Select(fromLog.Tab);
-                        if (await log.NavigateToSearchHitAsync(fromLog.Snapshot, fromLog.Hit)) return;
+                        if (await log.NavigateToSearchHitAsync(fromLog.Snapshot, fromLog.Hit))
+                        {
+                            if (PanelHost.IsVisible && ReferenceEquals(_searchResults.SelectedItem, item)
+                                && ReferenceEquals(fromLog.Tab.Log, log))
+                            {
+                                _workspaceSearchLog = log;
+                                log.SetWorkspaceSearchMatch(fromLog.Hit, fromLog.Snapshot.Length);
+                            }
+                            return;
+                        }
                     }
                     _searchStatus.Text = "Лог изменился или недоступен. Повторите поиск.";
                 });
@@ -186,11 +197,18 @@ public partial class MainWindow
     private void CloseSearchPanel()
     {
         PanelHost.IsVisible = false;
+        ClearWorkspaceSearchMatch();
         CancelSearch();
         _highlightPattern = null;
         _searchFocus = null;
         RefreshSearchHighlights();
         ActiveTab?.SearchEditor?.Focus();
+    }
+
+    private void ClearWorkspaceSearchMatch()
+    {
+        _workspaceSearchLog?.SetWorkspaceSearchMatch(null);
+        _workspaceSearchLog = null;
     }
 
     private void ForgetSearchTab(WorkTab tab)
@@ -357,13 +375,18 @@ public partial class MainWindow
                 var captureFirst = jumpToFirst && ReferenceEquals(tab, active);
                 var resultLimit = captureFirst ? Math.Max(1, previewLimit) : previewLimit;
                 var caretLimit = selectAll ? MultiCaretEditing.MaxCarets : 0;
+                var minimap = tab.Minimap;
+                var lineCount = minimap is null ? 0 : editor.Document.LineCount;
                 var result = await Task.Run(
-                    () => TextOperations.Find(text, new TextMatcher(options, query), resultLimit, source.Token, caretLimit), source.Token);
+                    () => TextOperations.Find(text, new TextMatcher(options, query), resultLimit, source.Token, caretLimit, lineCount),
+                    source.Token);
+                source.Token.ThrowIfCancellationRequested();
                 if (tab.Revision != revision || !ReferenceEquals(tab.SearchEditor, editor))
                 {
                     incomplete = true;
                     continue;
                 }
+                minimap?.SetSearchOffsets(result.MinimapOffsets);
                 total += result.Count;
                 incomplete |= result.TimedOut;
                 if (previewLimit > 0)
@@ -556,6 +579,7 @@ public partial class MainWindow
             highlights.OnlyCurrent = _onlyCurrent.IsChecked == true;
             highlights.Current = PanelHost.IsVisible && _searchFocus is { } active && ReferenceEquals(active.Tab, tab)
                 ? (active.Hit.Offset, active.Hit.Length) : null;
+            tab.Minimap?.ShowSearch(highlights.Pattern is not null, highlights.OnlyCurrent, highlights.Current);
             editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
         }
     }

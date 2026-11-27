@@ -220,6 +220,10 @@
             <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.EditorSelection}" />
             <Setter Property="SelectionBorder" Value="{x:Static local:FocusTheme.EditorSelectionOutline}" />
         </Style>
+        <Style Selector="aeEditing|TextArea.search-current">
+            <Setter Property="SelectionBrush" Value="{x:Static local:FocusTheme.CurrentMatch}" />
+            <Setter Property="SelectionBorder" Value="{x:Static local:FocusTheme.CurrentMatchOutline}" />
+        </Style>
         <Style Selector="TabItem.focus-tab">
             <Setter Property="Theme" Value="{StaticResource FocusDocumentTab}" />
         </Style>

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
@@ -8,6 +9,7 @@ using Avalonia.Platform;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Document;
+using AvaloniaEdit.Folding;
 using AvaloniaEdit.Rendering;
 
 namespace RustText.Demo.Editor;
@@ -21,11 +23,15 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private const int MinMarkerHeight = 8;
     private readonly TextEditor _editor;
     private readonly Pen _viewportBorder = new(FocusTheme.Accent, 1);
+    private readonly ConditionalWeakTable<VisualLine, Dictionary<int, double>> _searchRowPositions = new();
     private WriteableBitmap? _preview;
     private (double Height, double Width, double LineHeight) _previewLayout;
     private bool _previewDirty = true;
     private bool _dragging;
     private bool _disposed;
+    private IReadOnlyList<int> _searchOffsets = [];
+    private bool _showAllMatches;
+    private int? _currentMatchOffset;
 
     public DocumentMinimap(TextEditor editor)
     {
@@ -65,6 +71,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
         _editor.TextChanged -= OnTextChanged;
         _editor.RemoveHandler(ScrollViewer.ScrollChangedEvent, OnScrollChanged);
         _editor.TextArea.TextView.VisualLinesChanged -= OnVisualLinesChanged;
+        _searchRowPositions.Clear();
         _preview?.Dispose();
         _preview = null;
         _previewDirty = true;
@@ -81,7 +88,12 @@ internal sealed class DocumentMinimap : Control, IDisposable
         if (rows == 0) return;
 
         var height = GetPreviewHeight(lineCount, Bounds.Height);
-        var marker = ViewportMarker(document, height);
+        var view = _editor.TextArea.TextView;
+        var scrollEnd = view.ScrollOffset.Y > 0 ? view.ScrollOffset.Y + view.Bounds.Height : 0;
+        var trackHeight = Math.Max(layoutHeight, scrollEnd);
+        var (marker, viewportStart, viewportEnd) = ViewportMarker(document, view, height, trackHeight);
+        var expandedViewport = height >= marker.Height && viewportEnd > viewportStart
+            && marker.Height - (viewportEnd - viewportStart) * height > .01;
         if (marker.Height > 0)
             context.FillRectangle(FocusTheme.MinimapViewport, marker);
 
@@ -93,7 +105,6 @@ internal sealed class DocumentMinimap : Control, IDisposable
             _previewDirty = true;
         }
 
-        var view = _editor.TextArea.TextView;
         var layout = layoutHeight > 0 ? (layoutHeight, view.Bounds.Width, view.DefaultLineHeight) : default;
         if (_previewDirty || _previewLayout != layout)
         {
@@ -101,22 +112,127 @@ internal sealed class DocumentMinimap : Control, IDisposable
             _previewLayout = layout;
             _previewDirty = false;
         }
-        context.DrawImage(_preview, new Rect(Padding, Padding, PreviewColumns, height));
+        // Leave room for the visible empty area below the end of the document.
+        var previewHeight = layoutHeight > 0 ? height * layoutHeight / trackHeight : height;
+        context.DrawImage(_preview, new Rect(Padding, Padding, PreviewColumns, previewHeight));
         if (marker.Height > 1 && marker.Width > 1)
             context.DrawRectangle(null, _viewportBorder, marker.Deflate(.5));
+
+        var folding = view.GetService(typeof(FoldingManager)) as FoldingManager;
+        if (_showAllMatches)
+        {
+            foreach (var offset in _searchOffsets)
+                DrawSearchMarker(offset, current: false);
+        }
+        if (_currentMatchOffset is { } current)
+            DrawSearchMarker(current, current: true);
+
+        void DrawSearchMarker(int offset, bool current)
+        {
+            if (offset >= document.TextLength) return;
+            offset = JsonFolding.FindCollapsed(folding, offset)?.StartOffset ?? offset;
+            var line = document.GetLineByOffset(offset);
+            var fraction = (line.LineNumber - 0.5) / lineCount;
+            if (layoutHeight > 0)
+            {
+                var y = SearchMarkerDocumentY(view, document, folding, line, offset, layoutHeight, cachePosition: !current);
+                if (y is null) return;
+                fraction = y.Value / trackHeight;
+            }
+            if (expandedViewport)
+                fraction = ProjectMarkerThroughViewport(fraction, viewportStart, viewportEnd, marker, height);
+            MinimapSearchMarkers.Draw(context, Bounds.Width, Padding, height, fraction, current);
+        }
     }
 
-    private Rect ViewportMarker(TextDocument document, double track)
+    private double? SearchMarkerDocumentY(TextView view, TextDocument document, FoldingManager? folding,
+        DocumentLine line, int offset, double layoutHeight, bool cachePosition)
     {
-        var viewport = _editor.ViewportHeight;
-        if (document.TextLength == 0 || viewport <= 0) return default;
+        double LineBottom(DocumentLine row) => row.NextLine is { } next
+            ? view.GetVisualTopByDocumentLine(next.LineNumber) : layoutHeight;
+
+        var anchor = line;
+        var anchorOffset = offset;
+        var top = view.GetVisualTopByDocumentLine(line.LineNumber);
+        var bottom = LineBottom(line);
+        // A folded section can join its closing line to an earlier visual line.
+        while (bottom <= top)
+        {
+            if (JsonFolding.FindCollapsed(folding, anchor.Offset) is not { } section
+                || section.StartOffset >= anchor.Offset) return null;
+            anchorOffset = section.StartOffset;
+            anchor = document.GetLineByOffset(anchorOffset);
+            top = view.GetVisualTopByDocumentLine(anchor.LineNumber);
+            bottom = LineBottom(anchor);
+        }
+
+        var rowCount = Math.Max(1, (int)Math.Round((bottom - top) / view.DefaultLineHeight));
+        if ((anchor != line || rowCount > 1) && view.VisualLinesValid
+            && view.GetVisualLine(anchor.LineNumber) is { } visibleLine
+            && visibleLine.LastDocumentLine.LineNumber >= line.LineNumber)
+        {
+            // The same formatted line can move when preceding lines change height.
+            if (_searchRowPositions.TryGetValue(visibleLine, out var positions)
+                && positions.TryGetValue(offset, out var relativeY))
+                return visibleLine.VisualTop + relativeY;
+
+            var column = visibleLine.GetVisualColumn(offset - visibleLine.FirstDocumentLine.Offset);
+            var textLine = visibleLine.GetTextLine(column, false);
+            var y = visibleLine.GetTextLineVisualYPosition(textLine, VisualYPosition.LineMiddle);
+            if (cachePosition)
+                (positions ?? _searchRowPositions.GetOrCreateValue(visibleLine))[offset] = y - visibleLine.VisualTop;
+            return y;
+        }
+
+        var row = (int)((long)(anchorOffset - anchor.Offset) * rowCount / Math.Max(1, anchor.Length));
+        var position = (Math.Min(row, rowCount - 1) + 0.5) / rowCount;
+        return top + (bottom - top) * position;
+    }
+
+    private static double ProjectMarkerThroughViewport(double fraction, double viewportStart, double viewportEnd,
+        Rect marker, double height)
+    {
+        // Keep the document ordered on both sides of the enlarged viewport.
+        fraction = Math.Clamp(fraction, 0, 1);
+        var top = (marker.Top - Padding) / height;
+        var bottom = (marker.Bottom - Padding) / height;
+        if (fraction < viewportStart) return fraction / viewportStart * top;
+        if (fraction > viewportEnd) return bottom + (fraction - viewportEnd) / (1 - viewportEnd) * (1 - bottom);
+        return top + (fraction - viewportStart) / (viewportEnd - viewportStart) * (bottom - top);
+    }
+
+    public void SetSearchOffsets(IReadOnlyList<int> offsets)
+    {
+        _searchOffsets = offsets;
+        _searchRowPositions.Clear();
+        InvalidateVisual();
+    }
+
+    public void ShowSearch(bool hasPattern, bool onlyCurrent, (int Offset, int Length)? current)
+    {
+        if (!hasPattern)
+        {
+            _searchOffsets = [];
+            _searchRowPositions.Clear();
+        }
+        _showAllMatches = hasPattern && !onlyCurrent;
+        _currentMatchOffset = current is { Length: > 0 } match ? match.Offset : null;
+        InvalidateVisual();
+    }
+
+    private (Rect Bounds, double Start, double End) ViewportMarker(
+        TextDocument document, TextView view, double track, double trackHeight)
+    {
+        if (document.TextLength == 0 || view.Bounds.Height <= 0 || trackHeight <= 0) return default;
 
         var minimum = Math.Min(MinMarkerHeight, Math.Max(0, Bounds.Height - Padding * 2));
         track = Math.Max(track, minimum);
-        var maximum = _editor.ExtentHeight - viewport;
-        var markerHeight = maximum <= 0 ? track : Math.Clamp(track * viewport / _editor.ExtentHeight, minimum, track);
-        var fraction = maximum <= 0 ? 0 : Math.Clamp(_editor.VerticalOffset / maximum, 0, 1);
-        return new Rect(0, Padding + fraction * (track - markerHeight), Bounds.Width, markerHeight);
+        var scale = track / trackHeight;
+        var start = Math.Clamp(view.ScrollOffset.Y * scale, 0, track);
+        var end = Math.Clamp((view.ScrollOffset.Y + view.Bounds.Height) * scale, start, track);
+        var markerHeight = Math.Max(minimum, end - start);
+        var y = Math.Clamp((start + end - markerHeight) / 2, 0, track - markerHeight);
+        return (new Rect(0, Padding + y, Bounds.Width, markerHeight), start / track, end / track);
     }
 
     internal static int GetRowCount(int lineCount, double height) =>
@@ -233,7 +349,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private (int Count, double LayoutHeight) GetPreviewRows(TextDocument document)
     {
         var view = _editor.TextArea.TextView;
-        if (!_editor.WordWrap || view.DocumentHeight <= 0) return (document.LineCount, 0);
+        if (view.DocumentHeight <= 0) return (document.LineCount, 0);
         var rows = Math.Max(1, (int)Math.Round(view.DocumentHeight / view.DefaultLineHeight));
         return (rows, view.DocumentHeight);
     }
@@ -251,7 +367,13 @@ internal sealed class DocumentMinimap : Control, IDisposable
 
     private ScrollViewer? FindScrollViewer() => _editor.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
 
-    private void OnTextChanged(object? sender, EventArgs e) => InvalidatePreview();
+    private void OnTextChanged(object? sender, EventArgs e)
+    {
+        _searchOffsets = [];
+        _searchRowPositions.Clear();
+        _currentMatchOffset = null;
+        InvalidatePreview();
+    }
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         if (e.OffsetDelta.Y != 0 || e.ViewportDelta != default || e.ExtentDelta != default)
@@ -270,16 +392,38 @@ internal sealed class DocumentMinimap : Control, IDisposable
         ScrollViewer.OffsetProperty, new Vector(scroll.Offset.X, y));
 }
 
-internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
+internal sealed class SearchHighlights : IBackgroundRenderer
 {
+    private readonly TextEditor _editor;
+
+    public SearchHighlights(TextEditor editor)
+    {
+        _editor = editor;
+        editor.TextArea.SelectionChanged += (_, _) => UpdateCurrentSelection();
+    }
+
     public Regex? Pattern { get; set; }
     public bool OnlyCurrent { get; set; }
-    public (int Offset, int Length)? Current { get; set; }
+    public (int Offset, int Length)? Current
+    {
+        get;
+        set
+        {
+            field = value;
+            UpdateCurrentSelection();
+        }
+    }
     public KnownLayer Layer => KnownLayer.Selection;
+
+    private void UpdateCurrentSelection()
+    {
+        _editor.TextArea.Classes.Set("search-current", Current is { Length: > 0 } current
+            && _editor.SelectionStart == current.Offset && _editor.SelectionLength == current.Length);
+    }
 
     public void Draw(TextView view, DrawingContext drawingContext)
     {
-        if (!view.VisualLinesValid || editor.Document is not { } document)
+        if (!view.VisualLinesValid || _editor.Document is not { } document)
         {
             return;
         }
@@ -324,7 +468,7 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
 
         if (all.CreateGeometry() is { } matches)
         {
-            drawingContext.DrawGeometry(FocusTheme.Match, null, matches);
+            drawingContext.DrawGeometry(FocusTheme.Match, FocusTheme.MatchOutline, matches);
         }
 
         if (Current is { Length: > 0 } current && current.Offset + current.Length <= document.TextLength)
@@ -333,7 +477,7 @@ internal sealed class SearchHighlights(TextEditor editor) : IBackgroundRenderer
             active.AddSegment(view, new TextSegment { StartOffset = current.Offset, Length = current.Length });
             if (active.CreateGeometry() is { } selected)
             {
-                drawingContext.DrawGeometry(FocusTheme.CurrentMatch, null, selected);
+                drawingContext.DrawGeometry(FocusTheme.CurrentMatch, FocusTheme.CurrentMatchOutline, selected);
             }
         }
     }
