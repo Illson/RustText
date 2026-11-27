@@ -1274,6 +1274,33 @@ public sealed class LogUiTests
         finally { await CloseLogAsync(window, log); }
     });
 
+    [Fact]
+    public Task LogMinimapMarksAppendedSearchHitsWhilePaused() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "paused-search.log");
+        var content = "needle before\n" + string.Concat(Enumerable.Repeat("some row\n", 80));
+        await File.WriteAllTextAsync(path, content);
+        var (window, log) = await ShowLogAsync(path, new LogTabState(AutoRefresh: false));
+        try
+        {
+            await File.AppendAllTextAsync(path, "needle\n");
+            log.FocusSearch();
+            window.KeyTextInput("needle");
+            var text = (TextBox)Field(log, "_logText");
+            await HeadlessTests.WaitForAsync(() => text.SelectedText == "needle");
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<LogView.LogMinimap>());
+            var matches = HeadlessTests.FindColorRows(minimap, 46, FocusTheme.MatchMarker.Color);
+            Assert.Contains(matches, y => y > minimap.Bounds.Height * 0.9);
+
+            await log.NavigateMatchAsync(backward: false);
+            Assert.Equal((long)content.Length, Page(log)?.StartOffset);
+            Assert.False(log.AutoRefresh);
+            var selected = HeadlessTests.FindColorRows(minimap, 6, FocusTheme.CurrentMatchMarker.Color);
+            Assert.Contains(selected, y => y > minimap.Bounds.Height * 0.9);
+        }
+        finally { await CloseLogAsync(window, log); }
+    });
+
     [Theory]
     [InlineData(null)]
     [InlineData("focus")]

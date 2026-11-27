@@ -8,6 +8,7 @@ using Avalonia.Platform;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
 using AvaloniaEdit.Document;
+using AvaloniaEdit.Folding;
 using AvaloniaEdit.Rendering;
 
 namespace RustText.Demo.Editor;
@@ -85,7 +86,9 @@ internal sealed class DocumentMinimap : Control, IDisposable
 
         var height = GetPreviewHeight(lineCount, Bounds.Height);
         var view = _editor.TextArea.TextView;
-        var marker = ViewportMarker(document, view, height, layoutHeight);
+        var scrollEnd = view.ScrollOffset.Y > 0 ? view.ScrollOffset.Y + view.Bounds.Height : 0;
+        var trackHeight = Math.Max(layoutHeight, scrollEnd);
+        var marker = ViewportMarker(document, view, height, trackHeight);
         if (marker.Height > 0)
             context.FillRectangle(FocusTheme.MinimapViewport, marker);
 
@@ -104,10 +107,13 @@ internal sealed class DocumentMinimap : Control, IDisposable
             _previewLayout = layout;
             _previewDirty = false;
         }
-        context.DrawImage(_preview, new Rect(Padding, Padding, PreviewColumns, height));
+        // Leave room for the visible empty area below the end of the document.
+        var previewHeight = layoutHeight > 0 ? height * layoutHeight / trackHeight : height;
+        context.DrawImage(_preview, new Rect(Padding, Padding, PreviewColumns, previewHeight));
         if (marker.Height > 1 && marker.Width > 1)
             context.DrawRectangle(null, _viewportBorder, marker.Deflate(.5));
 
+        var folding = view.GetService(typeof(FoldingManager)) as FoldingManager;
         if (_showAllMatches)
         {
             foreach (var offset in _searchOffsets)
@@ -119,6 +125,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
         void DrawSearchMarker(int offset, bool current)
         {
             if (offset >= document.TextLength) return;
+            offset = JsonFolding.FindCollapsed(folding, offset)?.StartOffset ?? offset;
             var line = document.GetLineByOffset(offset);
             var fraction = (line.LineNumber - 0.5) / lineCount;
             if (layoutHeight > 0)
@@ -130,13 +137,13 @@ internal sealed class DocumentMinimap : Control, IDisposable
                 if (rowCount > 1 && view.VisualLinesValid && view.GetVisualLine(line.LineNumber) is not null)
                 {
                     var position = new TextViewPosition(document.GetLocation(offset));
-                    fraction = view.GetVisualPosition(position, VisualYPosition.LineMiddle).Y / layoutHeight;
+                    fraction = view.GetVisualPosition(position, VisualYPosition.LineMiddle).Y / trackHeight;
                 }
                 else
                 {
                     var row = (int)((long)(offset - line.Offset) * rowCount / Math.Max(1, line.Length));
                     var position = (Math.Min(row, rowCount - 1) + 0.5) / rowCount;
-                    fraction = (top + (bottom - top) * position) / layoutHeight;
+                    fraction = (top + (bottom - top) * position) / trackHeight;
                 }
             }
             MinimapSearchMarkers.Draw(context, Bounds.Width, Padding, height, fraction, current);
@@ -157,14 +164,13 @@ internal sealed class DocumentMinimap : Control, IDisposable
         InvalidateVisual();
     }
 
-    private Rect ViewportMarker(TextDocument document, TextView view, double track, double layoutHeight)
+    private Rect ViewportMarker(TextDocument document, TextView view, double track, double trackHeight)
     {
-        if (document.TextLength == 0 || view.Bounds.Height <= 0 || layoutHeight <= 0) return default;
+        if (document.TextLength == 0 || view.Bounds.Height <= 0 || trackHeight <= 0) return default;
 
         var minimum = Math.Min(MinMarkerHeight, Math.Max(0, Bounds.Height - Padding * 2));
         track = Math.Max(track, minimum);
-        // The scroll extent can include empty space after the last line.
-        var scale = track / layoutHeight;
+        var scale = track / trackHeight;
         var start = Math.Clamp(view.ScrollOffset.Y * scale, 0, track);
         var end = Math.Clamp((view.ScrollOffset.Y + view.Bounds.Height) * scale, start, track);
         var markerHeight = Math.Max(minimum, end - start);

@@ -10,10 +10,13 @@ internal sealed partial class LogView
 {
     private void UpdateMinimapViewport()
     {
-        _minimap.SetSearchRange(_hiddenOffset, _fileStamp.Length);
+        var fileLength = Math.Max(_fileStamp.Length, _page?.FileLength ?? 0);
+        if (_searchPanel.IsVisible) fileLength = Math.Max(fileLength, _searchSnapshot?.Length ?? 0);
+        if (_workspaceSearchMatch is { } workspace) fileLength = Math.Max(fileLength, workspace.Length);
+        _minimap.SetSearchRange(_hiddenOffset, fileLength);
         if (_levelFilterViewport?.IsVisible == true) return;
         if (_page is not { } page) return;
-        var range = Math.Max(1, page.FileLength - _hiddenOffset);
+        var range = Math.Max(1, fileLength - _hiddenOffset);
         var pageHeight = _logScrollViewer is { Extent.Height: > 0 } scroll ? scroll.Extent.Height : 1;
         var scrollY = _logScrollViewer?.Offset.Y ?? 0;
         var viewportHeight = _logScrollViewer?.Viewport.Height ?? pageHeight;
@@ -23,8 +26,22 @@ internal sealed partial class LogView
         _minimap.UpdateViewport(start / range, end / range);
     }
 
-    private void UpdateMinimapSearch() =>
-        _minimap.SetSearchMarkers(_searchResults, _selectedSearchHit, _searchPanel.IsVisible);
+    private (LogSearchHit Hit, long Length)? _workspaceSearchMatch;
+
+    internal void SetWorkspaceSearchMatch(LogSearchHit? hit, long length = 0)
+    {
+        if (_closed) return;
+        _workspaceSearchMatch = hit is null ? null : (hit, length);
+        UpdateMinimapSearch();
+    }
+
+    private void UpdateMinimapSearch()
+    {
+        var localSearch = _searchPanel.IsVisible;
+        _minimap.SetSearchMarkers(localSearch ? _searchResults : [],
+            _workspaceSearchMatch?.Hit ?? (localSearch ? _selectedSearchHit : null));
+        UpdateMinimapViewport();
+    }
 
     internal sealed class LogMinimap : Control
     {
@@ -34,15 +51,13 @@ internal sealed partial class LogView
         private bool _hasPage;
         private IReadOnlyList<LogSearchHit> _searchHits = [];
         private LogSearchHit? _selectedHit;
-        private bool _showSearch;
         private long _searchStart;
         private long _searchLength;
 
-        public void SetSearchMarkers(IReadOnlyList<LogSearchHit> hits, LogSearchHit? selected, bool visible)
+        public void SetSearchMarkers(IReadOnlyList<LogSearchHit> hits, LogSearchHit? selected)
         {
             _searchHits = hits;
             _selectedHit = selected;
-            _showSearch = visible;
             InvalidateVisual();
         }
 
@@ -52,7 +67,7 @@ internal sealed partial class LogView
             if (_searchStart == start && _searchLength == length) return;
             _searchStart = start;
             _searchLength = length;
-            if (_showSearch) InvalidateVisual();
+            if (_searchHits.Count > 0 || _selectedHit is not null) InvalidateVisual();
         }
 
         public byte[] Widths
@@ -121,7 +136,7 @@ internal sealed partial class LogView
             }
             if (marker.Height > 0) context.DrawRectangle(null, _viewportBorder, marker);
 
-            if (!_showSearch || _searchLength <= 0) return;
+            if (_searchLength <= 0) return;
             var lastRow = -1d;
             foreach (var hit in _searchHits)
             {

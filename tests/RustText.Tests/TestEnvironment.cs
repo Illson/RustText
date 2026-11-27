@@ -1,4 +1,9 @@
+using System.Runtime.InteropServices;
 using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Headless;
 using Xunit;
 
@@ -12,6 +17,19 @@ public sealed class HeadlessCollection
 
 public static class HeadlessTests
 {
+    internal static int[] FindColorRows(Control control, int x, Color color)
+    {
+        var size = new PixelSize((int)control.Bounds.Width, (int)control.Bounds.Height);
+        using var bitmap = new RenderTargetBitmap(size);
+        using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+        using var frame = pixels.Lock();
+        bitmap.Render(control);
+        bitmap.CopyPixels(frame);
+        var packed = color.B | color.G << 8 | color.R << 16 | color.A << 24;
+        return Enumerable.Range(0, size.Height).Where(y =>
+            Marshal.ReadInt32(frame.Address + y * frame.RowBytes + x * 4) == packed).ToArray();
+    }
+
     public static async Task RunAsync(Func<string, Task> action)
     {
         using var folder = new TempDirectory();

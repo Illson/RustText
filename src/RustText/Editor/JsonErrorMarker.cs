@@ -37,9 +37,7 @@ internal sealed class JsonErrorMarker(TextView view) : IBackgroundRenderer
             length = 2;
         }
 
-        var folding = (textView.GetService(typeof(FoldingManager)) as FoldingManager)?.GetFoldingsContaining(offset)
-            .Where(section => section.IsFolded && offset < section.EndOffset)
-            .MinBy(section => section.StartOffset);
+        var folding = JsonFolding.FindCollapsed(textView.GetService(typeof(FoldingManager)) as FoldingManager, offset);
         var segment = folding ?? new TextSegment { StartOffset = offset, Length = length };
         var pen = new Pen(FocusTheme.Danger, 1.25, lineCap: PenLineCap.Round);
         foreach (var rect in BackgroundGeometryBuilder.GetRectsForSegment(textView, segment))

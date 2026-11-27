@@ -953,6 +953,11 @@ public sealed class WorkspaceTests
                 item.Content!.ToString()!.Contains("log marker", StringComparison.Ordinal));
             await HeadlessTests.WaitForAsync(() => ReferenceEquals(ActiveTab(window), logTab)
                 && LogText(log).SelectedText == "marker");
+            var minimap = Assert.Single(log.GetVisualDescendants().OfType<LogView.LogMinimap>());
+            Assert.NotEmpty(HeadlessTests.FindColorRows(minimap, 6, FocusTheme.CurrentMatchMarker.Color));
+            Invoke(window, "CloseSearchPanel");
+            window.UpdateLayout();
+            Assert.Empty(HeadlessTests.FindColorRows(minimap, 6, FocusTheme.CurrentMatchMarker.Color));
         }
         finally { await CloseAsync(window); }
     });
@@ -3476,16 +3481,17 @@ public sealed class WorkspaceTests
     });
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public Task TextMinimapAlignsSearchMatchWithItsPositionInTheViewport(bool allowScrollBelowDocument, bool wrap) =>
+    [InlineData(false, false, 89)]
+    [InlineData(true, false, 89)]
+    [InlineData(false, true, 89)]
+    [InlineData(true, false, 324)]
+    public Task TextMinimapAlignsSearchMatchWithItsPositionInTheViewport(bool allowScrollBelowDocument, bool wrap, int line) =>
         HeadlessTests.RunAsync(async profile =>
         {
             var path = Path.Combine(profile, "search-viewport.txt");
-            var matchLine = wrap ? "row 89 (" + new string('\t', 200) + "video " + new string('x', 900) : "row 89 video";
+            var matchLine = wrap ? $"row {line} (" + new string('\t', 200) + "video " + new string('x', 900) : $"row {line} video";
             await File.WriteAllLinesAsync(path, Enumerable.Range(1, 325)
-                .Select(i => i == 89 ? matchLine : i == 222 ? "row 222 video" : $"row {i}"));
+                .Select(i => i == line ? matchLine : $"row {i}"));
             var window = await OpenWorkspaceAsync(path);
             try
             {
@@ -3508,6 +3514,7 @@ public sealed class WorkspaceTests
                 resultY = view.GetVisualPosition(position, VisualYPosition.LineMiddle).Y;
                 var fraction = (resultY - view.ScrollOffset.Y) / view.Bounds.Height;
                 Assert.InRange(fraction, 0.10, 0.35);
+                if (line == 324) Assert.True(view.ScrollOffset.Y + view.Bounds.Height > view.DocumentHeight);
 
                 var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
                 using var bitmap = new RenderTargetBitmap(size);
@@ -3534,6 +3541,75 @@ public sealed class WorkspaceTests
             }
             finally { await CloseAsync(window); }
         });
+
+    [Fact]
+    public Task TextMinimapMarksSeparateMatchesOnOneWrappedLine() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-wrapped.txt");
+        await File.WriteAllTextAsync(path, "needle " + string.Concat(Enumerable.Repeat("word ", 1000)) + "needle");
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            editor.WordWrap = true;
+            Invoke(window, "OpenSearchPanel", false);
+            ((TextBox)Field(window, "_searchInput")).Text = "needle";
+            await CallAsync(window, "FindAsync");
+            Assert.Equal(2, ((ListBox)Field(window, "_searchResults")).Items.Count);
+            Assert.Equal(0, editor.SelectionStart);
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var active = HeadlessTests.FindColorRows(minimap, 5, FocusTheme.CurrentMatchMarker.Color);
+            var passive = HeadlessTests.FindColorRows(minimap, 62, FocusTheme.MatchMarker.Color);
+            Assert.NotEmpty(active);
+            Assert.NotEmpty(passive);
+            Assert.True(passive[0] > active[^1] + minimap.PreviewHeight / 2);
+        }
+        finally { await CloseAsync(window); }
+    });
+
+    [Fact]
+    public Task TextMinimapProjectsFoldedMatchesOntoTheFoldHeader() => HeadlessTests.RunAsync(async profile =>
+    {
+        var path = Path.Combine(profile, "search-folded.json");
+        await File.WriteAllTextAsync(path, """
+            {
+              "first": "needle",
+              "items": [
+                "other",
+                "needle"
+              ],
+              "last": true
+            }
+            """);
+        var window = await OpenWorkspaceAsync(path);
+        try
+        {
+            var editor = Read<TextEditor>(ActiveTab(window), "Editor");
+            var view = editor.TextArea.TextView;
+            await HeadlessTests.WaitForAsync(() => view.GetService(typeof(FoldingManager)) is FoldingManager m
+                && m.AllFoldings.Count() == 2);
+            var manager = (FoldingManager)view.GetService(typeof(FoldingManager))!;
+            Invoke(window, "OpenSearchPanel", false);
+            ((TextBox)Field(window, "_searchInput")).Text = "needle";
+            await CallAsync(window, "FindAsync");
+            Assert.Equal(2, ((ListBox)Field(window, "_searchResults")).Items.Count);
+
+            var minimap = Assert.Single(window.GetVisualDescendants().OfType<DocumentMinimap>());
+            var open = HeadlessTests.FindColorRows(minimap, 62, FocusTheme.MatchMarker.Color);
+            Assert.NotEmpty(open);
+            var section = manager.AllFoldings.Last();
+            section.IsFolded = true;
+            window.UpdateLayout();
+            view.EnsureVisualLines();
+            var folded = HeadlessTests.FindColorRows(minimap, 62, FocusTheme.MatchMarker.Color);
+            Assert.NotEmpty(folded);
+            var header = new TextViewPosition(editor.Document.GetLocation(section.StartOffset));
+            var y = 3 + view.GetVisualPosition(header, VisualYPosition.LineMiddle).Y / view.DocumentHeight * minimap.PreviewHeight;
+            Assert.InRange(y, folded[0] - 1d, folded[^1] + 2d);
+            Assert.True(folded[0] < open[0]);
+        }
+        finally { await CloseAsync(window); }
+    });
 
     [Fact]
     public Task TextMinimapShowsTheViewportOutlineWhenAllTextFits() => HeadlessTests.RunAsync(async profile =>
@@ -3648,8 +3724,10 @@ public sealed class WorkspaceTests
             window.UpdateLayout();
 
             var view = editor.TextArea.TextView;
-            var previewEnd = 3 + (int)(2 * Math.Round(view.DocumentHeight / view.DefaultLineHeight));
+            var previewEnd = 3 + (int)minimap.PreviewHeight;
             Assert.InRange(previewEnd, 210, (int)minimap.Bounds.Height - 10);
+            var visibleEnd = Math.Max(view.DocumentHeight, view.ScrollOffset.Y + view.Bounds.Height);
+            var textEnd = 3 + (int)(minimap.PreviewHeight * view.DocumentHeight / visibleEnd);
             var size = new PixelSize((int)minimap.Bounds.Width, (int)minimap.Bounds.Height);
             using var bitmap = new RenderTargetBitmap(size);
             using var pixels = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
@@ -3658,7 +3736,7 @@ public sealed class WorkspaceTests
             bitmap.CopyPixels(frame);
 
             Assert.NotEqual(FocusTheme.Editor.Color, ReadPixel(0, previewEnd - 6));
-            Assert.NotEqual(ReadPixel(65, previewEnd - 2), ReadPixel(3, previewEnd - 2));
+            Assert.Contains(Enumerable.Range(textEnd - 6, 6), y => ReadPixel(65, y) != ReadPixel(3, y));
             Assert.Equal(FocusTheme.Editor.Color, ReadPixel(0, previewEnd + 2));
 
             Color ReadPixel(int x, int y)

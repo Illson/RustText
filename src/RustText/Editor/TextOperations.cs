@@ -51,11 +51,16 @@ internal static class TextOperations
         cancellationToken.ThrowIfCancellationRequested();
         var hits = new List<SearchHit>(Math.Min(resultLimit, 256));
         var carets = caretLimit > 0 ? new List<CaretRange>() : null;
+        const int bucketsPerDimension = 1024;
+        const int maxMinimapMarkers = 2 * bucketsPerDimension;
         var minimapOffsets = new List<int>();
-        const int maxMinimapMarkers = 1024;
-        // Keep the overview bounded even when most lines match.
-        var linesPerMarker = Math.Max(1, (minimapLineCount - 1) / maxMinimapMarkers + 1);
-        var lastMarker = -1;
+        var sampledOffsets = new List<int>();
+        var sampleMinimap = false;
+        // When markers exceed the limit, keep coverage across physical rows and long wrapped rows.
+        var linesPerMarker = Math.Max(1, (minimapLineCount - 1) / bucketsPerDimension + 1);
+        var charsPerMarker = Math.Max(1, (text.Length - 1) / bucketsPerDimension + 1);
+        var lastLineBucket = -1;
+        var lastOffsetBucket = -1;
         var count = 0;
         var line = 1;
         var lineStart = 0;
@@ -87,10 +92,19 @@ internal static class TextOperations
                     lineEnd = EndOfLine(lineStart);
                 }
 
-                if (showOnMinimap && (line - 1) / linesPerMarker > lastMarker)
+                if (showOnMinimap)
                 {
-                    lastMarker = (line - 1) / linesPerMarker;
-                    minimapOffsets.Add(match.Index);
+                    if (minimapOffsets.Count < maxMinimapMarkers) minimapOffsets.Add(match.Index);
+                    else sampleMinimap = true;
+
+                    var lineBucket = (line - 1) / linesPerMarker;
+                    var offsetBucket = match.Index / charsPerMarker;
+                    if (lineBucket != lastLineBucket || offsetBucket != lastOffsetBucket)
+                    {
+                        sampledOffsets.Add(match.Index);
+                        lastLineBucket = lineBucket;
+                        lastOffsetBucket = offsetBucket;
+                    }
                 }
 
                 if (!showInResults) continue;
@@ -107,7 +121,8 @@ internal static class TextOperations
         cancellationToken.ThrowIfCancellationRequested();
         return Summary(Stopwatch.GetElapsedTime(started) >= SearchBudget);
 
-        SearchSummary Summary(bool timedOut) => new(hits, count, timedOut, carets, minimapOffsets);
+        SearchSummary Summary(bool timedOut) =>
+            new(hits, count, timedOut, carets, sampleMinimap ? sampledOffsets : minimapOffsets);
 
         int EndOfLine(int start) => text.IndexOf('\n', start) is var end && end >= 0 ? end : text.Length;
     }

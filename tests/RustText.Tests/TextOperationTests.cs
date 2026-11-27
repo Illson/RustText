@@ -10,6 +10,16 @@ namespace RustText.Tests;
 
 public sealed class TextOperationTests
 {
+    [Fact]
+    public void MinimapKeepsSparseMatchesWithinOneOffsetBucket()
+    {
+        var content = "needle" + new string(' ', 20) + "needle" + new string('x', 200_000);
+        var matcher = new TextMatcher(new("needle", false, false, false));
+        var result = TextOperations.Find(content, matcher, resultLimit: 1, cancellationToken: default, minimapLineCount: 1);
+
+        Assert.Equal([0, 26], result.MinimapOffsets);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]

@@ -67,6 +67,19 @@ internal sealed class JsonFolding(TextEditor editor, JsonColorizer colorizer) : 
         }
     }
 
+    internal static FoldingSection? FindCollapsed(FoldingManager? manager, int offset)
+    {
+        if (manager is null) return null;
+        FoldingSection? outermost = null;
+        foreach (var section in manager.GetFoldingsContaining(offset))
+        {
+            if (section.IsFolded && offset < section.EndOffset
+                && (outermost is null || section.StartOffset < outermost.StartOffset))
+                outermost = section;
+        }
+        return outermost;
+    }
+
     public void Reveal(int offset)
     {
         if (_manager is null) return;

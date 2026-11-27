@@ -445,7 +445,8 @@ internal sealed partial class LogView : UserControl, IDisposable
         }
     }
 
-    private async Task<bool> OpenSearchHitAsync(LogSearchHit hit, LogSearchSnapshot snapshot, CancellationToken token = default)
+    private async Task<bool> OpenSearchHitAsync(LogSearchHit hit, LogSearchSnapshot snapshot, CancellationToken token = default,
+        bool localSearch = true)
     {
         if (!IsSearchSnapshotCurrent(snapshot))
         {
@@ -457,7 +458,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         if (_closed || _busy || PageNavigationBlocked) return false;
         if (_levelFilterViewport?.IsVisible == true) CloseInlineLevelFilter();
         StopFollowingEnd();
-        _activeSearchResult = _searchResults.IndexOf(hit);
+        if (localSearch) _activeSearchResult = _searchResults.IndexOf(hit);
         if (!DisplaysSearchHit(hit))
         {
             var pageBytes = Math.Clamp(hit.LineLengthBytes, LogDataReader.DefaultPageBytes, LogDataReader.MaximumSearchLineBytes);
@@ -478,8 +479,12 @@ internal sealed partial class LogView : UserControl, IDisposable
             if (PageNavigationBlocked || !DisplaysSearchHit(hit)) return false;
         }
 
-        _selectedSearchHit = hit;
-        UpdateMinimapSearch();
+        if (localSearch)
+        {
+            _selectedSearchHit = hit;
+            UpdateMinimapSearch();
+        }
+
         if (_pageEdit is not null)
         {
             _pageEditor!.Select(hit.MatchIndex, hit.MatchLength);
@@ -581,6 +586,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _lineNumberLabel.Text = string.Empty;
         _positionLabel.Text = string.Empty;
         _searchStatusText.Text = string.Empty;
+        _workspaceSearchMatch = null;
         ClearSearchResults();
         _minimap.Widths = [];
         _previousOffsets.Clear();
@@ -1555,7 +1561,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         ArgumentNullException.ThrowIfNull(snapshot);
         ArgumentNullException.ThrowIfNull(hit);
         if (PageNavigationBlocked || _closed || _busy || !IsSearchSnapshotCurrent(snapshot)) return false;
-        return await OpenSearchHitAsync(hit, snapshot);
+        return await OpenSearchHitAsync(hit, snapshot, localSearch: false);
     }
 
     private LogSearchPage SearchFile(LogSearchSnapshot snapshot, SearchOptions options, LogSearchCursor cursor,
@@ -1951,6 +1957,7 @@ internal sealed partial class LogView : UserControl, IDisposable
         _totalLineCount = null;
         RefreshLineCount();
         _skippedSearchLines.Clear();
+        _workspaceSearchMatch = null;
         ClearSearchResults();
         _searchStatusText.Text = "";
         _logText.SelectionStart = _logText.SelectionEnd = 0;
@@ -1997,7 +2004,7 @@ internal sealed partial class LogView : UserControl, IDisposable
             if (appended)
             {
                 _fileStamp = now;
-                _minimap.SetSearchRange(_hiddenOffset, now.Length);
+                UpdateMinimapViewport();
                 _totalLineCount = null;
                 RefreshBookmarkProof();
                 if (FollowEnd || _page?.HasMore != true || EditsPagesByDefault || preservedDraft)
