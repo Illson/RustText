@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
@@ -22,6 +23,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private const int MinMarkerHeight = 8;
     private readonly TextEditor _editor;
     private readonly Pen _viewportBorder = new(FocusTheme.Accent, 1);
+    private readonly ConditionalWeakTable<VisualLine, Dictionary<int, double>> _searchRowPositions = new();
     private WriteableBitmap? _preview;
     private (double Height, double Width, double LineHeight) _previewLayout;
     private bool _previewDirty = true;
@@ -69,6 +71,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
         _editor.TextChanged -= OnTextChanged;
         _editor.RemoveHandler(ScrollViewer.ScrollChangedEvent, OnScrollChanged);
         _editor.TextArea.TextView.VisualLinesChanged -= OnVisualLinesChanged;
+        _searchRowPositions.Clear();
         _preview?.Dispose();
         _preview = null;
         _previewDirty = true;
@@ -132,7 +135,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
             var fraction = (line.LineNumber - 0.5) / lineCount;
             if (layoutHeight > 0)
             {
-                var y = SearchMarkerDocumentY(view, document, folding, line, offset, layoutHeight);
+                var y = SearchMarkerDocumentY(view, document, folding, line, offset, layoutHeight, cachePosition: !current);
                 if (y is null) return;
                 fraction = y.Value / trackHeight;
             }
@@ -142,8 +145,8 @@ internal sealed class DocumentMinimap : Control, IDisposable
         }
     }
 
-    private static double? SearchMarkerDocumentY(TextView view, TextDocument document, FoldingManager? folding,
-        DocumentLine line, int offset, double layoutHeight)
+    private double? SearchMarkerDocumentY(TextView view, TextDocument document, FoldingManager? folding,
+        DocumentLine line, int offset, double layoutHeight, bool cachePosition)
     {
         double LineBottom(DocumentLine row) => row.NextLine is { } next
             ? view.GetVisualTopByDocumentLine(next.LineNumber) : layoutHeight;
@@ -168,9 +171,17 @@ internal sealed class DocumentMinimap : Control, IDisposable
             && view.GetVisualLine(anchor.LineNumber) is { } visibleLine
             && visibleLine.LastDocumentLine.LineNumber >= line.LineNumber)
         {
+            // The same formatted line can move when preceding lines change height.
+            if (_searchRowPositions.TryGetValue(visibleLine, out var positions)
+                && positions.TryGetValue(offset, out var relativeY))
+                return visibleLine.VisualTop + relativeY;
+
             var column = visibleLine.GetVisualColumn(offset - visibleLine.FirstDocumentLine.Offset);
             var textLine = visibleLine.GetTextLine(column, false);
-            return visibleLine.GetTextLineVisualYPosition(textLine, VisualYPosition.LineMiddle);
+            var y = visibleLine.GetTextLineVisualYPosition(textLine, VisualYPosition.LineMiddle);
+            if (cachePosition)
+                (positions ?? _searchRowPositions.GetOrCreateValue(visibleLine))[offset] = y - visibleLine.VisualTop;
+            return y;
         }
 
         var row = (int)((long)(anchorOffset - anchor.Offset) * rowCount / Math.Max(1, anchor.Length));
@@ -193,12 +204,17 @@ internal sealed class DocumentMinimap : Control, IDisposable
     public void SetSearchOffsets(IReadOnlyList<int> offsets)
     {
         _searchOffsets = offsets;
+        _searchRowPositions.Clear();
         InvalidateVisual();
     }
 
     public void ShowSearch(bool hasPattern, bool onlyCurrent, (int Offset, int Length)? current)
     {
-        if (!hasPattern) _searchOffsets = [];
+        if (!hasPattern)
+        {
+            _searchOffsets = [];
+            _searchRowPositions.Clear();
+        }
         _showAllMatches = hasPattern && !onlyCurrent;
         _currentMatchOffset = current is { Length: > 0 } match ? match.Offset : null;
         InvalidateVisual();
@@ -354,6 +370,7 @@ internal sealed class DocumentMinimap : Control, IDisposable
     private void OnTextChanged(object? sender, EventArgs e)
     {
         _searchOffsets = [];
+        _searchRowPositions.Clear();
         _currentMatchOffset = null;
         InvalidatePreview();
     }
