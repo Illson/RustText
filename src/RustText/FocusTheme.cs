@@ -263,11 +263,11 @@ internal static class FocusTheme
         [AppTheme.Neon] = new(
             "#090B15", "#070912", "#101426", "#171B2D", "#0D1120", "#33405D",
             "#E9F6FF", "#A4B4D0", "#7888AA", "#22E6FF", "#75F2FF", "#202D49",
-            "#284468", "#38461E", "#4C5B24", "#FFD166", "#FF5C91", "#48233D",
+            "#284468", "#1D4055", "#4C5B24", "#FFD166", "#FF5C91", "#48233D",
             "#66F5C8", "#76CFFF", "#262047", "#5E4F91", "#37275D", "#F0E9FF",
             "#8CDFFF", "#82F2D2", "#FFD166", "#FF7DB8")
         {
-            MatchMarker = "#A9D54D",
+            MatchMarker = "#56D1F0",
             CurrentMatchMarker = "#DBFA75",
             EditorCaret = "#71F2FF",
             EditorSelection = "#192D46",
@@ -278,12 +278,12 @@ internal static class FocusTheme
         [AppTheme.ViceCity] = new(
             "#15121E", "#120F1A", "#191524", "#221B30", "#201A2D", "#4A3659",
             "#E8DEF3", "#B9AACA", "#9886AE", "#FF62AD", "#FF91C5", "#2D233D",
-            "#493052", "#653543", "#784252", "#FFD08F", "#FF829C", "#3B1E32",
+            "#493052", "#264A45", "#315B53", "#FFD08F", "#FF829C", "#3B1E32",
             "#89E0CD", "#69E0D6", "#2F213C", "#825478", "#382541", "#F5DFEC",
             "#FF83BC", "#89E0CD", "#FFD08F", "#B6A4F4")
         {
-            MatchMarker = "#EF846F",
-            CurrentMatchMarker = "#FFAA8E",
+            MatchMarker = "#6ACCB2",
+            CurrentMatchMarker = "#98F5D5",
             Toolbar = "#69E0D6",
             AppIconForeground = "#69E0D6",
             AppIconBackground = "#221B30",
